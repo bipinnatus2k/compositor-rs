@@ -1,0 +1,595 @@
+//! The workspace: window layout, the action dispatch for every menu item and
+//! keyboard shortcut, and the status bar.
+
+use gpui_kit::{div, px, rgb, Context, IntoElement, InteractiveElement, ParentElement, Render, Styled, Window};
+
+use compositor_core::document::NavigationTool;
+use compositor_core::filters::FilterKind;
+use compositor_core::session::SelectionAmountOperation;
+
+use crate::keys;
+use crate::state::{AppState, SheetKind};
+use crate::ui::{text_label, FG_DIM};
+
+impl Render for AppState {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("workspace")
+            .key_context("Compositor")
+            .track_focus(&self.focus)
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(crate::ui::BG_APP))
+            .text_color(rgb(crate::ui::FG_TEXT))
+            .text_size(px(12.0))
+            // Tools
+            .on_action(cx.listener(Self::on_tool_move))
+            .on_action(cx.listener(Self::on_tool_marquee))
+            .on_action(cx.listener(Self::on_tool_lasso))
+            .on_action(cx.listener(Self::on_tool_wand))
+            .on_action(cx.listener(Self::on_tool_crop))
+            .on_action(cx.listener(Self::on_tool_brush))
+            .on_action(cx.listener(Self::on_tool_eraser))
+            .on_action(cx.listener(Self::on_tool_healing))
+            .on_action(cx.listener(Self::on_tool_clone))
+            .on_action(cx.listener(Self::on_tool_smear))
+            .on_action(cx.listener(Self::on_tool_gradient))
+            .on_action(cx.listener(Self::on_tool_shape))
+            .on_action(cx.listener(Self::on_tool_type))
+            .on_action(cx.listener(Self::on_tool_eyedropper))
+            .on_action(cx.listener(Self::on_tool_hand))
+            .on_action(cx.listener(Self::on_tool_zoom))
+            // Palette and modes
+            .on_action(cx.listener(Self::on_swap_colors))
+            .on_action(cx.listener(Self::on_default_colors))
+            .on_action(cx.listener(Self::on_cycle_tool_mode))
+            // File
+            .on_action(cx.listener(Self::on_new_canvas))
+            .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_export))
+            .on_action(cx.listener(Self::on_close_document))
+            // Edit
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
+            .on_action(cx.listener(Self::on_fill_foreground))
+            .on_action(cx.listener(Self::on_fill_background))
+            .on_action(cx.listener(Self::on_free_transform))
+            .on_action(cx.listener(Self::on_shortcuts))
+            // Image
+            .on_action(cx.listener(Self::on_image_size))
+            .on_action(cx.listener(Self::on_canvas_size))
+            .on_action(cx.listener(Self::on_trim))
+            .on_action(cx.listener(Self::on_crop_to_selection))
+            .on_action(cx.listener(Self::on_flip_canvas_h))
+            .on_action(cx.listener(Self::on_flip_canvas_v))
+            .on_action(cx.listener(Self::on_levels))
+            .on_action(cx.listener(Self::on_hue_saturation))
+            // Layer
+            .on_action(cx.listener(Self::on_new_layer))
+            .on_action(cx.listener(Self::on_duplicate_layer))
+            .on_action(cx.listener(Self::on_delete_layer))
+            .on_action(cx.listener(Self::on_merge_down))
+            .on_action(cx.listener(Self::on_new_group))
+            .on_action(cx.listener(Self::on_add_mask))
+            .on_action(cx.listener(Self::on_flip_layer_h))
+            .on_action(cx.listener(Self::on_flip_layer_v))
+            // Select
+            .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_deselect))
+            .on_action(cx.listener(Self::on_invert_selection))
+            .on_action(cx.listener(Self::on_feather))
+            .on_action(cx.listener(Self::on_expand))
+            .on_action(cx.listener(Self::on_contract))
+            // Filter
+            .on_action(cx.listener(Self::on_filter_blur))
+            .on_action(cx.listener(Self::on_filter_motion))
+            .on_action(cx.listener(Self::on_filter_noise))
+            .on_action(cx.listener(Self::on_filter_lens))
+            .on_action(cx.listener(Self::on_filter_camera_raw))
+            // View
+            .on_action(cx.listener(Self::on_toggle_rulers))
+            .on_action(cx.listener(Self::on_toggle_grid))
+            .on_action(cx.listener(Self::on_toggle_guides))
+            .on_action(cx.listener(Self::on_toggle_pixel_grid))
+            .on_action(cx.listener(Self::on_snap_guides))
+            .on_action(cx.listener(Self::on_snap_grid))
+            .on_action(cx.listener(Self::on_snap_layers))
+            .on_action(cx.listener(Self::on_snap_bounds))
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_zoom_fit))
+            .on_action(cx.listener(Self::on_zoom_100))
+            // Window / Help
+            .on_action(cx.listener(Self::on_reset_panels))
+            .on_action(cx.listener(Self::on_about))
+            // Canvas keys
+            .on_action(cx.listener(Self::on_nudge_left))
+            .on_action(cx.listener(Self::on_nudge_right))
+            .on_action(cx.listener(Self::on_nudge_up))
+            .on_action(cx.listener(Self::on_nudge_down))
+            .on_action(cx.listener(Self::on_nudge_left_more))
+            .on_action(cx.listener(Self::on_nudge_right_more))
+            .on_action(cx.listener(Self::on_nudge_up_more))
+            .on_action(cx.listener(Self::on_nudge_down_more))
+            .on_action(cx.listener(Self::on_brush_smaller))
+            .on_action(cx.listener(Self::on_brush_larger))
+            .on_action(cx.listener(Self::on_finish_lasso))
+            .on_action(cx.listener(Self::on_cancel))
+            // Layout
+            .child(crate::menu::render_menu_bar(self))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_tool_rail(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_options_header(cx))
+                            .child(self.render_canvas(cx)),
+                    )
+                    .child(self.render_layers_panel(cx)),
+            )
+            .child(self.render_status_bar(cx))
+            .children(self.render_sheet_overlay(cx))
+    }
+}
+
+fn color_bytes(color: compositor_core::document::PaletteColor) -> [u8; 4] {
+    [
+        (color.red * 255.0).round() as u8,
+        (color.green * 255.0).round() as u8,
+        (color.blue * 255.0).round() as u8,
+        255,
+    ]
+}
+
+impl AppState {
+    // MARK: Tools
+
+    fn on_tool_move(&mut self, _: &keys::ToolMove, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Move, cx));
+    }
+    fn on_tool_marquee(&mut self, _: &keys::ToolMarquee, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Marquee, cx));
+    }
+    fn on_tool_lasso(&mut self, _: &keys::ToolLasso, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Lasso, cx));
+    }
+    fn on_tool_wand(&mut self, _: &keys::ToolWand, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Wand, cx));
+    }
+    fn on_tool_crop(&mut self, _: &keys::ToolCrop, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Crop, cx));
+    }
+    fn on_tool_brush(&mut self, _: &keys::ToolBrush, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Brush, cx));
+    }
+    fn on_tool_eraser(&mut self, _: &keys::ToolEraser, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool_eraser(cx));
+    }
+    fn on_tool_healing(&mut self, _: &keys::ToolHealing, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::SpotHealing, cx));
+    }
+    fn on_tool_clone(&mut self, _: &keys::ToolClone, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::CloneStamp, cx));
+    }
+    fn on_tool_smear(&mut self, _: &keys::ToolSmear, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Blur, cx));
+    }
+    fn on_tool_gradient(&mut self, _: &keys::ToolGradient, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Gradient, cx));
+    }
+    fn on_tool_shape(&mut self, _: &keys::ToolShape, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Shape, cx));
+    }
+    fn on_tool_type(&mut self, _: &keys::ToolType, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Type, cx));
+    }
+    fn on_tool_eyedropper(&mut self, _: &keys::ToolEyedropper, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Eyedropper, cx));
+    }
+    fn on_tool_hand(&mut self, _: &keys::ToolHand, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Hand, cx));
+    }
+    fn on_tool_zoom(&mut self, _: &keys::ToolZoom, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Zoom, cx));
+    }
+
+    fn on_swap_colors(&mut self, _: &keys::SwapColors, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.swap_palette_colors();
+            t.touch(cx);
+        });
+    }
+    fn on_default_colors(&mut self, _: &keys::DefaultColors, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.reset_palette_colors();
+            t.touch(cx);
+        });
+    }
+    fn on_cycle_tool_mode(&mut self, _: &keys::CycleToolMode, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.cycle_tool_mode(cx));
+    }
+
+    // MARK: File
+
+    fn on_new_canvas(&mut self, _: &keys::NewCanvas, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::NewCanvas, _w, cx);
+    }
+    fn on_open(&mut self, _: &keys::OpenDocument, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Open, _w, cx);
+    }
+    fn on_save(&mut self, _: &keys::SaveDocument, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::SaveComp, _w, cx);
+    }
+    fn on_export(&mut self, _: &keys::ExportPng, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::ExportPng, _w, cx);
+    }
+    fn on_close_document(&mut self, _: &keys::CloseDocument, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.cancel_crop();
+        self.session.cancel_transform();
+        self.session.document = None;
+        self.session.active_layer_id = None;
+        self.session.selected_layer_ids.clear();
+        self.fit_for = (0, 0);
+        self.touch(cx);
+    }
+
+    // MARK: Edit
+
+    fn on_undo(&mut self, _: &keys::Undo, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.undo();
+        self.touch(cx);
+    }
+    fn on_redo(&mut self, _: &keys::Redo, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.redo();
+        self.touch(cx);
+    }
+    fn on_fill_foreground(&mut self, _: &keys::FillForeground, _w: &mut Window, cx: &mut Context<Self>) {
+        let color = color_bytes(self.session.palette_color(false));
+        self.fill_active(color, "Fill Foreground", cx);
+    }
+    fn on_fill_background(&mut self, _: &keys::FillBackground, _w: &mut Window, cx: &mut Context<Self>) {
+        let color = color_bytes(self.session.palette_color(true));
+        self.fill_active(color, "Fill Background", cx);
+    }
+    fn on_free_transform(&mut self, _: &keys::FreeTransform, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.begin_transform();
+        self.touch(cx);
+    }
+    fn on_shortcuts(&mut self, _: &keys::ShowShortcuts, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Shortcuts, _w, cx);
+    }
+
+    // MARK: Image
+
+    fn on_image_size(&mut self, _: &keys::ImageSize, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::ImageSize, _w, cx);
+    }
+    fn on_canvas_size(&mut self, _: &keys::CanvasSize, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::CanvasSize, _w, cx);
+    }
+    fn on_trim(&mut self, _: &keys::TrimSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Trim, _w, cx);
+    }
+    fn on_crop_to_selection(&mut self, _: &keys::CropToSelection, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(selection) = self.session.selection() {
+            if let Some(bounds) = selection.path.bounds() {
+                self.session.crop_rect = Some(bounds);
+                self.set_status("Crop to selection: press Apply in the Crop header", cx);
+            }
+        }
+    }
+    fn on_flip_canvas_h(&mut self, _: &keys::FlipCanvasHorizontal, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.flip_canvas(true);
+        self.touch(cx);
+    }
+    fn on_flip_canvas_v(&mut self, _: &keys::FlipCanvasVertical, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.flip_canvas(false);
+        self.touch(cx);
+    }
+
+    fn on_levels(&mut self, _: &keys::LevelsSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Levels, w, cx);
+    }
+    fn on_hue_saturation(&mut self, _: &keys::HueSaturationSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::HueSaturation, w, cx);
+    }
+
+    // MARK: Layer
+
+    fn on_new_layer(&mut self, _: &keys::NewLayer, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.add_blank_layer();
+        self.touch(cx);
+    }
+    fn on_duplicate_layer(&mut self, _: &keys::DuplicateLayer, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.duplicate_active_layer();
+        self.touch(cx);
+    }
+    fn on_delete_layer(&mut self, _: &keys::DeleteLayer, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.delete_active_layer();
+            t.touch(cx);
+        });
+    }
+    fn on_merge_down(&mut self, _: &keys::MergeDown, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.merge_layers();
+        self.touch(cx);
+    }
+    fn on_new_group(&mut self, _: &keys::NewGroup, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_group(cx);
+    }
+    fn on_add_mask(&mut self, _: &keys::AddMask, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.add_layer_mask(true);
+        self.touch(cx);
+    }
+    fn on_flip_layer_h(&mut self, _: &keys::FlipLayerHorizontal, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.flip_layers(true);
+        self.touch(cx);
+    }
+    fn on_flip_layer_v(&mut self, _: &keys::FlipLayerVertical, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.flip_layers(false);
+        self.touch(cx);
+    }
+
+    // MARK: Select
+
+    fn on_select_all(&mut self, _: &keys::SelectAllAction, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.select_all();
+        self.touch(cx);
+    }
+    fn on_deselect(&mut self, _: &keys::DeselectAction, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.deselect();
+        self.touch(cx);
+    }
+    fn on_invert_selection(&mut self, _: &keys::InvertSelection, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.invert_selection();
+        self.touch(cx);
+    }
+    fn on_feather(&mut self, _: &keys::FeatherSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Feather), _w, cx);
+    }
+    fn on_expand(&mut self, _: &keys::ExpandSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Expand), _w, cx);
+    }
+    fn on_contract(&mut self, _: &keys::ContractSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Contract), _w, cx);
+    }
+
+    // MARK: Filter
+
+    fn on_filter_blur(&mut self, _: &keys::FilterGaussianBlur, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::GaussianBlur), _w, cx);
+    }
+    fn on_filter_motion(&mut self, _: &keys::FilterMotionBlur, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::MotionBlur), _w, cx);
+    }
+    fn on_filter_noise(&mut self, _: &keys::FilterAddNoise, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::AddNoise), _w, cx);
+    }
+    fn on_filter_lens(&mut self, _: &keys::FilterLensCorrection, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::LensCorrection), _w, cx);
+    }
+    fn on_filter_camera_raw(&mut self, _: &keys::FilterCameraRaw, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::CameraRaw), _w, cx);
+    }
+
+    // MARK: View
+
+    fn on_toggle_rulers(&mut self, _: &keys::ToggleRulers, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.shows_rulers = !self.session.shows_rulers;
+        self.touch(cx);
+    }
+    fn on_toggle_grid(&mut self, _: &keys::ToggleGrid, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.shows_grid = !self.session.shows_grid;
+        self.touch(cx);
+    }
+    fn on_toggle_guides(&mut self, _: &keys::ToggleGuides, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.shows_guides = !self.session.shows_guides;
+        self.touch(cx);
+    }
+    fn on_toggle_pixel_grid(&mut self, _: &keys::TogglePixelGrid, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.shows_pixel_grid = !self.session.shows_pixel_grid;
+        self.touch(cx);
+    }
+    fn on_snap_guides(&mut self, _: &keys::SnapGuides, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.snap_to_guides = !self.session.snap_to_guides;
+        self.touch(cx);
+    }
+    fn on_snap_grid(&mut self, _: &keys::SnapGrid, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.snap_to_grid = !self.session.snap_to_grid;
+        self.touch(cx);
+    }
+    fn on_snap_layers(&mut self, _: &keys::SnapLayers, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.snap_to_layers = !self.session.snap_to_layers;
+        self.touch(cx);
+    }
+    fn on_snap_bounds(&mut self, _: &keys::SnapBounds, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.snap_to_document_bounds = !self.session.snap_to_document_bounds;
+        self.touch(cx);
+    }
+    fn on_zoom_in(&mut self, _: &keys::ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_at_viewport(2.0);
+        self.touch(cx);
+    }
+    fn on_zoom_out(&mut self, _: &keys::ZoomOut, _w: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_at_viewport(0.5);
+        self.touch(cx);
+    }
+    fn on_zoom_fit(&mut self, _: &keys::ZoomFit, _w: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_fit(self.viewport_size());
+        self.touch(cx);
+    }
+    fn on_zoom_100(&mut self, _: &keys::Zoom100, _w: &mut Window, cx: &mut Context<Self>) {
+        self.zoom = 1.0;
+        self.revision += 1;
+        self.touch(cx);
+    }
+
+    // MARK: Window / Help
+
+    fn on_reset_panels(&mut self, _: &keys::ResetPanels, _w: &mut Window, cx: &mut Context<Self>) {
+        self.set_status("Panel layout is fixed in this build", cx);
+    }
+    fn on_about(&mut self, _: &keys::About, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::About, _w, cx);
+    }
+
+    // MARK: Canvas keys
+
+    fn on_nudge_left(&mut self, _: &keys::NudgeLeft, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(-1.0, 0.0, false, w, cx);
+    }
+    fn on_nudge_right(&mut self, _: &keys::NudgeRight, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(1.0, 0.0, false, w, cx);
+    }
+    fn on_nudge_up(&mut self, _: &keys::NudgeUp, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(0.0, -1.0, false, w, cx);
+    }
+    fn on_nudge_down(&mut self, _: &keys::NudgeDown, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(0.0, 1.0, false, w, cx);
+    }
+    fn on_nudge_left_more(&mut self, _: &keys::NudgeLeftMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(-10.0, 0.0, true, w, cx);
+    }
+    fn on_nudge_right_more(&mut self, _: &keys::NudgeRightMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(10.0, 0.0, true, w, cx);
+    }
+    fn on_nudge_up_more(&mut self, _: &keys::NudgeUpMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(0.0, -10.0, true, w, cx);
+    }
+    fn on_nudge_down_more(&mut self, _: &keys::NudgeDownMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge(0.0, 10.0, true, w, cx);
+    }
+    fn on_brush_smaller(&mut self, _: &keys::BrushSmaller, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, w, cx| t.resize_brush(1.0 / 1.25, w, cx));
+    }
+    fn on_brush_larger(&mut self, _: &keys::BrushLarger, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, w, cx| t.resize_brush(1.25, w, cx));
+    }
+    fn on_finish_lasso(&mut self, _: &keys::FinishLasso, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.session.lasso_draft.is_some() {
+            self.session.finish_lasso();
+            self.touch(cx);
+        }
+    }
+    fn on_cancel(&mut self, _: &keys::CancelAction, _w: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_active(cx);
+    }
+
+    // MARK: Shared handler helpers
+
+    /// Runs a hotkey body only when no text input or sheet owns the keyboard.
+    fn hotkey(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        body: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        if self.canvas_keys_active(window, cx) {
+            body(self, window, cx);
+        }
+    }
+
+    pub(crate) fn zoom_at_viewport(&mut self, factor: f64) {
+        let size = self.viewport_size();
+        self.zoom_at((size.0 / 2.0, size.1 / 2.0), factor);
+    }
+
+    pub(crate) fn viewport_size(&self) -> (f32, f32) {
+        (
+            f32::from(self.viewport.size.width),
+            f32::from(self.viewport.size.height),
+        )
+    }
+
+    fn nudge(&mut self, dx: f64, dy: f64, large: bool, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            let scale = if large { 10.0 } else { 1.0 };
+            if t.session.transform_edit.is_some()
+                || (t.session.tool == NavigationTool::Move && t.session.can_transform())
+            {
+                t.session.nudge_layer(dx * scale, dy * scale);
+            } else {
+                t.session.nudge_selection(dx * scale, dy * scale);
+            }
+            t.touch(cx);
+        });
+    }
+
+    fn render_status_bar(&mut self, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let (width, height) = self.doc_size();
+        let tool = self.session.tool.label().to_string();
+        let zoom = format!("{:.0}%", self.zoom * 100.0);
+        let undo = self.session.history.undo_name().to_string();
+        let redo = self.session.history.redo_name().to_string();
+        let undo_text = if self.session.can_undo() {
+            format!("Undo: {}", undo)
+        } else {
+            "Undo: \u{2014}".to_string()
+        };
+        let redo_text = if self.session.can_redo() {
+            format!("Redo: {}", redo)
+        } else {
+            "Redo: \u{2014}".to_string()
+        };
+        let message = self
+            .status
+            .clone()
+            .or_else(|| self.session.brush_error.clone())
+            .unwrap_or_default();
+
+        div()
+            .id("status-bar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(24.0))
+            .px_2()
+            .flex_shrink_0()
+            .bg(rgb(crate::ui::BG_PANEL))
+            .border_t_1()
+            .border_color(gpui_kit::black().opacity(0.4))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(text_label(
+                        format!(
+                            "{} \u{d7} {} px",
+                            width as usize, height as usize
+                        ),
+                        false,
+                    ))
+                    .child(text_label(zoom, false))
+                    .child(text_label(tool, true)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .px_3()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(text_label(message, true).text_color(rgb(FG_DIM))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(text_label(undo_text, true))
+                    .child(text_label(redo_text, true)),
+            )
+            .into_any_element()
+    }
+}
