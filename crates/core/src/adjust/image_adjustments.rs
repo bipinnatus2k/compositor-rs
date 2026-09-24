@@ -121,6 +121,10 @@ impl ExposureSettings {
     }
 
     pub fn apply(&self, image: &Bitmap) -> Bitmap {
+        // Swift guards isValid before applying; invalid settings are a no-op.
+        if !self.is_valid() {
+            return image.clone();
+        }
         let mut result = image.clone();
         let t = self.table();
         let mut tables = [0.0f32; 768];
@@ -175,6 +179,9 @@ impl GradientMapSettings {
     }
 
     pub fn apply(&self, image: &Bitmap) -> Bitmap {
+        if !self.is_valid() {
+            return image.clone();
+        }
         let mut result = image.clone();
         adjust_gradient_map(&mut result, &self.table());
         result
@@ -308,6 +315,9 @@ impl BlackWhiteSettings {
     }
 
     pub fn apply(&self, image: &Bitmap) -> Bitmap {
+        if !self.is_valid() {
+            return image.clone();
+        }
         let mut result = image.clone();
         let weights: [f32; 6] = [
             (self.reds / 100.0) as f32,
@@ -456,6 +466,9 @@ impl ColorBalanceSettings {
     }
 
     pub fn apply(&self, image: &Bitmap) -> Bitmap {
+        if !self.is_valid() {
+            return image.clone();
+        }
         let mut result = image.clone();
         if self.is_identity() {
             return result;

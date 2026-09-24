@@ -850,6 +850,12 @@ impl Default for CameraRawOpticsSettings {
     }
 }
 
+/// The defringe eyedropper's hue centers and half-width
+/// (`CameraRaw.swift:498-500`).
+pub const DEFRINGE_PURPLE_CENTER: f64 = 290.0;
+pub const DEFRINGE_GREEN_CENTER: f64 = 90.0;
+pub const DEFRINGE_SPAN: f64 = 25.0;
+
 impl CameraRawOpticsSettings {
     pub const TONE_RANGE: (f64, f64) = (-100.0, 100.0);
     pub const UNIT_RANGE: (f64, f64) = (0.0, 100.0);
@@ -1590,6 +1596,10 @@ impl CameraRawSettings {
         visualize_point_color: i32,
         sharpen_mask: bool,
     ) -> Bitmap {
+        // Swift guards isValid before applying (CameraRaw.swift:224).
+        if !self.is_valid() {
+            return image.clone();
+        }
         let settings = self.normalized();
         if settings.is_identity() && clipping.is_none() && visualize_point_color < 0 && !sharpen_mask {
             return image.clone();
@@ -1859,6 +1869,78 @@ impl CameraRawSettings {
     }
 }
 
+/// Standard RGB → hue in degrees (0…360); gray returns 0
+/// (`CameraRaw.hueDegrees`).
+pub fn hue_degrees(red: f64, green: f64, blue: f64) -> f64 {
+    let max_c = red.max(green).max(blue);
+    let min_c = red.min(green).min(blue);
+    let chroma = max_c - min_c;
+    if chroma <= 1e-6 {
+        return 0.0;
+    }
+    let hue = if max_c == red {
+        (green - blue) / chroma
+    } else if max_c == green {
+        2.0 + (blue - red) / chroma
+    } else {
+        4.0 + (red - green) / chroma
+    };
+    let mut degrees = hue * 60.0;
+    if degrees < 0.0 {
+        degrees += 360.0;
+    }
+    degrees
+}
+
+/// The hue of one premultiplied pixel; `None` for a fully transparent sample
+/// (`sampleCameraRawDefringe`'s `bytes[3] > 0` guard).
+pub fn straight_pixel_hue(pixel: [u8; 4]) -> Option<f64> {
+    let alpha = pixel[3] as f64;
+    if alpha <= 0.0 {
+        return None;
+    }
+    let r = (pixel[0] as f64 / alpha).min(1.0);
+    let g = (pixel[1] as f64 / alpha).min(1.0);
+    let b = (pixel[2] as f64 / alpha).min(1.0);
+    Some(hue_degrees(r, g, b))
+}
+
+/// `sampleCameraRawDefringe`'s optics update: centers the purple or green
+/// defringe range on the sampled hue, whichever center is nearer; an amount
+/// still at zero starts at 50. `optics` ends normalized.
+pub fn apply_defringe_sample(optics: &mut CameraRawOpticsSettings, hue: f64) {
+    if (hue - DEFRINGE_PURPLE_CENTER).abs() < (hue - DEFRINGE_GREEN_CENTER).abs() {
+        optics.purple_hue_low = hue - DEFRINGE_SPAN;
+        optics.purple_hue_high = hue + DEFRINGE_SPAN;
+        if optics.purple_amount == 0.0 {
+            optics.purple_amount = 50.0;
+        }
+    } else {
+        optics.green_hue_low = hue - DEFRINGE_SPAN;
+        optics.green_hue_high = hue + DEFRINGE_SPAN;
+        if optics.green_amount == 0.0 {
+            optics.green_amount = 50.0;
+        }
+    }
+    *optics = optics.normalized();
+}
+
+/// `applyCameraRawAutoWhiteBalance`: selects the Auto mode and solves the
+/// temperature/tint for `image`. False when the solver had nothing to work
+/// with.
+pub fn apply_auto_white_balance(settings: &mut CameraRawSettings, image: &Bitmap) -> bool {
+    settings.white_balance = CameraRawWhiteBalance::Auto;
+    match CameraRawSettings::auto_balance(image) {
+        Some((temperature, tint)) => {
+            settings.temperature = temperature;
+            settings.tint = tint;
+            true
+        }
+        None => false,
+    }
+}
+
+
 /// `ImageAdjustmentPixels`/`CameraRawSettings.decode`: encoded sRGB to linear light.
 pub fn decode_linear(encoded: f64) -> f64 {
     if encoded <= 0.04045 {
@@ -1867,6 +1949,70 @@ pub fn decode_linear(encoded: f64) -> f64 {
         ((encoded + 0.055) / 1.055).powf(2.4)
     }
 }
+
+#[cfg(test)]
+mod eyedropper_tests {
+    use super::*;
+
+    #[test]
+    fn hue_degrees_walks_the_color_wheel() {
+        assert!((hue_degrees(1.0, 0.0, 0.0) - 0.0).abs() < 1e-9, "red");
+        assert!((hue_degrees(0.0, 1.0, 0.0) - 120.0).abs() < 1e-9, "green");
+        assert!((hue_degrees(0.0, 0.0, 1.0) - 240.0).abs() < 1e-9, "blue");
+        assert!((hue_degrees(1.0, 1.0, 0.5) - 60.0).abs() < 1e-9, "yellow");
+        assert_eq!(hue_degrees(0.5, 0.5, 0.5), 0.0, "gray has no hue");
+        // Magenta wraps past 360.
+        assert!((hue_degrees(1.0, 0.0, 1.0) - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn defringe_sample_centers_the_nearer_range() {
+        // A purple fringe (near 290) centers the purple handles.
+        let mut optics = CameraRawOpticsSettings::default();
+        apply_defringe_sample(&mut optics, 300.0);
+        assert!((optics.purple_hue_low - 275.0).abs() < 1e-9, "{optics:?}");
+        assert!((optics.purple_hue_high - 325.0).abs() < 1e-9);
+        assert!((optics.purple_amount - 50.0).abs() < 1e-9, "an untouched amount starts at 50");
+        assert_eq!(optics.green_amount, 0.0);
+        // A green fringe (near 90) centers the green handles instead.
+        let mut optics = CameraRawOpticsSettings::default();
+        apply_defringe_sample(&mut optics, 100.0);
+        assert!((optics.green_hue_low - 75.0).abs() < 1e-9);
+        assert!((optics.green_hue_high - 125.0).abs() < 1e-9);
+        assert_eq!(optics.purple_amount, 0.0);
+        // Normalized handles stay on the color wheel even across 0/360.
+        let mut optics = CameraRawOpticsSettings::default();
+        apply_defringe_sample(&mut optics, 359.0);
+        assert!((0.0..=360.0).contains(&optics.purple_hue_low), "{}", optics.purple_hue_low);
+        assert!((0.0..=360.0).contains(&optics.purple_hue_high), "{}", optics.purple_hue_high);
+    }
+
+    #[test]
+    fn straight_pixel_hue_skips_transparent_pixels() {
+        assert_eq!(straight_pixel_hue([255, 0, 0, 0]), None);
+        assert!(straight_pixel_hue([128, 0, 0, 128]).is_some());
+    }
+
+    #[test]
+    fn auto_white_balance_selects_auto_and_solves() {
+        // A gray field is already balanced: temperature and tint stay near 0.
+        let mut gray = Bitmap::new(8, 8);
+        for pixel in gray.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[128, 128, 128, 255]);
+        }
+        let mut settings = CameraRawSettings::default();
+        assert!(apply_auto_white_balance(&mut settings, &gray));
+        assert_eq!(settings.white_balance, CameraRawWhiteBalance::Auto);
+        assert!(settings.temperature.abs() < 5.0, "{}", settings.temperature);
+        assert!(settings.tint.abs() < 5.0, "{}", settings.tint);
+        // An empty image has nothing to solve.
+        let empty = Bitmap::new(4, 4);
+        let mut settings = CameraRawSettings::default();
+        assert!(!apply_auto_white_balance(&mut settings, &empty));
+    }
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Pixel kernels ported from Rendering/AdjustPixels.c.

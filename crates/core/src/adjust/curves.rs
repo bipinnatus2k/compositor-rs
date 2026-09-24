@@ -90,6 +90,11 @@ impl CurvesSettings {
     /// Applies the per-channel curves through the composite RGB curve, as the
     /// Swift `apply` does (channels 1…3 through channel 0).
     pub fn apply(&self, image: &crate::raster::Bitmap) -> crate::raster::Bitmap {
+        // Swift guards isValid before applying (Curves.swift:34); invalid
+        // settings leave the image untouched.
+        if !self.is_valid() {
+            return image.clone();
+        }
         let mut result = image.clone();
         let mut table = [0.0f32; 768];
         for channel in 1..4usize {
