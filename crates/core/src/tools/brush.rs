@@ -98,6 +98,9 @@ pub struct RasterEdit {
     previous: Option<CGPoint>,
     distance_to_next: f64,
     samples: Vec<CGPoint>,
+    /// Pointer-event segments in document pixels, for the continuous
+    /// deposition engine (`MetalBrushCoverage`).
+    segments: Vec<StrokeSegment>,
     /// Solid fill color overriding the brush color (`fill`).
     fill_color: Option<[u8; 4]>,
     /// Dab spacing state saved under the provisional tail.
@@ -187,6 +190,7 @@ impl RasterEdit {
             previous: None,
             distance_to_next: 0.0,
             samples: Vec::new(),
+            segments: Vec::new(),
             fill_color: None,
             tail_state: None,
             selection_clip,
@@ -238,6 +242,14 @@ impl RasterEdit {
             return;
         }
         self.restore_tail_state();
+        match self.segments.last().map(|s| (s[2], s[3])) {
+            // The first event is a zero-length segment: the initial click.
+            None => self.segments.push([point.x as f32, point.y as f32, point.x as f32, point.y as f32]),
+            Some((last_x, last_y)) if (last_x, last_y) != (point.x as f32, point.y as f32) => {
+                self.segments.push([last_x, last_y, point.x as f32, point.y as f32]);
+            }
+            _ => {}
+        }
         self.samples.push(point);
         if self.samples.len() > 4 {
             self.samples.remove(0);
@@ -416,11 +428,15 @@ impl RasterEdit {
         }
         let mut healed = self.base.clone();
         let opacity = self.settings.opacity as f32;
-        if !crate::tools::heal::spot_heal(&mut healed, &self.coverage, opacity, mode, seed) {
+        let coverage_mask = self.effective_coverage();
+        if !crate::tools::heal::spot_heal(&mut healed, &coverage_mask, opacity, mode, seed) {
             return false;
         }
         self.base = healed;
         self.coverage = GrayMask::new(self.width, self.height);
+        // The wet wash preview dies with the stroke's geometry; what is left
+        // is the healed pixels.
+        self.segments.clear();
         true
     }
 
@@ -428,6 +444,41 @@ impl RasterEdit {
     /// touched (Blur samples the layer through it).
     pub fn coverage(&self) -> &GrayMask {
         &self.coverage
+    }
+
+    /// The stroke's coverage: the continuous deposition engine's preview when
+    /// event segments exist (MetalBrushCoverage), else the dab-stamped grid.
+    fn effective_coverage(&self) -> GrayMask {
+        if self.segments.is_empty() {
+            return self.coverage.clone();
+        }
+        let mut tile = ContinuousTile {
+            permanent: vec![0.0; self.width * self.height],
+            preview: vec![0; self.width * self.height],
+            width: self.width,
+            height: self.height,
+        };
+        let params = ContinuousParams {
+            settled: &self.segments,
+            tail: &[],
+            origin: CGPoint::new(self.pixel_to_document.tx, self.pixel_to_document.ty),
+            axis_x: CGPoint::new(self.pixel_to_document.a, self.pixel_to_document.b),
+            axis_y: CGPoint::new(self.pixel_to_document.c, self.pixel_to_document.d),
+            radius: self.settings.diameter / 2.0,
+            hardness: self.settings.hardness,
+            antialias: self
+                .pixel_to_document
+                .a
+                .hypot(self.pixel_to_document.b)
+                .min(self.pixel_to_document.c.hypot(self.pixel_to_document.d))
+                .max(0.001),
+            spacing: (self.settings.diameter * spacing_fraction(self.settings.hardness)).max(0.25),
+            canvas: CGSize::new(self.canvas.width(), self.canvas.height()),
+        };
+        render_continuous_tile(&mut tile, &params);
+        let mut gray = GrayMask::new(self.width, self.height);
+        gray.data.copy_from_slice(&tile.preview);
+        gray
     }
 
     /// The composed grid: original content + edit × coverage × opacity.
@@ -442,8 +493,9 @@ impl RasterEdit {
         ]);
         let erase = self.settings.erasing && !self.is_mask;
         let heal = self.settings.healing && !self.is_mask;
+        let coverage = self.effective_coverage();
         for i in 0..(self.width * self.height) {
-            let cov = self.coverage.data[i] as u32;
+            let cov = coverage.data[i] as u32;
             if cov == 0 {
                 continue;
             }
@@ -500,7 +552,7 @@ impl RasterEdit {
                         continue;
                     }
                     let i = y * self.width + x;
-                    if self.coverage.data[i] == 0 {
+                    if coverage.data[i] == 0 {
                         continue;
                     }
                     let o = i * 4;
@@ -518,7 +570,11 @@ impl RasterEdit {
     /// `paintSnapshot`: the composed pixels, cropped to the tight bounds of
     /// the stroke plus the existing content, with the transform placing them.
     pub fn paint_snapshot(&self) -> (ImportedImage, LayerTransform, CGRect) {
-        let composed = self.result();
+        self.snapshot_of(&self.result())
+    }
+
+    /// The snapshot for an already-composed grid (fill / clear results).
+    pub fn snapshot_of(&self, composed: &Bitmap) -> (ImportedImage, LayerTransform, CGRect) {
         let mut bounds = if self.source.is_some() { Some(self.source_rect) } else { None };
         if !self.is_mask {
             if let Some(alpha_bounds) = composed.alpha_bounds() {
@@ -529,7 +585,7 @@ impl RasterEdit {
             }
         }
         let crop = bounds.unwrap_or(CGRect::new(0.0, 0.0, self.width as f64, self.height as f64));
-        let cropped = crate::filters::crop_bitmap(&composed, &crop);
+        let cropped = crate::filters::crop_bitmap(composed, &crop);
         let image = if self.is_mask {
             // Masks are stored as gray coverage.
             let mut gray = vec![0u8; cropped.width * cropped.height];
@@ -771,6 +827,184 @@ fn source_over_scaled(dst: &mut [u8], src: [u8; 4], cov: u32, opacity: f32) {
         dst[c] = (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     }
     dst[3] = (out_a * 255.0 + 0.5).min(255.0) as u8;
+}
+
+/// One stroke event: segment endpoints in document pixels
+/// `[x0, y0, x1, y1]` (`MetalBrushCoverage`'s float4 segments).
+pub type StrokeSegment = [f32; 4];
+
+/// Eight-point Gauss-Legendre nodes/weights (four symmetric pairs), as in
+/// the `continuousBrush` kernel.
+const GL_NODES: [f64; 4] = [0.1834346425, 0.5255324099, 0.7966664774, 0.9602898565];
+const GL_WEIGHTS: [f64; 4] = [0.3626837834, 0.3137066459, 0.2223810345, 0.1012285363];
+
+/// `MetalBrushCoverage.ContinuousTile`: permanent deposition density (soft
+/// tips) or maximum coverage (hard tips), plus the renderable preview.
+pub struct ContinuousTile {
+    pub permanent: Vec<f32>,
+    pub preview: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// The uniforms one tile's pass needs.
+pub struct ContinuousParams<'a> {
+    /// Committed segments; never accumulated into the replaceable tail.
+    pub settled: &'a [StrokeSegment],
+    /// The provisional tail; previews only, never permanent.
+    pub tail: &'a [StrokeSegment],
+    /// The tile's pixel (0, 0) in document pixels.
+    pub origin: CGPoint,
+    /// The tile grid's column and row directions in document pixels.
+    pub axis_x: CGPoint,
+    pub axis_y: CGPoint,
+    pub radius: f64,
+    pub hardness: f64,
+    /// Pixel-edge antialias width: min(‖column‖, ‖row‖), at least 0.001.
+    pub antialias: f64,
+    /// Deposition spacing: max(0.25, diameter × spacingFraction(hardness)).
+    pub spacing: f64,
+    pub canvas: CGSize,
+}
+
+fn brush_coverage(distance_squared: f64, radius: f64, hardness: f64, antialias: f64) -> f64 {
+    let distance = distance_squared.sqrt();
+    if hardness >= 1.0 {
+        // Hard tips already have a solid interior; pixel-edge antialiasing.
+        return ((radius - distance) / antialias + 0.5).clamp(0.0, 1.0);
+    }
+    let t = ((distance / radius - hardness) / (1.0 - hardness)).clamp(0.0, 1.0);
+    ((-2.5f64 * t * t).exp() - (-2.5f64).exp()).max(0.0) / (1.0 - (-2.5f64).exp())
+}
+
+/// Optical density adds; coverage is 1 − exp(−density) — the continuous form
+/// of source-over soft dabs at the shared deposition spacing.
+fn tip_density(distance_squared: f64, radius: f64, hardness: f64, antialias: f64) -> f64 {
+    -((1.0 - brush_coverage(distance_squared, radius, hardness, antialias)).max(0.001)).ln()
+}
+
+/// Paint deposited by one stroke event over the pixel at `p`, integrated by
+/// distance travelled with eight-point Gauss-Legendre quadrature clipped to
+/// the tip's support.
+fn segment_density(p: CGPoint, segment: &StrokeSegment, params: &ContinuousParams) -> f64 {
+    let (s0, s1) = (
+        CGPoint::new(segment[0] as f64, segment[1] as f64),
+        CGPoint::new(segment[2] as f64, segment[3] as f64),
+    );
+    let vx = s1.x - s0.x;
+    let vy = s1.y - s0.y;
+    let length = (vx * vx + vy * vy).sqrt();
+    if length < 1e-6 {
+        // Initial click.
+        let dx = p.x - s0.x;
+        let dy = p.y - s0.y;
+        return tip_density(dx * dx + dy * dy, params.radius, params.hardness, params.antialias);
+    }
+    let dir = (vx / length, vy / length);
+    let (dx, dy) = (p.x - s0.x, p.y - s0.y);
+    let projection = dx * dir.0 + dy * dir.1;
+    let perp_x = dx - projection * dir.0;
+    let perp_y = dy - projection * dir.1;
+    let perpendicular_squared = perp_x * perp_x + perp_y * perp_y;
+    let radius_squared = params.radius * params.radius;
+    if perpendicular_squared >= radius_squared {
+        return 0.0;
+    }
+    let reach = (radius_squared - perpendicular_squared).sqrt();
+    let lo = (projection - reach).max(0.0);
+    let hi = (projection + reach).min(length);
+    if hi <= lo {
+        return 0.0;
+    }
+    let midpoint = (lo + hi) * 0.5;
+    let half_length = (hi - lo) * 0.5;
+    let mut integral = 0.0;
+    for i in 0..4 {
+        let a = midpoint - half_length * GL_NODES[i] - projection;
+        let b = midpoint + half_length * GL_NODES[i] - projection;
+        integral += GL_WEIGHTS[i]
+            * (tip_density(
+                perpendicular_squared + a * a,
+                params.radius,
+                params.hardness,
+                params.antialias,
+            ) + tip_density(
+                perpendicular_squared + b * b,
+                params.radius,
+                params.hardness,
+                params.antialias,
+            ));
+    }
+    integral * half_length / params.spacing
+}
+
+fn segment_distance_squared(p: CGPoint, segment: &StrokeSegment) -> f64 {
+    let (s0, s1) = (
+        CGPoint::new(segment[0] as f64, segment[1] as f64),
+        CGPoint::new(segment[2] as f64, segment[3] as f64),
+    );
+    let vx = s1.x - s0.x;
+    let vy = s1.y - s0.y;
+    let dx = p.x - s0.x;
+    let dy = p.y - s0.y;
+    let dot = vx * dx + vy * dy;
+    let len_squared = vx * vx + vy * vy;
+    let t = (if len_squared > 0.0 { dot / len_squared } else { 0.0 }).clamp(0.0, 1.0);
+    let ex = dx - t * vx;
+    let ey = dy - t * vy;
+    ex * ex + ey * ey
+}
+
+/// The `continuousBrush` kernel, per tile: permanent paint and the
+/// replaceable tail stay separate — tail previews never accumulate into
+/// permanent paint, including at self-intersections.
+pub fn render_continuous_tile(tile: &mut ContinuousTile, params: &ContinuousParams) {
+    for y in 0..tile.height {
+        for x in 0..tile.width {
+            let index = y * tile.width + x;
+            let local = (x as f64 + 0.5, y as f64 + 0.5);
+            let p = CGPoint::new(
+                params.origin.x + local.0 * params.axis_x.x + local.1 * params.axis_y.x,
+                params.origin.y + local.0 * params.axis_x.y + local.1 * params.axis_y.y,
+            );
+            if p.x < 0.0
+                || p.y < 0.0
+                || p.x >= params.canvas.width
+                || p.y >= params.canvas.height
+            {
+                tile.preview[index] = 0;
+                continue;
+            }
+            if params.hardness >= 1.0 {
+                let mut settled = f64::INFINITY;
+                for segment in params.settled {
+                    settled = settled.min(segment_distance_squared(p, segment));
+                }
+                let mut tail = f64::INFINITY;
+                for segment in params.tail {
+                    tail = tail.min(segment_distance_squared(p, segment));
+                }
+                let value = (tile.permanent[index] as f64)
+                    .max(brush_coverage(settled, params.radius, params.hardness, params.antialias));
+                tile.permanent[index] = value as f32;
+                tile.preview[index] = (255.0
+                    * value.max(brush_coverage(tail, params.radius, params.hardness, params.antialias)))
+                    .round() as u8;
+            } else {
+                let mut value = tile.permanent[index] as f64;
+                for segment in params.settled {
+                    value += segment_density(p, segment, params);
+                }
+                let mut tail = 0.0;
+                for segment in params.tail {
+                    tail += segment_density(p, segment, params);
+                }
+                tile.permanent[index] = (value.min(20.0)) as f32;
+                tile.preview[index] =
+                    (255.0 * (1.0 - (-(value + tail).min(20.0)).exp())).round() as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1033,6 +1267,86 @@ mod heal_tests {
         // the smooth fill), leaving at most a partial step toward the ring.
         assert!(healed[0] > wash[0], "should move toward the ring: {healed:?}");
         assert_eq!(healed[3], 255);
+    }
+
+    #[test]
+    fn continuous_deposition_is_spacing_invariant() {
+        // A pixel equidistant from a short and a long event receives the same
+        // deposition: the quadrature clips to the tip's support and the
+        // length normalizes by the shared spacing.
+        let params = ContinuousParams {
+            settled: &[],
+            tail: &[],
+            origin: CGPoint::ZERO,
+            axis_x: CGPoint::new(1.0, 0.0),
+            axis_y: CGPoint::new(0.0, 1.0),
+            radius: 10.0,
+            hardness: 0.5,
+            antialias: 1.0,
+            spacing: 2.0,
+            canvas: CGSize::new(200.0, 100.0),
+        };
+        let short = [0.0f32, 0.0, 20.0, 0.0];
+        let long = [0.0f32, 0.0, 60.0, 0.0];
+        let p = CGPoint::new(10.0, 5.0);
+        let a = segment_density(p, &short, &params);
+        let b = segment_density(p, &long, &params);
+        assert!(a > 0.0, "{a}");
+        assert!((a - b).abs() < 1e-9, "short={a} long={b}");
+        // Farther from the line, less paint.
+        let far = segment_density(CGPoint::new(10.0, 9.0), &short, &params);
+        assert!(far < a, "far={far} near={a}");
+    }
+
+    #[test]
+    fn soft_continuous_click_deposits_a_dot() {
+        let mut edit = RasterEdit::new(
+            None,
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0)),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        edit.settings.diameter = 20.0;
+        edit.settings.hardness = 0.5;
+        edit.append(CGPoint::new(50.0, 50.0));
+        edit.flush();
+        // The event segment is a zero-length click, and the continuous
+        // engine (not a dab stamp) produces the coverage.
+        assert_eq!(edit.segments.len(), 1);
+        let coverage = edit.effective_coverage();
+        let center = coverage.data[50 * 100 + 50];
+        let corner = coverage.data[10 * 100 + 10];
+        assert!(center > 200, "{center}");
+        assert_eq!(corner, 0);
+        let out = edit.result();
+        assert!(out.pixel(50, 50)[3] > 100, "paint lands: {:?}", out.pixel(50, 50));
+    }
+
+    #[test]
+    fn tail_preview_never_enters_permanent_paint() {
+        let mut tile = ContinuousTile {
+            permanent: vec![0.0; 30 * 30],
+            preview: vec![0; 30 * 30],
+            width: 30,
+            height: 30,
+        };
+        let params = ContinuousParams {
+            settled: &[],
+            tail: &[[5.0f32, 15.0, 25.0, 15.0]],
+            origin: CGPoint::ZERO,
+            axis_x: CGPoint::new(1.0, 0.0),
+            axis_y: CGPoint::new(0.0, 1.0),
+            radius: 5.0,
+            hardness: 0.5,
+            antialias: 1.0,
+            spacing: 2.0,
+            canvas: CGSize::new(30.0, 30.0),
+        };
+        render_continuous_tile(&mut tile, &params);
+        assert!(tile.permanent.iter().all(|v| *v == 0.0), "tail is never permanent");
+        assert!(tile.preview.iter().any(|v| *v > 0), "the tail previews");
     }
 
     #[test]

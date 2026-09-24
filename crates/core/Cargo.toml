@@ -10,3 +10,4 @@ uuid.workspace = true
 image.workspace = true
 geo.workspace = true
 rayon.workspace = true
+fontdue = { version = "0.9", registry = "rsproxy-sparse" }

@@ -246,8 +246,8 @@ pub fn spot_heal(
         for x in 0..ww {
             let x = x as usize;
             let lo = ((x as i64) - ring).max(0) as usize;
-            let hi = ((x as i64 + ring + 1).min(wh) ) as usize;
-            near[y * ww as usize + x] = prefix[hi.min(prefix.len() - 1)] - prefix[lo] > 0;
+            let hi = ((x as i64) + ring + 1).min(ww) as usize;
+            near[y * ww as usize + x] = prefix[hi] - prefix[lo] > 0;
         }
     }
     for x in 0..ww {
@@ -506,5 +506,76 @@ mod tests {
         // Different seeds → different grain.
         assert_ne!(a.pixel(18, 18), b.pixel(18, 18));
         assert!(a.pixel(18, 18)[0] > 64);
+    }
+
+    #[test]
+    fn ring_reaches_both_sides_of_tall_boxes() {
+        // HealPixels.c clamps the row pass of the ring dilation to the box
+        // width; clamping it to the height instead thinned the ring along the
+        // right edge of work boxes taller than wide, so the spot's right
+        // columns healed from the left surroundings only.
+        let mut img = Bitmap::new(40, 48);
+        for y in 0..48 {
+            for x in 0..40 {
+                img.set_pixel(x, y, [200, 40, 40, 255]);
+            }
+        }
+        // A bright bar just right of the spot: inside its work box, exactly
+        // where the right-hand ring anchors belong.
+        for y in 12..36 {
+            for x in 22..24 {
+                img.set_pixel(x, y, [250, 60, 60, 255]);
+            }
+        }
+        let mut cov = GrayMask::new(40, 48);
+        // A 4×20 spot → work box 8×24 (wh > ww), ring 2.
+        for y in 14..34 {
+            for x in 18..22 {
+                cov.data[y * 40 + x] = 255;
+                img.set_pixel(x, y, [40, 10, 10, 255]);
+            }
+        }
+        assert!(spot_heal(&mut img, &cov, 1.0, 1, 7));
+        let left = img.pixel(18, 24)[0] as i32;
+        let right = img.pixel(21, 24)[0] as i32;
+        assert!(right > left + 15, "left={left} right={right}");
+        assert!(right > 215, "right column must pick up its own surround, got {right}");
+    }
+
+    #[test]
+    fn single_row_and_single_pixel_spots_heal() {
+        // HealPixels.c accepts one-pixel-wide or tall coverage; rejecting it
+        // made the spot-heal brush silently do nothing on 1px strokes.
+        let mut img = Bitmap::new(24, 24);
+        for y in 0..24 {
+            for x in 0..24 {
+                img.set_pixel(x, y, [200, 40, 40, 255]);
+            }
+        }
+        let mut cov = GrayMask::new(24, 24);
+        for x in 8..14 {
+            cov.data[12 * 24 + x] = 255;
+            img.set_pixel(x, 12, [30, 10, 10, 255]);
+        }
+        assert!(
+            spot_heal(&mut img, &cov, 1.0, 1, 3),
+            "a single-row spot must heal"
+        );
+        assert!(img.pixel(10, 12)[0] > 150, "{:?}", img.pixel(10, 12));
+
+        let mut img = Bitmap::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                img.set_pixel(x, y, [200, 40, 40, 255]);
+            }
+        }
+        let mut cov = GrayMask::new(16, 16);
+        cov.data[8 * 16 + 8] = 255;
+        img.set_pixel(8, 8, [30, 10, 10, 255]);
+        assert!(
+            spot_heal(&mut img, &cov, 1.0, 1, 3),
+            "a single-pixel spot must heal"
+        );
+        assert!(img.pixel(8, 8)[0] > 150, "{:?}", img.pixel(8, 8));
     }
 }

@@ -9,7 +9,6 @@ mod menu;
 mod sheets;
 mod sheets_ui;
 mod state;
-mod text_bitmap;
 mod tools;
 mod ui;
 mod workspace;

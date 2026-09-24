@@ -5,7 +5,6 @@
 //! `EditorSession.finishWarp` — reproduced in `finish_into_layer`).
 
 use crate::geometry::{CGPoint, CGSize};
-use crate::transform::LayerTransform;
 use crate::raster::Bitmap;
 use crate::session::BlurToolMode;
 
@@ -294,6 +293,7 @@ fn static_name(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::LayerTransform;
     use crate::tools::brush::BrushSettings;
 
     fn gray_surface(w: usize, h: usize, v: u8) -> Bitmap {

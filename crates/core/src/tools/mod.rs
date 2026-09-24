@@ -5,8 +5,10 @@
 
 pub mod brush;
 pub mod clone_stamp;
+pub mod distort;
 pub mod content_fill;
 pub mod heal;
 pub mod subject_removal;
+pub mod text;
 pub mod warp;
 pub mod wand;
