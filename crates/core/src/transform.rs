@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 pub enum LayerSampling {
     #[serde(rename = "Nearest")]
     Nearest,
-    #[default]
     #[serde(rename = "Smooth")]
     Smooth,
+    /// Swift's `LayerTransform.sampling` defaults to `.high`
+    /// (LayerTransform.swift:24); the manifest default agrees.
+    #[default]
     #[serde(rename = "High quality")]
     High,
 }

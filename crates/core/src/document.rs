@@ -5,7 +5,7 @@
 //! (`LayerShape`), `LayerAdjustment.swift`, `LayerEffects.swift`.
 
 use crate::geometry::{CGFloat, CGPoint, CGSize};
-use crate::raster::{Bitmap, GrayMask, ImportedImage};
+use crate::raster::{Bitmap, ImportedImage};
 use crate::selection::DocumentSelection;
 use crate::transform::LayerTransform;
 use serde::{Deserialize, Serialize};
@@ -605,6 +605,14 @@ pub struct CanvasDocument {
     pub selection: Option<DocumentSelection>,
 }
 
+/// `LayerHierarchy.Entry` — a Layers-panel row: the layer, its depth, and
+/// whether it shows.
+pub struct HierarchyEntry<'a> {
+    pub layer: &'a ImageLayer,
+    pub depth: usize,
+    pub visible: bool,
+}
+
 impl CanvasDocument {
     pub fn new(width: usize, height: usize) -> Self {
         CanvasDocument {
@@ -674,6 +682,60 @@ impl CanvasDocument {
         visible
     }
 
+    /// `LayerHierarchy.entries`: depth-first, parents before children,
+    /// siblings in array order (top first reverses siblings only). Groups list
+    /// even when collapsed; their children are then omitted. An invisible
+    /// folder marks its subtree invisible without hiding the folder itself.
+    pub fn hierarchy_entries(
+        &self,
+        top_first: bool,
+        collapsed: &std::collections::HashSet<Uuid>,
+    ) -> Vec<HierarchyEntry<'_>> {
+        let mut children: std::collections::HashMap<Option<Uuid>, Vec<&ImageLayer>> =
+            std::collections::HashMap::new();
+        for layer in &self.layers {
+            children.entry(layer.parent_id).or_default().push(layer);
+        }
+        let mut out: Vec<HierarchyEntry<'_>> = Vec::new();
+        let mut stack = vec![(None, 0usize, true)];
+        while let Some((parent, depth, visible)) = stack.pop() {
+            let Some(siblings) = children.get(&parent) else {
+                continue;
+            };
+            let mut ordered: Vec<&ImageLayer> = siblings.iter().copied().collect();
+            if top_first {
+                ordered.reverse();
+            }
+            // Push in reverse so the first sibling is visited first.
+            for layer in ordered.iter().rev() {
+                let effective = visible && layer.is_visible;
+                out.push(HierarchyEntry {
+                    layer,
+                    depth,
+                    visible: effective,
+                });
+                if layer.is_group && !collapsed.contains(&layer.id) {
+                    stack.push((Some(layer.id), depth + 1, effective));
+                }
+            }
+        }
+        out
+    }
+
+    /// Depth-first draw order (`CanvasDocument.renderLayers`): parents before
+    /// children, siblings in array order, folders skipped, and any layer under
+    /// a missing or hidden ancestor skipped with it.
+    pub fn render_layers(&self) -> Vec<&ImageLayer> {
+        let mut children: std::collections::HashMap<Option<Uuid>, Vec<&ImageLayer>> =
+            std::collections::HashMap::new();
+        for layer in &self.layers {
+            children.entry(layer.parent_id).or_default().push(layer);
+        }
+        let mut out = Vec::new();
+        visit_depth_first(None, &children, &mut out, 0);
+        out
+    }
+
     /// Every descendant of `id`, including itself.
     pub fn descendant_ids(&self, id: Uuid) -> HashSet<Uuid> {
         let mut result = HashSet::new();
@@ -693,6 +755,29 @@ impl CanvasDocument {
             }
         }
         result
+    }
+}
+
+/// `LayerHierarchy.entries` walk: one level of the depth-first render order.
+fn visit_depth_first<'a>(
+    parent: Option<Uuid>,
+    children: &std::collections::HashMap<Option<Uuid>, Vec<&'a ImageLayer>>,
+    out: &mut Vec<&'a ImageLayer>,
+    depth: usize,
+) {
+    if depth > 64 {
+        return;
+    }
+    if let Some(siblings) = children.get(&parent) {
+        for layer in siblings {
+            if !layer.is_visible {
+                continue;
+            }
+            if !layer.is_group {
+                out.push(layer);
+            }
+            visit_depth_first(Some(layer.id), children, out, depth + 1);
+        }
     }
 }
 
@@ -773,8 +858,8 @@ impl NavigationTool {
             NavigationTool::Crop => "Crop (C)",
             NavigationTool::Move => "Move / Transform (V)",
             NavigationTool::Hand => "Hand (H)",
-            NavigationTool::Zoom => "Zoom (Z)",
-            NavigationTool::Idle => "No tool (A)",
+            // Swift's label chain falls through to Zoom for idle too.
+            NavigationTool::Zoom | NavigationTool::Idle => "Zoom (Z)",
         }
     }
 }

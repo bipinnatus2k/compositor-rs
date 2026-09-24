@@ -429,7 +429,9 @@ impl DocumentSelection {
 
     /// Four Gaussian standard deviations retain the visible falloff outside the outline.
     pub fn coverage_bounds(&self) -> CGRect {
-        let inset = self.feather.ceil() * 2.0;
+        // ceil(feather * 2), as in Selection.swift — ceil first would widen
+        // non-integer feathers by an extra pixel.
+        let inset = (self.feather * 2.0).ceil();
         self.path
             .bounds()
             .unwrap_or(CGRect::NULL)
