@@ -11,7 +11,8 @@ actions!(compositor, [
     // Palette and tool modes
     SwapColors, DefaultColors, CycleToolMode,
     // File
-    NewCanvas, OpenDocument, SaveDocument, ExportPng, CloseDocument,
+    NewCanvas, OpenDocument, SaveDocument, ExportPng, ExportJpeg, ImportImages,
+    CloseDocument,
     // Edit
     Undo, Redo, FillForeground, FillBackground, FreeTransform, ShowShortcuts,
     // Image
@@ -70,6 +71,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-o", OpenDocument, None),
         KeyBinding::new("ctrl-s", SaveDocument, None),
         KeyBinding::new("ctrl-shift-s", ExportPng, None),
+        KeyBinding::new("alt-shift-s", ExportJpeg, None),
         // Edit
         KeyBinding::new("ctrl-z", Undo, None),
         KeyBinding::new("ctrl-shift-z", Redo, None),

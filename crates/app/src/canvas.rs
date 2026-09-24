@@ -188,6 +188,13 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if self.sheet.is_some() {
+            // The Camera Raw defringe eyedropper samples through the open
+            // sheet instead of touching the tools.
+            if self.camera_raw_samples_defringe {
+                let local = self.local_position(event.position);
+                let doc = self.screen_to_doc(local.0, local.1);
+                self.sample_camera_raw_defringe(doc, cx);
+            }
             return;
         }
         if event.click_count > 1 {
@@ -336,6 +343,18 @@ impl AppState {
                 let mut value = *start_origin;
                 value.origin.x += delta.x;
                 value.origin.y += delta.y;
+                // Moving snaps to the canvas and the other layers; resizing
+                // and rotating are left alone (EditorCanvas.dragTransform).
+                let moving: Vec<uuid::Uuid> = self
+                    .session
+                    .transform_edit
+                    .as_ref()
+                    .map(|edit| match &edit.group {
+                        Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
+                        None => vec![edit.layer_id],
+                    })
+                    .unwrap_or_default();
+                let value = self.session.snapped_move(value, &moving, 10.0);
                 self.session.preview_transform(value);
             }
             Some(CanvasDrag::Crop) => {
@@ -507,19 +526,31 @@ impl AppState {
                 SpotHealingMode::CreateTexture => 1,
                 SpotHealingMode::ProximityMatch => 2,
             };
-            edit.heal(mode, 0x6d2b79f5);
+            // Swift reseeds every edit (BrushStroke.swift:793).
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() ^ (d.as_secs() as u32))
+                .unwrap_or(0x6d2b79f5);
+            edit.heal(mode, seed);
             let (snapshot, transform, _) = edit.paint_snapshot();
             self.commit_pixels(snapshot, transform, "Spot Healing", cx);
             return;
         }
         let erasing = edit.settings.erasing;
         let (snapshot, transform, _) = edit.paint_snapshot();
-        self.commit_pixels(
-            snapshot,
-            transform,
-            if erasing { "Erase" } else { "Paint" },
-            cx,
-        );
+        // Stroke names follow the tool (EditorSession+Brush.swift:141).
+        let name = if edit.is_mask {
+            "Paint Mask"
+        } else if erasing {
+            "Erase"
+        } else if self.session.tool == NavigationTool::Blur {
+            "Blur"
+        } else if self.session.tool == NavigationTool::CloneStamp {
+            "Clone Stamp"
+        } else {
+            "Brush Stroke"
+        };
+        self.commit_pixels(snapshot, transform, name, cx);
     }
 
     // MARK: Smudge / Liquify
@@ -746,40 +777,21 @@ impl AppState {
     // MARK: Type
 
     fn create_text_layer(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+        // The session's beginText/applyText flow, with real-font typesetting
+        // (TypeTool.swift). Without a text input UI a click lays down the
+        // default sample content, editable through the same live-text path.
         if self.session.document.is_none() {
             return;
         }
-        let style = self.session.text_defaults.clone();
-        let color = self.session.palette_color(false);
-        let color_bytes = [
-            (color.red * 255.0).round() as u8,
-            (color.green * 255.0).round() as u8,
-            (color.blue * 255.0).round() as u8,
-            255,
-        ];
-        let image = crate::text_bitmap::render_text(&style.content, style.font_size, color_bytes);
-        let mut layer = ImageLayer::with_asset(
-            compositor_core::raster::ImportedImage::new(image, "Text"),
-            doc,
-        );
-        layer.name = style.content.clone();
-        layer.text = Some(compositor_core::document::LayerText {
-            style,
-            image: layer.asset.as_ref().unwrap().image.clone(),
-        });
-        self.session.history.begin(
-            "Type Layer",
-            &self.session.document,
-            self.session.active_layer_id,
-        );
-        let id = layer.id;
-        if let Some(document) = self.session.document.as_mut() {
-            document.layers.push(layer);
+        self.session.begin_text(doc, true);
+        let mut draft = match self.session.text_draft.clone() {
+            Some(draft) => draft,
+            None => return,
+        };
+        if draft.style.content.is_empty() {
+            draft.style.content = self.session.text_defaults.content.clone();
         }
-        self.session.select_layer(Some(id));
-        self.session
-            .history
-            .end(&self.session.document, self.session.active_layer_id);
+        self.session.apply_text(draft);
         self.set_status(format!("Text layer at {:.0}, {:.0}", doc.x, doc.y), cx);
     }
 

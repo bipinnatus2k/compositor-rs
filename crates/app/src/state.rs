@@ -64,6 +64,8 @@ pub enum SheetKind {
     Filter(FilterKind),
     Amount(SelectionAmountOperation),
     ExportPng,
+    ExportJpeg,
+    Import,
     SaveComp,
     Open,
     Trim,
@@ -123,6 +125,11 @@ pub struct AppState {
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
     pub preview_base: Option<Arc<Bitmap>>,
+    /// The Camera Raw defringe eyedropper is armed: the next canvas click
+    /// centers a defringe range on the clicked fringe color.
+    pub camera_raw_samples_defringe: bool,
+    /// RGB under the pointer while Camera Raw is open; cleared outside.
+    pub camera_raw_readout: Option<[u8; 3]>,
     pub preview: Option<Arc<Bitmap>>,
     pub preview_base_transform: Option<LayerTransform>,
     /// The Shape tool's drag: the shape being placed and its current rect.
@@ -186,6 +193,8 @@ impl AppState {
             thumbnails: HashMap::new(),
             fit_for: (0, 0),
             preview_base: None,
+            camera_raw_samples_defringe: false,
+            camera_raw_readout: None,
             preview: None,
             preview_base_transform: None,
             gradient_cursor: None,
@@ -429,10 +438,14 @@ impl AppState {
         let settings = self.session.gradient_settings;
         let fg = straight_of(self.session.palette_color(false));
         let bg = straight_of(self.session.palette_color(true));
+        // "Foreground to Transparent" runs fg at full alpha down to fg at zero
+        // alpha (Gradient.swift:78-80) — repeating the fg color fills solid.
         let mut colors = if settings.foreground_to_background {
             [fg, bg]
         } else {
-            [fg, fg]
+            let mut transparent = fg;
+            transparent[3] = 0;
+            [fg, transparent]
         };
         if settings.reversed {
             colors.reverse();
@@ -579,12 +592,82 @@ impl AppState {
             seed: 7,
             noise_origin: CGPoint::ZERO,
             camera_raw_clipping: None,
-            visualize_point_color: 0,
+            // Swift's default is -1: no visualization (CameraRaw.swift:221).
+            visualize_point_color: -1,
             sharpen_mask: false,
         };
         let result = compositor_core::filters::run_filter(&job);
         self.preview = Some(Arc::new(result));
         self.revision += 1;
+    }
+
+    /// `sampleCameraRawDefringe` — centers the purple or green defringe range
+    /// on the clicked fringe color and refreshes the preview.
+    pub fn sample_camera_raw_defringe(&mut self, at: CGPoint, cx: &mut Context<Self>) {
+        let Some(base) = self.preview_base.clone() else {
+            return;
+        };
+        let px = at.x.floor();
+        let py = at.y.floor();
+        if px < 0.0 || py < 0.0 || px >= base.width as f64 || py >= base.height as f64 {
+            return;
+        }
+        let Some(hue) =
+            compositor_core::adjust::camera_raw::straight_pixel_hue(base.pixel(px as usize, py as usize))
+        else {
+            return;
+        };
+        let mut settings = self.filter_settings_from_sheet(cx);
+        compositor_core::adjust::camera_raw::apply_defringe_sample(
+            &mut settings.camera_raw.optics,
+            hue,
+        );
+        self.camera_raw_samples_defringe = false;
+        self.apply_filter_preview(FilterKind::CameraRaw, settings);
+    }
+
+    /// `updateCameraRawReadout` — the RGB under the pointer; outside the
+    /// layer the readout clears.
+    pub fn update_camera_raw_readout(&mut self, at: CGPoint) {
+        let Some(base) = self.preview_base.clone() else {
+            self.camera_raw_readout = None;
+            return;
+        };
+        let px = at.x.floor();
+        let py = at.y.floor();
+        if px < 0.0 || py < 0.0 || px >= base.width as f64 || py >= base.height as f64 {
+            self.camera_raw_readout = None;
+            return;
+        }
+        let pixel = base.pixel(px as usize, py as usize);
+        let alpha = pixel[3] as f64;
+        if alpha <= 0.0 {
+            self.camera_raw_readout = None;
+            return;
+        }
+        self.camera_raw_readout = Some([
+            ((pixel[0] as f64 / alpha * 255.0).round() as u8).min(255),
+            ((pixel[1] as f64 / alpha * 255.0).round() as u8).min(255),
+            ((pixel[2] as f64 / alpha * 255.0).round() as u8).min(255),
+        ]);
+    }
+
+    /// `applyCameraRawAutoWhiteBalance` — selects Auto and solves the
+    /// temperature/tint from the preview base.
+    pub fn apply_camera_raw_auto_white_balance(&mut self, cx: &mut Context<Self>) {
+        use compositor_core::adjust::camera_raw::CameraRawWhiteBalance;
+        let Some(base) = self.preview_base.clone() else {
+            return;
+        };
+        let mut settings = self.filter_settings_from_sheet(cx);
+        settings.camera_raw.white_balance = CameraRawWhiteBalance::Auto;
+        if let Some((temperature, tint)) =
+            compositor_core::adjust::camera_raw::CameraRawSettings::auto_balance(&base)
+        {
+            settings.camera_raw.temperature = temperature;
+            settings.camera_raw.tint = tint;
+        }
+        self.apply_filter_preview(FilterKind::CameraRaw, settings);
     }
 
     // MARK: Keys

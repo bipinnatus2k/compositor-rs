@@ -49,6 +49,8 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_export))
+            .on_action(cx.listener(Self::on_export_jpeg))
+            .on_action(cx.listener(Self::on_import_images))
             .on_action(cx.listener(Self::on_close_document))
             // Edit
             .on_action(cx.listener(Self::on_undo))
@@ -232,6 +234,12 @@ impl AppState {
     }
     fn on_export(&mut self, _: &keys::ExportPng, _w: &mut Window, cx: &mut Context<Self>) {
         self.open_sheet(SheetKind::ExportPng, _w, cx);
+    }
+    fn on_export_jpeg(&mut self, _: &keys::ExportJpeg, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::ExportJpeg, _w, cx);
+    }
+    fn on_import_images(&mut self, _: &keys::ImportImages, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Import, _w, cx);
     }
     fn on_close_document(&mut self, _: &keys::CloseDocument, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.cancel_crop();

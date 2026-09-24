@@ -349,37 +349,7 @@ impl AppState {
     /// New Group: a folder inserted above the active layer, which becomes
     /// its first child.
     pub fn add_group(&mut self, cx: &mut Context<Self>) {
-        let Some(document) = self.session.document.clone() else { return };
-        let mut number = 1;
-        while document.layers.iter().any(|l| l.name == format!("Group {}", number)) {
-            number += 1;
-        }
-        let mut group = ImageLayer::blank(format!("Group {}", number), document.size());
-        group.is_group = true;
-        let group_id = group.id;
-        let slot = self
-            .session
-            .active_layer_id
-            .and_then(|id| document.layer_index(id))
-            .map(|index| index + 1)
-            .unwrap_or(document.layers.len());
-        self.session.history.begin(
-            "New Group",
-            &self.session.document,
-            self.session.active_layer_id,
-        );
-        if let Some(document) = self.session.document.as_mut() {
-            let slot = slot.min(document.layers.len());
-            document.layers.insert(slot, group);
-            if let Some(active_id) = self.session.active_layer_id {
-                if let Some(layer) = document.layer_mut(active_id) {
-                    layer.parent_id = Some(group_id);
-                }
-            }
-        }
-        self.session
-            .history
-            .end(&self.session.document, self.session.active_layer_id);
+        self.session.add_group();
         self.touch(cx);
     }
 }

@@ -31,6 +31,7 @@ pub enum SliderRole {
     Amount,
     Distortion,
     CameraRaw(usize),
+    JpegQuality,
 }
 
 impl AppState {
@@ -223,6 +224,17 @@ impl AppState {
                 path: self.make_input("export.png", window, cx),
                 ..base
             },
+            SheetKind::ExportJpeg => SheetState {
+                path: self.make_input("export.jpg", window, cx),
+                sliders: vec![self.make_slider(0.0, 1.0, 0.85, SliderRole::JpegQuality, cx)],
+                // 0 = white matte, 1 = black.
+                preset: 0,
+                ..base
+            },
+            SheetKind::Import => SheetState {
+                path: self.make_input("./image.png", window, cx),
+                ..base
+            },
             SheetKind::SaveComp => SheetState {
                 path: self.make_input("./project.comp", window, cx),
                 ..base
@@ -246,7 +258,7 @@ impl AppState {
     }
 
     /// Reads one of the current sheet's slider values.
-    fn sheet_value(&self, cx: &gpui_kit::App, index: usize) -> f32 {
+    pub(crate) fn sheet_value(&self, cx: &gpui_kit::App, index: usize) -> f32 {
         self.sheet
             .as_ref()
             .and_then(|sheet| sheet.sliders.get(index))
@@ -259,6 +271,7 @@ impl AppState {
     pub fn apply_slider(&mut self, role: SliderRole, _value: f32, cx: &mut Context<Self>) {
         let Some(sheet) = self.sheet.as_ref() else { return };
         match role {
+            SliderRole::JpegQuality => {} // read at confirm time
             SliderRole::LevelsInputBlack
             | SliderRole::LevelsGamma
             | SliderRole::LevelsWhite
@@ -287,7 +300,9 @@ impl AppState {
                         ColorRange::Master,
                         RangeAdjustment {
                             hue,
-                            saturation: saturation.max(1.0),
+                            // Colorize's saturation is an HSL amount 0…1
+                            // (HueSaturation.swift:301); zero must stay zero.
+                            saturation: (saturation / 100.0).clamp(0.0, 1.0),
                             lightness,
                         },
                     );
@@ -337,7 +352,7 @@ impl AppState {
         settings
     }
 
-    fn filter_settings_from_sheet(&self, cx: &gpui_kit::App) -> FilterSettings {
+    pub(crate) fn filter_settings_from_sheet(&self, cx: &gpui_kit::App) -> FilterSettings {
         let mut settings = FilterSettings::default();
         let Some(sheet) = self.sheet.as_ref() else { return settings };
         match sheet.kind {

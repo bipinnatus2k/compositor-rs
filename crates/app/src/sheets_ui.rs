@@ -39,6 +39,8 @@ fn sheet_title(kind: SheetKind) -> &'static str {
         SheetKind::Amount(SelectionAmountOperation::Expand) => "Expand Selection",
         SheetKind::Amount(SelectionAmountOperation::Contract) => "Contract Selection",
         SheetKind::ExportPng => "Export PNG",
+        SheetKind::ExportJpeg => "Export JPEG",
+        SheetKind::Import => "Import Images",
         SheetKind::SaveComp => "Save Project",
         SheetKind::Open => "Open",
         SheetKind::Trim => "Trim",
@@ -501,6 +503,21 @@ impl AppState {
                     Input::new(&sheet.tolerance).id("amount-value").w(px(80.0)),
                 ));
             }
+            SheetKind::Import => {
+                let sheet = self.sheet.as_ref().unwrap();
+                body = body
+                    .child(sheet_row(
+                        "Path",
+                        Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
+                    ))
+                    .child(sheet_row(
+                        "",
+                        text_label(
+                            "PNG/JPEG files import as new layers, centered; separate several paths with ';'. A .psd imports as Photoshop layers.",
+                            true,
+                        ),
+                    ));
+            }
             SheetKind::ExportPng | SheetKind::SaveComp | SheetKind::Open => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let hint = match kind {
@@ -514,6 +531,52 @@ impl AppState {
                         Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
                     ))
                     .child(sheet_row("", text_label(hint, true)));
+            }
+            SheetKind::ExportJpeg => {
+                let sheet = self.sheet.as_ref().unwrap();
+                let matte = sheet.preset;
+                let quality = {
+                    let cx_app: &gpui_kit::App = cx;
+                    self.sheet_value(cx_app, 0)
+                };
+                let quality_text = format!("{}%", (quality * 100.0).round() as i32);
+                let sliders = sheet.sliders.clone();
+                body = body
+                    .child(sheet_row(
+                        "Path",
+                        Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
+                    ))
+                    .child(sheet_row("Quality", labeled_slider_sheet(&sliders, 0, &quality_text)))
+                    .child(sheet_row(
+                        "Matte",
+                        dropdown(
+                            &app,
+                            "jpeg-matte",
+                            if matte == 1 { "Black" } else { "White" },
+                            px(140.0),
+                            vec![
+                                MenuEntry::new("White", |state: &mut AppState, _, cx| {
+                                    if let Some(sheet) = state.sheet.as_mut() {
+                                        sheet.preset = 0;
+                                    }
+                                    state.notify_only(cx);
+                                }),
+                                MenuEntry::new("Black", |state: &mut AppState, _, cx| {
+                                    if let Some(sheet) = state.sheet.as_mut() {
+                                        sheet.preset = 1;
+                                    }
+                                    state.notify_only(cx);
+                                }),
+                            ],
+                        ),
+                    ))
+                    .child(sheet_row(
+                        "",
+                        text_label(
+                            "Transparency flattens onto the matte color. JPEG has no alpha.",
+                            true,
+                        ),
+                    ));
             }
             SheetKind::Trim => {
                 let sheet = self.sheet.as_ref().unwrap();
@@ -710,6 +773,36 @@ impl AppState {
                 let path = self.sheet_path(cx);
                 self.export_png(path, cx);
             }
+            SheetKind::ExportJpeg => {
+                let (path, quality, matte) = {
+                    let cx_app: &gpui_kit::App = cx;
+                    let sheet = self.sheet.as_ref().unwrap();
+                    (
+                        sheet.path.read(cx_app).value().to_string(),
+                        sheet.sliders.first().map(|s| s.read(cx_app).value().end()).unwrap_or(0.85) as f64,
+                        sheet.preset,
+                    )
+                };
+                self.export_jpeg(path, quality, matte, cx);
+            }
+            SheetKind::Import => {
+                let path = self.sheet_path(cx);
+                let paths: Vec<std::path::PathBuf> = path
+                    .split(';')
+                    .map(|part| part.trim())
+                    .filter(|part| !part.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                let failures = self.session.import_images(&paths, None);
+                if failures.is_empty() {
+                    if !paths.is_empty() {
+                        self.set_status(format!("Imported {}", path), cx);
+                    }
+                } else {
+                    self.set_status(failures.join("; "), cx);
+                }
+                self.fit_for = (0, 0);
+            }
             SheetKind::SaveComp => {
                 let path = self.sheet_path(cx);
                 self.save_comp(path, cx);
@@ -806,6 +899,45 @@ impl AppState {
         }
     }
 
+    /// `ImageExporter.jpeg` + `write`: the composite flattens onto the matte
+    /// and encodes at `quality` (0…1). `matte`: 0 = white, 1 = black.
+    pub fn export_jpeg(
+        &mut self,
+        path: String,
+        quality: f64,
+        matte: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.session.document.clone() else {
+            self.set_status("Nothing to export", cx);
+            return;
+        };
+        let composite = compositor_core::render::draw_live_composite(&document);
+        if let Err(error) =
+            compositor_core::export::check_export_size(composite.width, composite.height)
+        {
+            self.set_status(format!("Export failed: {}", error), cx);
+            return;
+        }
+        let options = compositor_core::export::JpegOptions {
+            quality,
+            red: if matte == 1 { 0.0 } else { 1.0 },
+            green: if matte == 1 { 0.0 } else { 1.0 },
+            blue: if matte == 1 { 0.0 } else { 1.0 },
+        };
+        let data = match compositor_core::export::jpeg_data(&composite, &options) {
+            Some(data) => data,
+            None => {
+                self.set_status("Export failed: the image could not be encoded.", cx);
+                return;
+            }
+        };
+        match std::fs::write(&path, data) {
+            Ok(()) => self.set_status(format!("Exported {}", path), cx),
+            Err(error) => self.set_status(format!("Export failed: {}", error), cx),
+        }
+    }
+
     pub fn save_comp(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(document) = self.session.document.clone() else {
             self.set_status("Nothing to save", cx);
@@ -848,6 +980,42 @@ impl AppState {
                     }
                     Err(error) => self.set_status(format!("Open failed: {}", error), cx),
                 },
+                Err(error) => self.set_status(format!("Open failed: {}", error), cx),
+            }
+            return;
+        }
+        // A Photoshop file goes through PsdReader + PsdDocumentBuilder
+        // (`insertPhotoshop`): fresh document or wrapping group, with a note
+        // per conversion.
+        if path.to_ascii_lowercase().ends_with(".psd") {
+            let data = match std::fs::read(path) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.set_status(format!("Open failed: {}", error), cx);
+                    return;
+                }
+            };
+            let name = std::path::Path::new(path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Photoshop".to_string());
+            match self.session.import_photoshop_data(&name, &data) {
+                Ok(notes) => {
+                    self.fit_for = (0, 0);
+                    self.set_status(
+                        if notes > 0 {
+                            format!(
+                                "Imported {} ({} conversion note{})",
+                                path,
+                                notes,
+                                if notes == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("Imported {}", path)
+                        },
+                        cx,
+                    );
+                }
                 Err(error) => self.set_status(format!("Open failed: {}", error), cx),
             }
             return;

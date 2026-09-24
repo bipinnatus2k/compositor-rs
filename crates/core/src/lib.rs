@@ -29,6 +29,7 @@ pub mod transform;
 pub mod adjust;
 pub mod adjustment;
 pub mod canvas;
+pub mod export;
 pub mod filters;
 pub mod project;
 pub mod psd;
