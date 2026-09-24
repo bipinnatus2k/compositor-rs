@@ -62,6 +62,16 @@ impl Bitmap {
         [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
     }
 
+    /// The pixel at a byte offset (y * width + x) * 4.
+    pub fn pixel_at(&self, o: usize) -> [u8; 4] {
+        [
+            self.data[o],
+            self.data[o + 1],
+            self.data[o + 2],
+            self.data[o + 3],
+        ]
+    }
+
     pub fn set_pixel(&mut self, x: usize, y: usize, px: [u8; 4]) {
         let i = (y * self.width + x) * 4;
         self.data[i..i + 4].copy_from_slice(&px);
@@ -123,7 +133,7 @@ impl Bitmap {
                 }
             }
         }
-        if max_x <= min_x || max_y <= min_y {
+        if max_x < min_x || max_y < min_y {
             return None;
         }
         Some(CGRect::new(
@@ -672,7 +682,9 @@ pub fn coverage_bounds(mask: &GrayMask) -> Option<CGRect> {
             }
         }
     }
-    if max_x <= min_x || max_y <= min_y {
+    // Only an empty mask has no bounds — a one-pixel-wide or tall spot is a
+    // valid (if degenerate) rectangle, as in HealPixels.c.
+    if max_x < min_x || max_y < min_y {
         return None;
     }
     Some(CGRect::new(

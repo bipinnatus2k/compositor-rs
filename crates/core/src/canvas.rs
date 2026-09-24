@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::document::{CanvasDocument, CanvasGuide, ImageLayer};
+use crate::document::{CanvasDocument, ImageLayer};
 use crate::geometry::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::raster::{resample, Bitmap, ImportedImage};
 use crate::transform::{LayerSampling, LayerTransform};
@@ -304,6 +304,158 @@ impl CropDrag {
     }
 }
 
+/// Crop edges snap to nearby layer and canvas edges while dragging
+/// (`CropSnap`).
+pub struct CropSnap {
+    /// Document x and y positions to snap to.
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+    /// How close, in document pixels, an edge must come to snap.
+    pub tolerance: f64,
+}
+
+impl CropSnap {
+    fn nearest(&self, value: f64, targets: &[f64]) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for target in targets {
+            let distance = (target - value).abs();
+            if std::env::var("CROP_DBG").is_ok() {
+                eprintln!("DBG nearest value={value} target={target} distance={distance} tol={}", self.tolerance);
+            }
+            if distance > self.tolerance {
+                continue;
+            }
+            if let Some(current) = best {
+                if (current - value).abs() <= distance {
+                    continue;
+                }
+            }
+            best = Some(*target);
+        }
+        best
+    }
+
+    /// Moving the frame snaps its closest edges and keeps its size; creating
+    /// or resizing snaps only the edges on the side being dragged — mirrored
+    /// about the center when `symmetric`. With a fixed ratio only moves snap,
+    /// so the ratio stays exact.
+    pub fn apply(
+        &self,
+        rect: CGRect,
+        drag: &CropDrag,
+        point: CGPoint,
+        ratio: Option<f64>,
+        symmetric: bool,
+    ) -> CGRect {
+        if self.tolerance <= 0.0 {
+            return rect;
+        }
+        if matches!(drag.mode, CropDragMode::Move) {
+            let shift = |edges: [f64; 2], targets: &[f64]| -> f64 {
+                let mut best: Option<f64> = None;
+                for edge in edges {
+                    if let Some(delta) = self.nearest(edge, targets) {
+                        best = Some(match best {
+                            Some(current) if current.abs() < delta.abs() => current,
+                            _ => delta,
+                        });
+                    }
+                }
+                best.unwrap_or(0.0)
+            };
+            let shift = |edges: [f64; 2], targets: &[f64]| -> f64 {
+                let mut best: Option<f64> = None;
+                for edge in edges {
+                    // The offset from the edge to its nearest snap target.
+                    if let Some(delta) = self.nearest(edge, targets).map(|target| target - edge) {
+                        best = Some(match best {
+                            Some(current) if current.abs() < delta.abs() => current,
+                            _ => delta,
+                        });
+                    }
+                }
+                best.unwrap_or(0.0)
+            };
+            let dx = shift([rect.min_x(), rect.max_x()], &self.xs);
+            let dy = shift([rect.min_y(), rect.max_y()], &self.ys);
+            return rect.offset_by(dx, dy);
+        }
+        let (horizontal, vertical) = match drag.mode {
+            CropDragMode::Create => {
+                if ratio.is_some() {
+                    return rect;
+                }
+                (true, true)
+            }
+            CropDragMode::Resize(index) => {
+                if ratio.is_some() {
+                    return rect;
+                }
+                let handle = crate::transform::HANDLES[index];
+                (handle.x != 0.5, handle.y != 0.5)
+            }
+            _ => (false, false),
+        };
+        let mut result = rect;
+        // The dragged edge is the one on the pointer's side.
+        if horizontal {
+            if (point.x - result.min_x()).abs() <= (point.x - result.max_x()).abs() {
+                if let Some(x) = self.nearest(result.min_x(), &self.xs) {
+                    if x < result.max_x() {
+                        result = CGRect::new(x, result.min_y(), result.max_x() - x, result.height());
+                    }
+                }
+            } else if let Some(x) = self.nearest(result.max_x(), &self.xs) {
+                if x > result.min_x() {
+                    result = CGRect::new(result.min_x(), result.min_y(), x - result.min_x(), result.height());
+                }
+            }
+        }
+        if vertical {
+            if (point.y - result.min_y()).abs() <= (point.y - result.max_y()).abs() {
+                if let Some(y) = self.nearest(result.min_y(), &self.ys) {
+                    if y < result.max_y() {
+                        result = CGRect::new(result.min_x(), y, result.width(), result.max_y() - y);
+                    }
+                }
+            } else if let Some(y) = self.nearest(result.max_y(), &self.ys) {
+                if y > result.min_y() {
+                    result = CGRect::new(result.min_x(), result.min_y(), result.width(), y - result.min_y());
+                }
+            }
+        }
+        if symmetric {
+            // The snapped (dragged) edge sets the half size; the opposite edge
+            // mirrors it about the center.
+            let mut center = CGPoint::new(drag.original.mid_x(), drag.original.mid_y());
+            if matches!(drag.mode, CropDragMode::Create) {
+                center = drag.start;
+            }
+            if horizontal {
+                let half = if point.x >= center.x {
+                    result.max_x() - center.x
+                } else {
+                    center.x - result.min_x()
+                };
+                if half >= 0.5 {
+                    result = CGRect::new(center.x - half, result.min_y(), half * 2.0, result.height());
+                }
+            }
+            if vertical {
+                let half = if point.y >= center.y {
+                    result.max_y() - center.y
+                } else {
+                    center.y - result.min_y()
+                };
+                if half >= 0.5 {
+                    result = CGRect::new(result.min_x(), center.y - half, result.width(), half * 2.0);
+                }
+            }
+        }
+        result
+    }
+}
+
 /// `TrimBasedOn` / `TrimOptions` (`ImageTrim.swift`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrimBasedOn {
@@ -468,6 +620,7 @@ pub fn mirrored_transform(transform: &LayerTransform, horizontally: bool, axis: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::CanvasGuide;
 
     #[test]
     fn draft_units_roundtrip() {

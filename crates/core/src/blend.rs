@@ -222,8 +222,8 @@ fn b_separable(cb: f32, cs: f32, mode: LayerBlendMode) -> f32 {
             }
         }
         LayerBlendMode::HardMix => {
-            let vivid = b_separable(cb, cs, LayerBlendMode::VividLight);
-            if vivid < 0.5 {
+            // PDF: B(Cb, Cs) = Csum < 1 ? 0 : 1, where Csum = Cb + Cs.
+            if cb + cs < 1.0 {
                 0.0
             } else {
                 1.0
@@ -233,12 +233,9 @@ fn b_separable(cb: f32, cs: f32, mode: LayerBlendMode) -> f32 {
         LayerBlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
         LayerBlendMode::Subtract => (cb - cs).max(0.0),
         LayerBlendMode::Divide => {
+            // PDF: Cs = 0 gives white regardless of the backdrop.
             if cs <= 0.0 {
-                if cb <= 0.0 {
-                    0.0
-                } else {
-                    1.0
-                }
+                1.0
             } else {
                 (cb / cs).min(1.0)
             }
@@ -370,7 +367,9 @@ pub fn composite_pixel(
     };
     let mut out = [0.0f32; 4];
     for i in 0..3 {
-        let co = blended[i] * as_ + cb[i] * ab * (1.0 - as_);
+        // PDF: co = αs(1-αb)·Cs + αs·αb·B + αb(1-αs)·Cb — over a partially
+        // transparent backdrop the source itself shows through, not the blend.
+        let co = cs[i] * as_ * (1.0 - ab) + blended[i] * as_ * ab + cb[i] * ab * (1.0 - as_);
         out[i] = co;
     }
     out[3] = as_ + ab * (1.0 - as_);
@@ -446,11 +445,43 @@ mod tests {
     }
 
     #[test]
+    fn hard_mix_threshold_is_cb_plus_cs() {
+        // The threshold is Cb + Cs = 1, not VividLight's; the old
+        // VividLight-based test picked cs = 0.7 where both agreed.
+        let on = blend_color(LayerBlendMode::HardMix, [0.3, 0.3, 0.3], [0.9, 0.9, 0.9]);
+        assert_eq!(on, [1.0, 1.0, 1.0], "cb+cs=1.2 must mix to white");
+        let off = blend_color(LayerBlendMode::HardMix, [0.15, 0.15, 0.15], [0.8, 0.8, 0.8]);
+        assert_eq!(off, [0.0, 0.0, 0.0], "cb+cs=0.95 must stay black");
+        let edge = blend_color(LayerBlendMode::HardMix, [0.2, 0.2, 0.2], [0.8, 0.8, 0.8]);
+        assert_eq!(edge, [1.0, 1.0, 1.0], "exactly 1 mixes to white");
+    }
+
+    #[test]
     fn subtract_and_divide() {
         let sub = blend_color(LayerBlendMode::Subtract, [0.5, 0.5, 0.5], [0.2, 0.2, 0.2]);
         assert!(close(sub[0], 0.3));
         let div = blend_color(LayerBlendMode::Divide, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
         assert!(close(div[0], 1.0));
+    }
+
+    #[test]
+    fn divide_zero_source_is_white() {
+        // PDF: Cs = 0 gives 1 regardless of the backdrop, black backdrop included.
+        let div = blend_color(LayerBlendMode::Divide, [0.0, 0.5, 1.0], [0.0, 0.0, 0.0]);
+        assert_eq!(div, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn composite_over_transparent_backdrop_shows_source() {
+        // Multiply white over a 50%-coverage black backdrop: the PDF equation
+        // shows white where the backdrop is absent — 0.5·1 (Cs term) + 0.5·0
+        // (blend term) = 0.5 grey — not the blend color alone (black).
+        let out = composite_pixel(LayerBlendMode::Multiply, [0.0, 0.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0]);
+        assert!(close(out[3], 1.0));
+        assert!(close(out[0], 0.5), "{out:?}");
+        // And the plain source-over term: source over a fully absent backdrop.
+        let over = composite_pixel(LayerBlendMode::Multiply, [0.9, 0.9, 0.9, 0.0], [0.2, 0.4, 0.6, 1.0]);
+        assert_eq!(over, [0.2, 0.4, 0.6, 1.0]);
     }
 
     #[test]

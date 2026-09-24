@@ -7,7 +7,7 @@
 
 use crate::blend::composite_pixel;
 use crate::document::{CanvasDocument, ImageLayer, LayerMask, LayerShape, ShapeKind};
-use crate::geometry::{CGPoint, CGRect, CGSize};
+use crate::geometry::{CGPoint, CGRect};
 use crate::selection::SelectionPath;
 use crate::raster::{draw_affine, pixel_to_document, Bitmap};
 use crate::transform::{LayerSampling, LayerTransform};
@@ -33,7 +33,12 @@ pub fn mask_clip_image(
     if !mask.is_enabled {
         return None;
     }
-    let placement = mask.placement?;
+    // Covering the layer (placement None) the mask is the grid itself; only a
+    // mask moved apart is resampled into the layer grid.
+    let placement = match mask.placement {
+        Some(placement) => placement,
+        None => return Some(mask_gray_as_bitmap(&mask.asset.image)),
+    };
     if placement.same_placement(over) || width == 0 || height == 0 {
         return Some(mask_gray_as_bitmap(&mask.asset.image));
     }
@@ -84,36 +89,170 @@ pub fn draw_live_composite(document: &CanvasDocument) -> Bitmap {
 
 /// Composites the document onto an existing canvas-sized bitmap.
 pub fn composite_onto(canvas: &mut Bitmap, document: &CanvasDocument) {
-    let size = CGSize::new(document.width as f64, document.height as f64);
-    let visible = document.effective_visible_ids();
-    let parents: HashMap<uuid::Uuid, Option<uuid::Uuid>> =
-        document.layers.iter().map(|l| (l.id, l.parent_id)).collect();
-
-    for layer in &document.layers {
-        if !visible.contains(&layer.id) {
+    let order = document.render_layers();
+    let by_id: HashMap<uuid::Uuid, &crate::document::ImageLayer> =
+        document.layers.iter().map(|l| (l.id, l)).collect();
+    let opacities: HashMap<uuid::Uuid, f64> = order
+        .iter()
+        .map(|l| (l.id, effective_opacity(l, &by_id)))
+        .collect();
+    let (stacks, stacked) = prepare_stacks(&order);
+    let mut ctx = RenderContext {
+        document,
+        by_id,
+        opacities,
+        stacks,
+        stacked,
+        coverage: HashMap::new(),
+        visiting: std::collections::HashSet::new(),
+        canvas_size: (canvas.width, canvas.height),
+    };
+    let mut i = 0;
+    while i < order.len() {
+        let layer = order[i];
+        if ctx.stacked.contains(&layer.id) {
+            i += 1;
             continue;
         }
-        draw_single_layer(canvas, document, layer, &parents, &visible, size);
+        // An adjustment layer reworks the composited content below it instead
+        // of drawing pixels (`LiveMaskRenderer.drawComposite`).
+        if let Some(adjustment) = &layer.adjustment {
+            if layer.mask_source_id.is_none() {
+                if adjustment.is_valid() {
+                    apply_adjustment_layer(canvas, &mut ctx, layer);
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(children) = ctx.stacks.get(&layer.id).cloned() {
+            draw_clipping_stack(canvas, &mut ctx, layer, &children);
+            i += 1 + children.len();
+            continue;
+        }
+        let clip = layer
+            .mask_source_id
+            .and_then(|source_id| ctx.coverage_of(source_id).cloned());
+        draw_layer_full(canvas, &ctx, layer, clip.as_ref());
+        i += 1;
     }
 }
 
-fn draw_single_layer(
-    canvas: &mut Bitmap,
-    document: &CanvasDocument,
-    layer: &ImageLayer,
-    parents: &HashMap<uuid::Uuid, Option<uuid::Uuid>>,
-    visible: &std::collections::HashSet<uuid::Uuid>,
-    size: CGSize,
-) {
-    // Folders are pass-through: their children were (or will be) drawn
-    // directly; only a folder mask matters, applied per descendant below.
-    if layer.is_group {
-        return;
+/// Everything one rendering pass shares: the document, the per-layer
+/// folder-multiplied opacity, clipping stacks and the coverage cache.
+struct RenderContext<'a> {
+    document: &'a CanvasDocument,
+    by_id: HashMap<uuid::Uuid, &'a crate::document::ImageLayer>,
+    opacities: HashMap<uuid::Uuid, f64>,
+    stacks: HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+    stacked: std::collections::HashSet<uuid::Uuid>,
+    coverage: HashMap<uuid::Uuid, Option<Bitmap>>,
+    visiting: std::collections::HashSet<uuid::Uuid>,
+    canvas_size: (usize, usize),
+}
+
+impl<'a> RenderContext<'a> {
+    fn opacity_of(&self, id: uuid::Uuid) -> f64 {
+        self.opacities.get(&id).copied().unwrap_or(1.0)
     }
-    // The pixels to draw: pending overrides were applied by the caller's copy.
+
+    /// The full alpha the layer paints (`LiveMaskRenderer.coverage`): the
+    /// layer as it draws itself — pixels, effects, masks, opacity, its own
+    /// clipping source — regardless of its visibility or color.
+    fn coverage_of(&mut self, id: uuid::Uuid) -> Option<&Bitmap> {
+        if !self.coverage.contains_key(&id) {
+            let filled = self.render_coverage(id);
+            self.coverage.insert(id, filled);
+        }
+        self.coverage.get(&id).unwrap().as_ref()
+    }
+
+    fn render_coverage(&mut self, id: uuid::Uuid) -> Option<Bitmap> {
+        if self.visiting.contains(&id) || self.visiting.len() >= 256 {
+            return None;
+        }
+        let layer = *self.by_id.get(&id)?;
+        self.visiting.insert(id);
+        let clip = layer
+            .mask_source_id
+            .and_then(|source_id| self.coverage_of(source_id).cloned());
+        let mut surface = Bitmap::new(self.canvas_size.0, self.canvas_size.1);
+        draw_layer_full(&mut surface, self, layer, clip.as_ref());
+        self.visiting.remove(&id);
+        Some(surface)
+    }
+}
+
+/// A folder's opacity multiplies into everything inside it (`LayerOpacity`);
+/// what's inside is drawn straight onto what is below, never as a unit.
+fn effective_opacity(
+    layer: &crate::document::ImageLayer,
+    by_id: &HashMap<uuid::Uuid, &crate::document::ImageLayer>,
+) -> f64 {
+    let mut opacity = layer.opacity;
+    let mut id = layer.parent_id;
+    let mut depth = 0;
+    while let Some(current) = id {
+        if depth >= 64 {
+            break;
+        }
+        match by_id.get(&current) {
+            Some(node) => {
+                opacity *= node.opacity;
+                id = node.parent_id;
+            }
+            None => break,
+        }
+        depth += 1;
+    }
+    opacity
+}
+
+/// `LiveMaskRenderer.prepareStacks`: a base (no clipping source, no
+/// adjustment) followed by consecutive layers clipped to it, all with the same
+/// parent, forms a stack. The whole stack shares the base's coverage and lands
+/// with the base's blend mode.
+fn prepare_stacks(
+    order: &[&crate::document::ImageLayer],
+) -> (
+    HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+    std::collections::HashSet<uuid::Uuid>,
+) {
+    let mut stacks: HashMap<uuid::Uuid, Vec<uuid::Uuid>> = HashMap::new();
+    let mut stacked = std::collections::HashSet::new();
+    for (index, base) in order.iter().enumerate() {
+        if base.mask_source_id.is_some() || base.adjustment.is_some() {
+            continue;
+        }
+        let mut children = Vec::new();
+        for child in order.iter().skip(index + 1) {
+            if child.mask_source_id != Some(base.id) || child.parent_id != base.parent_id {
+                break;
+            }
+            children.push(child.id);
+        }
+        if !children.is_empty() {
+            stacks.insert(base.id, children.clone());
+            stacked.extend(children);
+        }
+    }
+    (stacks, stacked)
+}
+
+/// Draws one layer as it draws itself (`EditorCanvas.drawOwn` +
+/// `LayerRenderer.draw`): pixels through the transform, effects with the mask
+/// baked in, then the own mask, folder masks and an optional live-clipping
+/// coverage multiplying where it lands, and finally its blend mode at its
+/// effective opacity. `clip` is a canvas-sized alpha from a clipping source.
+fn draw_layer_full(
+    target: &mut Bitmap,
+    ctx: &RenderContext,
+    layer: &crate::document::ImageLayer,
+    clip: Option<&Bitmap>,
+) {
+    let mut transform = layer.transform;
     // A shape layer without committed pixels draws its shape live, which is
     // what keeps it editable.
-    let mut transform = layer.transform;
     let mut pixels = match &layer.shape {
         Some(shape) if layer.asset.is_none() => {
             let w = transform.size.width.round().max(1.0) as usize;
@@ -125,24 +264,28 @@ fn draw_single_layer(
             None => return,
         },
     };
-    // Adjustment layers apply their adjustment in place of pixels.
-    if let Some(adjustment) = &layer.adjustment {
-        pixels = adjustment.apply(&pixels, None);
-    }
+    // The layer's own mask, in its pixel grid.
+    let mut own_mask = layer
+        .mask
+        .as_ref()
+        .and_then(|mask| mask_clip_image(mask, &layer.transform, pixels.width, pixels.height));
 
-    // Live clipping mask (maskSourceID): the source layer's alpha multiplies in.
-    if let Some(source_id) = layer.mask_source_id {
-        if let Some(source) = document.layer(source_id) {
-            if let Some(source_asset) = &source.asset {
-                multiply_by_source_alpha(&mut pixels, &transform, source_asset.image.as_ref(), &source.transform);
+    // Effects grow the drawn image; the mask is baked into the effect render
+    // and drawn with `mask: nil`, so it must not clip the result again.
+    if let Some(effects) = &layer.effects {
+        if !effects.is_empty() && effects.is_valid() {
+            let mask_grid = own_mask
+                .as_ref()
+                .map(|m| gray_of(m, pixels.width, pixels.height));
+            let (grown, inset) = crate::effects::render_effects(&pixels, mask_grid.as_ref(), effects);
+            pixels = grown;
+            own_mask = None;
+            if inset > 0.0 {
+                // The grown grid lands where the layer was: the transform
+                // grows by the margin around the same center.
+                transform = crate::effects::placed_transform(&layer.transform, &pixels, inset);
             }
         }
-    }
-
-    // The layer's own mask, in its pixel grid.
-    let mut own_mask: Option<Bitmap> = None;
-    if let Some(mask) = &layer.mask {
-        own_mask = mask_clip_image(mask, &layer.transform, pixels.width, pixels.height);
     }
 
     // Folder masks above this layer multiply coverage (pass-through folders).
@@ -153,15 +296,22 @@ fn draw_single_layer(
         if depth >= 64 {
             break;
         }
-        if let Some(folder) = document.layer(id) {
-            if !visible.contains(&folder.id) {
-                return; // An invisible folder hides everything inside.
-            }
+        if let Some(folder) = ctx.document.layer(id) {
             if let Some(mask) = &folder.mask {
                 if mask.is_enabled {
                     // The folder mask covers the folder's own transform rect.
-                    let grid_w = folder.asset.as_ref().map(|a| a.image.width).unwrap_or(folder.transform.size.width.round() as usize).max(1);
-                    let grid_h = folder.asset.as_ref().map(|a| a.image.height).unwrap_or(folder.transform.size.height.round() as usize).max(1);
+                    let grid_w = folder
+                        .asset
+                        .as_ref()
+                        .map(|a| a.image.width)
+                        .unwrap_or(folder.transform.size.width.round() as usize)
+                        .max(1);
+                    let grid_h = folder
+                        .asset
+                        .as_ref()
+                        .map(|a| a.image.height)
+                        .unwrap_or(folder.transform.size.height.round() as usize)
+                        .max(1);
                     if let Some(placed) = mask_clip_image(mask, &folder.transform, grid_w, grid_h) {
                         folder_masks.push((placed, mask.placement.unwrap_or(folder.transform)));
                     }
@@ -173,41 +323,17 @@ fn draw_single_layer(
         }
     }
 
-    // Effects grow the drawn image; the transform grows with it.
-    let mut effects_inset = 0.0f64;
-    if let Some(effects) = &layer.effects {
-        if !effects.is_empty() && effects.is_valid() {
-            let mask_grid = own_mask.as_ref().map(|m| gray_of(m, pixels.width, pixels.height));
-            let (grown, inset) = crate::effects::render_effects(&pixels, mask_grid.as_ref(), effects);
-            pixels = grown;
-            effects_inset = inset;
-        }
-    }
-    transform = if effects_inset > 0.0 {
-        // The shape's own pixel count approximates the pre-effects grid.
-        let base_size = crate::geometry::CGSize::new(
-            pixels.width as f64 - effects_inset * 2.0,
-            pixels.height as f64 - effects_inset * 2.0,
-        );
-        crate::effects::placed_transform(&transform, &crate::raster::Bitmap {
-            width: base_size.width.round() as usize,
-            height: base_size.height.round() as usize,
-            data: Vec::new(),
-        }, effects_inset)
-    } else {
-        transform
-    };
-
     // Where this layer lands, drawn through its transform.
-    let mut placed = Bitmap::new(canvas.width, canvas.height);
+    let mut placed = Bitmap::new(target.width, target.height);
     draw_layer_pixels(&pixels, &transform, &mut placed);
 
-    // Masks multiply the placed alpha.
-    let doc_to_grid = pixel_to_document(&transform, pixels.width as f64, pixels.height as f64).inverted();
-    if own_mask.is_some() || !folder_masks.is_empty() {
-        for y in 0..canvas.height {
-            for x in 0..canvas.width {
-                let o = (y * canvas.width + x) * 4;
+    // The own mask, folder masks and a live clipping source all multiply
+    // coverage where the layer lands.
+    if own_mask.is_some() || !folder_masks.is_empty() || clip.is_some() {
+        let doc_to_grid = pixel_to_document(&transform, pixels.width as f64, pixels.height as f64).inverted();
+        for y in 0..target.height {
+            for x in 0..target.width {
+                let o = (y * target.width + x) * 4;
                 if placed.data[o + 3] == 0 {
                     continue;
                 }
@@ -220,6 +346,10 @@ fn draw_single_layer(
                 for (mask_grid, mask_placement) in &folder_masks {
                     alpha *= mask_alpha_at(mask_grid, mask_placement, doc);
                 }
+                if let Some(coverage) = clip {
+                    let co = (y * target.width + x) * 4;
+                    alpha *= coverage.data[co + 3] as f32 / 255.0;
+                }
                 if alpha < 1.0 {
                     for c in 0..4 {
                         placed.data[o + c] = (placed.data[o + c] as f32 * alpha) as u8;
@@ -229,12 +359,133 @@ fn draw_single_layer(
         }
     }
 
-    // Blend onto the canvas with the layer's opacity and blend mode.
-    let opacity = layer.opacity.clamp(0.0, 1.0) as f32;
+    // Blend onto the target with the layer's effective opacity and blend mode.
+    let opacity = ctx.opacity_of(layer.id);
+    blend_bitmap_onto(target, &placed, layer.blend_mode, opacity as f32);
+}
+
+/// An adjustment layer (`LiveMaskRenderer.adjust`): the adjustment applies to
+/// the composited content below, its blend mode blends the adjusted content
+/// against the original at full coverage, its effective opacity mixes the two,
+/// and its own mask scopes where any of it applies.
+fn apply_adjustment_layer(
+    target: &mut Bitmap,
+    ctx: &RenderContext,
+    layer: &crate::document::ImageLayer,
+) {
+    let adjustment = match &layer.adjustment {
+        Some(a) => a,
+        None => return,
+    };
+    let original = target.clone();
+    let mut adjusted = adjustment.apply(&original, None);
+    let mode = layer.blend_mode;
+    if mode != crate::blend::LayerBlendMode::Normal {
+        // Blend colors at full coverage, then restore the original alpha —
+        // source-over of two translucent copies would thicken soft edges.
+        for i in 0..original.data.len() / 4 {
+            let o = i * 4;
+            if original.data[o + 3] == 0 {
+                continue;
+            }
+            let cb = crate::raster::unpremultiply_f32(original.pixel_at(o));
+            let cs = crate::raster::unpremultiply_f32(adjusted.pixel_at(o));
+            let blended = crate::blend::blend_color(mode, cb[..3].try_into().unwrap(), cs[..3].try_into().unwrap());
+            let px = crate::raster::premultiply_f32([blended[0], blended[1], blended[2], cb[3]]);
+            adjusted.data[o..o + 4].copy_from_slice(&px);
+        }
+    }
+    // The adjustment's own mask scopes the effect (`adjustmentClip`).
+    let scope = layer.mask.as_ref().filter(|m| m.is_enabled).map(|m| {
+        let placement = m.placement.unwrap_or(layer.transform);
+        (
+            mask_gray_as_bitmap(&m.asset.image),
+            placement,
+        )
+    });
+    let opacity = ctx.opacity_of(layer.id) as f32;
+    for y in 0..target.height {
+        for x in 0..target.width {
+            let o = (y * target.width + x) * 4;
+            let mut src = adjusted.pixel_at(o);
+            if scope.is_some() {
+                let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5);
+                let m = scope
+                    .as_ref()
+                    .map(|(grid, placement)| mask_alpha_at(grid, placement, doc))
+                    .unwrap_or(1.0);
+                for c in 0..4 {
+                    src[c] = (src[c] as f32 * m) as u8;
+                }
+            }
+            if opacity < 1.0 {
+                // The pending adjustment shows at the layer's effective
+                // opacity; below that the original content shows through.
+                for c in 0..4 {
+                    let mixed = original.data[o + c] as f32
+                        + (src[c] as f32 - original.data[o + c] as f32) * opacity;
+                    src[c] = mixed.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+            if src[3] == 0 {
+                continue;
+            }
+            let s = crate::raster::unpremultiply_f32(src);
+            let dst = crate::raster::unpremultiply_f32(target.pixel_at(o));
+            let out = composite_pixel(crate::blend::LayerBlendMode::Normal, dst, s);
+            target.data[o..o + 4].copy_from_slice(&crate::raster::premultiply_f32(out));
+        }
+    }
+}
+
+/// A clipping stack (`LiveMaskRenderer.drawComposite`): the base and its
+/// consecutive clipped children draw into a shared surface, adjustment
+/// children rework that surface in place, and the surface lands masked by the
+/// base's coverage with the base's blend mode.
+fn draw_clipping_stack(
+    canvas: &mut Bitmap,
+    ctx: &mut RenderContext,
+    base: &crate::document::ImageLayer,
+    children: &[uuid::Uuid],
+) {
+    let mut group = Bitmap::new(canvas.width, canvas.height);
+    draw_layer_full(&mut group, ctx, base, None);
+    // The stack shows only where the base had coverage.
+    let coverage: Vec<u8> = group.data.iter().skip(3).step_by(4).copied().collect();
+    for child_id in children {
+        let child = match ctx.by_id.get(child_id) {
+            Some(child) => *child,
+            None => continue,
+        };
+        if child.adjustment.is_some() {
+            if child.adjustment.as_ref().unwrap().is_valid() && child.mask_source_id.is_none() {
+                apply_adjustment_layer(&mut group, ctx, child);
+            }
+        } else {
+            draw_layer_full(&mut group, ctx, child, None);
+        }
+    }
+    for (i, a) in coverage.iter().enumerate() {
+        let o = i * 4;
+        let m = *a as f32 / 255.0;
+        if m < 1.0 {
+            for c in 0..4 {
+                group.data[o + c] = (group.data[o + c] as f32 * m) as u8;
+            }
+        }
+    }
+    // The group lands with the base's blend mode at full strength; the base's
+    // effective opacity is already inside the group's coverage.
+    blend_bitmap_onto(canvas, &group, base.blend_mode, 1.0);
+}
+
+/// Source-over of a premultiplied bitmap onto the canvas in `mode` at
+/// `opacity` (the tail of the old draw path).
+fn blend_bitmap_onto(canvas: &mut Bitmap, placed: &Bitmap, mode: crate::blend::LayerBlendMode, opacity: f32) {
     for y in 0..canvas.height {
         for x in 0..canvas.width {
             let o = (y * canvas.width + x) * 4;
-            let s = placed.pixel(x, y);
+            let s = placed.pixel_at(o);
             if s[3] == 0 {
                 continue;
             }
@@ -243,12 +494,11 @@ fn draw_single_layer(
             if src[3] <= 0.0 {
                 continue;
             }
-            let dst = crate::raster::unpremultiply_f32(canvas.pixel(x, y));
-            let out = composite_pixel(layer.blend_mode, dst, src);
-            canvas.set_pixel(x, y, crate::raster::premultiply_f32(out));
+            let dst = crate::raster::unpremultiply_f32(canvas.pixel_at(o));
+            let out = composite_pixel(mode, dst, src);
+            canvas.data[o..o + 4].copy_from_slice(&crate::raster::premultiply_f32(out));
         }
     }
-    let _ = size;
 }
 
 fn sample_grid_alpha(
@@ -268,39 +518,6 @@ fn sample_grid_alpha(
     // The mask grid matches the pixel grid 1:1 (own mask, no placement).
     let _ = transform;
     crate::raster::sample_bitmap(mask_grid, grid_point.x, grid_point.y, LayerSampling::Smooth)[0] as f32 / 255.0
-}
-
-/// Multiply the target's alpha by a source layer's live alpha (clipping mask):
-/// the source's pixels, transform, opacity, raster mask and upstream live
-/// masks contribute coverage.
-fn multiply_by_source_alpha(
-    target: &mut Bitmap,
-    target_transform: &LayerTransform,
-    source: &Bitmap,
-    source_transform: &LayerTransform,
-) {
-    let target_to_doc = pixel_to_document(target_transform, target.width as f64, target.height as f64);
-    let doc_to_source = pixel_to_document(source_transform, source.width as f64, source.height as f64).inverted();
-    let mapping = doc_to_source.concat(&target_to_doc);
-    let mut multiplied = target.clone();
-    for y in 0..target.height {
-        for x in 0..target.width {
-            let o = (y * target.width + x) * 4;
-            if multiplied.data[o + 3] == 0 {
-                continue;
-            }
-            let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&mapping);
-            if p.x < 0.0 || p.y < 0.0 || p.x >= source.width as f64 || p.y >= source.height as f64 {
-                multiplied.data[o + 3] = 0;
-                continue;
-            }
-            let alpha = crate::raster::sample_bitmap(source, p.x, p.y, LayerSampling::Smooth)[3] as f32 / 255.0;
-            for c in 0..4 {
-                multiplied.data[o + c] = (multiplied.data[o + c] as f32 * alpha) as u8;
-            }
-        }
-    }
-    *target = multiplied;
 }
 
 /// The gray grid of a placed mask bitmap (RGBA → gray), sized to the layer.
@@ -569,7 +786,15 @@ mod tests {
             is_linked: true,
         });
         let folder_id = folder.id;
+        // The child spans the whole canvas so the folder mask is what clips it.
         let mut child = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0);
+        child.transform.size = CGSize::new(20.0, 10.0);
+        let mut wide = Bitmap::new(20, 10);
+        for i in (0..wide.data.len()).step_by(4) {
+            wide.data[i] = 255;
+            wide.data[i + 3] = 255;
+        }
+        child.asset = Some(ImportedImage::with_thumbnail(wide, Bitmap::new(4, 2), "W"));
         child.parent_id = Some(folder_id);
         doc.layers = vec![folder, child];
         let out = draw_live_composite(&doc);
@@ -597,7 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn adjustment_layer_alters_pixels() {
+    fn adjustment_layer_applies_to_content_below() {
+        // An adjustment layer reworks the composited content under it
+        // (LiveMaskRenderer.adjust); it draws no pixels of its own.
         use crate::adjustment::{AdjustmentKind, LayerAdjustment};
         let mut doc = CanvasDocument::new(10, 10);
         let mut gray = Bitmap::new(10, 10);
@@ -607,19 +834,160 @@ mod tests {
             gray.data[i + 2] = 128;
             gray.data[i + 3] = 255;
         }
-        let mut layer = ImageLayer::with_asset(ImportedImage::with_thumbnail(gray, Bitmap::new(2, 2), "G"), CGPoint::ZERO);
         let mut adjustment = LayerAdjustment::new(AdjustmentKind::Exposure);
         adjustment.set_exposure(crate::adjust::ExposureSettings {
             exposure: 2.0,
             offset: 0.0,
             gamma: 1.0,
         });
-        layer.adjustment = Some(adjustment);
-        doc.layers = vec![layer];
+        let mut bottom = ImageLayer::with_asset(ImportedImage::with_thumbnail(gray, Bitmap::new(2, 2), "G"), CGPoint::ZERO);
+        bottom.name = "G".into();
+        let mut top = ImageLayer::blank("Exposure", doc.size());
+        top.adjustment = Some(adjustment.clone());
+        doc.layers = vec![bottom, top];
         let out = draw_live_composite(&doc);
         // +2 stops: 0.214 linear ×4 = 0.856 linear ≈ 240 sRGB.
         let v = out.pixel(5, 5)[0];
         assert!(v > 225 && v < 250, "{v}");
+        assert_eq!(out.pixel(5, 5)[3], 255);
+        // With nothing below, an adjustment layer leaves the canvas empty.
+        let mut empty = CanvasDocument::new(10, 10);
+        let mut alone = ImageLayer::blank("Exposure", empty.size());
+        alone.adjustment = Some(adjustment);
+        empty.layers = vec![alone];
+        assert_eq!(draw_live_composite(&empty).pixel(5, 5)[3], 0);
+    }
+
+    #[test]
+    fn adjustment_mask_scopes_the_adjustment() {
+        use crate::adjustment::{AdjustmentKind, LayerAdjustment};
+        let mut doc = CanvasDocument::new(20, 10);
+        let mut gray = Bitmap::new(20, 10);
+        for i in (0..gray.data.len()).step_by(4) {
+            gray.data[i] = 128;
+            gray.data[i + 1] = 128;
+            gray.data[i + 2] = 128;
+            gray.data[i + 3] = 255;
+        }
+        let mut adjustment = LayerAdjustment::new(AdjustmentKind::Exposure);
+        adjustment.set_exposure(crate::adjust::ExposureSettings {
+            exposure: 2.0,
+            offset: 0.0,
+            gamma: 1.0,
+        });
+        let mut layer = ImageLayer::blank("Exposure", doc.size());
+        layer.adjustment = Some(adjustment);
+        // White left half, black right half: only the left half brightens.
+        let mut mask_image = Bitmap::new(20, 10);
+        for y in 0..10 {
+            for x in 0..20 {
+                let v = if x < 10 { 255 } else { 0 };
+                mask_image.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::with_thumbnail(mask_image, Bitmap::new(4, 2), "Mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        doc.layers = vec![
+            ImageLayer::with_asset(ImportedImage::with_thumbnail(gray, Bitmap::new(4, 2), "G"), CGPoint::ZERO),
+            layer,
+        ];
+        let out = draw_live_composite(&doc);
+        let lit = out.pixel(5, 5)[0];
+        assert!(lit > 225, "{lit}");
+        assert_eq!(out.pixel(15, 5)[0], 128);
+    }
+
+    #[test]
+    fn folder_opacity_multiplies_into_children() {
+        // A layer at 50% in a folder at 50% shows at 25% (LayerOpacity).
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut folder = ImageLayer::blank("Folder", doc.size());
+        folder.is_group = true;
+        folder.opacity = 0.5;
+        let folder_id = folder.id;
+        let mut child = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 0.5);
+        child.parent_id = Some(folder_id);
+        doc.layers = vec![folder, child];
+        let out = draw_live_composite(&doc);
+        let a = out.pixel(5, 5)[3];
+        assert!(a >= 55 && a <= 75, "{a}");
+    }
+
+    #[test]
+    fn clipping_stack_shares_base_coverage() {
+        // Base: red, left half. Child: blue over the whole canvas, clipped to
+        // the base. The whole stack shows only where the base had alpha, and
+        // the child lands over the base within that coverage.
+        let mut doc = CanvasDocument::new(20, 10);
+        let mut base = Bitmap::new(10, 10);
+        for i in (0..base.data.len()).step_by(4) {
+            base.data[i] = 255;
+            base.data[i + 3] = 255;
+        }
+        let base_layer = ImageLayer::with_asset(ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"), CGPoint::ZERO);
+        let mut blue_img = Bitmap::new(20, 10);
+        for i in (0..blue_img.data.len()).step_by(4) {
+            blue_img.data[i + 2] = 255;
+            blue_img.data[i + 3] = 255;
+        }
+        let mut child = ImageLayer::with_asset(ImportedImage::with_thumbnail(blue_img, Bitmap::new(4, 2), "C"), CGPoint::ZERO);
+        child.mask_source_id = Some(base_layer.id);
+        doc.layers = vec![base_layer, child];
+        let out = draw_live_composite(&doc);
+        assert_eq!(out.pixel(5, 5), [0, 0, 255, 255]);
+        assert_eq!(out.pixel(15, 5)[3], 0);
+    }
+
+    #[test]
+    fn effects_are_not_masked_twice() {
+        // With effects the mask is baked into the effect render and the result
+        // is drawn mask-free (EditorCanvas draws effects `mask: nil`); a soft
+        // mask edge must keep its coverage, not lose it to a second multiply.
+        use crate::effects::{ColorOverlayEffect, LayerEffects};
+        let mut doc = CanvasDocument::new(16, 10);
+        let mut layer = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0);
+        let mut mask_image = Bitmap::new(10, 10);
+        for y in 0..10 {
+            for x in 0..10 {
+                let v = match x {
+                    0..=4 => 255u8,
+                    5 => 128,
+                    _ => 0,
+                };
+                mask_image.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::with_thumbnail(mask_image, Bitmap::new(4, 2), "Mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        let mut overlay = ColorOverlayEffect::default();
+        overlay.enabled = Some(true);
+        layer.effects = Some(LayerEffects {
+            color_overlay: Some(overlay),
+            ..Default::default()
+        });
+        doc.layers = vec![layer];
+        let out = draw_live_composite(&doc);
+        // Inside the mask the overlay color shows at full coverage.
+        let solid = out.pixel(2, 5);
+        assert_eq!(solid[3], 255);
+        // The soft edge keeps a single application of the mask: the overlay's
+        // source-over lifts the 50% pixel to ~75% (192), and a second mask
+        // multiply would square it back to ~96.
+        let soft = out.pixel(5, 5);
+        assert!(
+            (170..=210).contains(&soft[3]),
+            "soft mask edge alpha {}, single mask expected",
+            soft[3]
+        );
+        assert_eq!(out.pixel(8, 5)[3], 0);
     }
 
     #[test]
