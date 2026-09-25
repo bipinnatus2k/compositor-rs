@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 publish = ["rsproxy-sparse"]
 
+[lib]
+name = "compositor_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "compositor"
 path = "src/main.rs"

@@ -9,12 +9,17 @@ actions!(compositor, [
     ToolHealing, ToolClone, ToolSmear, ToolGradient, ToolShape, ToolType,
     ToolEyedropper, ToolHand, ToolZoom,
     // Palette and tool modes
-    SwapColors, DefaultColors, CycleToolMode,
+    SwapColors, DefaultColors, CycleToolMode, CycleShapeKind,
+    BrushSofter, BrushHarder, BlendModeNext, BlendModePrevious,
     // File
-    NewCanvas, OpenDocument, SaveDocument, ExportPng, ExportJpeg, ImportImages,
+    NewCanvas, OpenDocument, SaveDocument, SaveAs, ExportPng, ExportJpeg, ImportImages,
     CloseDocument,
     // Edit
     Undo, Redo, FillForeground, FillBackground, FreeTransform, ShowShortcuts,
+    Cut, CopyPixels, CopyMerged, PastePixels,
+    ShowTransformControls, ContentAwareFill,
+    CurvesSheet, InvertPixels, ToggleClippingMask,
+    MoveLayerUp, MoveLayerDown, ToggleLevelsPreview,
     // Image
     ImageSize, CanvasSize, TrimSheet, CropToSelection,
     FlipCanvasHorizontal, FlipCanvasVertical,
@@ -30,7 +35,7 @@ actions!(compositor, [
     FilterCameraRaw,
     // View
     ToggleRulers, ToggleGrid, ToggleGuides, TogglePixelGrid,
-    SnapGuides, SnapGrid, SnapLayers, SnapBounds,
+    SnapToggle, SnapGuides, SnapGrid, SnapLayers, SnapBounds, LockGuides,
     ZoomIn, ZoomOut, ZoomFit, Zoom100,
     // Window / Help
     ResetPanels, About,
@@ -70,12 +75,40 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-n", NewCanvas, None),
         KeyBinding::new("ctrl-o", OpenDocument, None),
         KeyBinding::new("ctrl-s", SaveDocument, None),
-        KeyBinding::new("ctrl-shift-s", ExportPng, None),
-        KeyBinding::new("alt-shift-s", ExportJpeg, None),
+        KeyBinding::new("ctrl-shift-s", SaveAs, None),
+        // Export PNG ⇧⌘E, Export JPEG ⌥⇧⌘S
+        KeyBinding::new("ctrl-shift-e", ExportPng, None),
+        KeyBinding::new("ctrl-alt-shift-s", ExportJpeg, None),
+        KeyBinding::new("ctrl-w", CloseDocument, None),
         // Edit
         KeyBinding::new("ctrl-z", Undo, None),
         KeyBinding::new("ctrl-shift-z", Redo, None),
         KeyBinding::new("ctrl-t", FreeTransform, None),
+        // Clipboard (Cmd-X/C/V and Copy Merged Cmd-Shift-C)
+        KeyBinding::new("ctrl-x", Cut, None),
+        KeyBinding::new("ctrl-c", CopyPixels, None),
+        KeyBinding::new("ctrl-shift-c", CopyMerged, None),
+        KeyBinding::new("ctrl-v", PastePixels, None),
+        // Photoshop's fill shortcuts: Option-Delete, Cmd-Delete, Shift-Delete
+        KeyBinding::new("alt-delete", FillForeground, None),
+        KeyBinding::new("alt-backspace", FillForeground, None),
+        KeyBinding::new("ctrl-delete", FillBackground, None),
+        KeyBinding::new("ctrl-backspace", FillBackground, None),
+        KeyBinding::new("shift-delete", ContentAwareFill, None),
+        KeyBinding::new("shift-backspace", ContentAwareFill, None),
+        // Transform controls toggle (Cmd-H) and Invert pixels (Cmd-I)
+        KeyBinding::new("ctrl-h", ShowTransformControls, None),
+        KeyBinding::new("ctrl-i", InvertPixels, None),
+        // Curves (Cmd-M) and clipping mask toggle (Cmd-Alt-G)
+        KeyBinding::new("ctrl-m", CurvesSheet, None),
+        KeyBinding::new("alt-ctrl-g", ToggleClippingMask, None),
+        // Layer stacking (Cmd-[ / Cmd-])
+        KeyBinding::new("ctrl-[", MoveLayerDown, None),
+        KeyBinding::new("ctrl-]", MoveLayerUp, None),
+        // Show guides ⌘;, show grid ⌘', snap master ⇧⌘;, lock guides ⌥⌘;
+        KeyBinding::new("ctrl-;", ToggleGuides, None),
+        KeyBinding::new("ctrl-shift-;", SnapToggle, None),
+        KeyBinding::new("alt-ctrl-;", LockGuides, None),
         // Image adjustments
         KeyBinding::new("ctrl-l", LevelsSheet, None),
         KeyBinding::new("ctrl-u", HueSaturationSheet, None),
@@ -117,6 +150,16 @@ pub fn bindings() -> Vec<KeyBinding> {
         // Brush size
         KeyBinding::new("[", BrushSmaller, None),
         KeyBinding::new("]", BrushLarger, None),
+        // Brush hardness (Swift Shift-[ / Shift-])
+        KeyBinding::new("shift-[", BrushSofter, None),
+        KeyBinding::new("shift-]", BrushHarder, None),
+        // Blend mode stepping (Swift Shift-- / Shift-=)
+        KeyBinding::new("shift--", BlendModePrevious, None),
+        KeyBinding::new("shift-=", BlendModeNext, None),
+        // Cycle shape kind (Swift Shift-U)
+        KeyBinding::new("shift-u", CycleShapeKind, None),
+        // Levels preview toggle (Swift Alt-P)
+        KeyBinding::new("alt-p", ToggleLevelsPreview, None),
         // Finish a polygonal lasso
         KeyBinding::new("enter", FinishLasso, Some("Compositor")),
         // Escape cancels the active canvas edit or sheet.

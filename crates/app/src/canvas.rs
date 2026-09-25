@@ -151,7 +151,10 @@ impl AppState {
                 crop = Some((min, max));
             }
             if let Some(edit) = &self.session.transform_edit {
-                if edit.draft.is_valid() {
+                // TransformOverlay.swift: handles hide with ⌘H unless an edit must stay visible.
+                if edit.draft.is_valid()
+                    && (self.session.shows_transform_controls || edit.persistent)
+                {
                     transform = Some(
                         edit.draft
                             .corners()
@@ -306,6 +309,7 @@ impl AppState {
         let local = self.local_position(event.position);
         let doc = self.screen_to_doc(local.0, local.1);
         let shift = event.modifiers.shift;
+        let alt = event.modifiers.alt;
 
         match self.drag.as_mut() {
             Some(CanvasDrag::Pan { start, start_pan }) => {
@@ -321,8 +325,7 @@ impl AppState {
                 stroke.append(doc);
             }
             Some(CanvasDrag::Shape { start }) => {
-                let square = shift;
-                let rect = compositor_core::selection::drag_box_rect(*start, doc, square, false);
+                let rect = shape_drag_rect(self.session.shape_kind, *start, doc, shift, alt);
                 let shape = self.build_shape_for_drag(rect);
                 self.shape_rect = Some(rect);
                 self.shape_shape = Some(shape);
@@ -489,8 +492,9 @@ impl AppState {
                 edit.clone = Some((sample, offset));
             }
         }
-        // The Blur brush: the layer as shown, softened by an amount that
-        // follows the brush size, painted in place through the tip.
+        // The Blur brush: the canvas as shown (displayed transform, mask
+        // applied), softened by an amount that follows the brush size,
+        // painted in place through the tip (BlurTool.swift:8-40).
         if self.session.tool == NavigationTool::Blur {
             if let Some(sample) = self.sample_for_clone() {
                 let diameter = self.session.brush_settings.diameter;
@@ -507,11 +511,36 @@ impl AppState {
     fn sample_for_clone(&self) -> Option<Bitmap> {
         let document = self.session.document.as_ref()?;
         if self.session.clone_settings.sample_all_layers {
-            Some(compositor_core::render::draw_live_composite(document))
-        } else {
-            let layer = self.session.active_layer()?;
-            Some(layer.asset.as_ref()?.image.as_ref().clone())
+            return Some(compositor_core::render::draw_live_composite(document));
         }
+        // The active layer as the canvas displays it: drawn through its
+        // displayed transform at document size (CloneStamp.swift:39-48).
+        let layer = self.session.active_layer()?;
+        let image = layer.asset.as_ref()?.image.as_ref().clone();
+        let transform = self.session.displayed_transform(layer);
+        let mut canvas = Bitmap::new(document.width, document.height);
+        compositor_core::render::draw_layer_pixels(&image, &transform, &mut canvas);
+        // An enabled mask shows through: the sampled content is multiplied by
+        // the mask coverage (the canvas displays the masked result).
+        if let Some(mask) = layer.mask.as_ref().filter(|m| m.is_enabled) {
+            if let Some(coverage) = compositor_core::render::mask_clip_image(
+                mask,
+                &layer.mask_transform(),
+                document.width,
+                document.height,
+            ) {
+                for y in 0..canvas.height {
+                    for x in 0..canvas.width {
+                        let o = (y * canvas.width + x) * 4;
+                        let m = coverage.pixel(x, y)[0] as f32 / 255.0;
+                        for c in 0..4 {
+                            canvas.data[o + c] = (canvas.data[o + c] as f32 * m) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        Some(canvas)
     }
 
     fn commit_stroke(&mut self, mut edit: RasterEdit, cx: &mut Context<Self>) {
@@ -574,6 +603,8 @@ impl AppState {
         compositor_core::render::draw_layer_pixels(&image, &layer.transform, &mut surface);
         let mut stroke =
             WarpStroke::new(surface, self.session.blur_mode, &self.session.brush_settings);
+        stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
+        stroke.layer_transform = layer.transform;
         stroke.append(doc);
         self.drag = Some(CanvasDrag::Warp(stroke));
     }
@@ -595,7 +626,18 @@ impl AppState {
         let Some(layer) = document.layer(id) else {
             return;
         };
+        // The stroke captured the layer it started on; if it changed under
+        // the warp, the result is dropped (finishWarp's identity guard).
+        if stroke.layer_asset.as_deref() != layer.asset.as_ref().map(|a| a.image.as_ref())
+            || stroke.layer_transform != layer.transform
+        {
+            return;
+        }
         let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
+        let selection_clip = document
+            .selection
+            .as_ref()
+            .map(|s| s.clip(document.size()));
         let diameter = stroke.diameter;
         let points = stroke.points.clone();
         let result = stroke.into_image();
@@ -607,6 +649,7 @@ impl AppState {
             layer.transform,
             document.size(),
             name,
+            selection_clip,
         ) {
             self.commit_pixels(snapshot, transform, name, cx);
         }
@@ -799,6 +842,11 @@ impl AppState {
 
     /// Tab cycles the active tool's mode.
     pub fn cycle_tool_mode(&mut self, cx: &mut Context<Self>) {
+        if self.session.tool == NavigationTool::Shape {
+            self.session.toggle_shape_kind();
+            self.touch(cx);
+            return;
+        }
         match self.session.tool {
             NavigationTool::Marquee => self.session.toggle_marquee_kind(),
             NavigationTool::Lasso => self.session.toggle_lasso_kind(),
@@ -863,9 +911,51 @@ impl AppState {
     }
 }
 
+/// The drag rect for the shape tool (`ShapeTool.dragShape`): Shift squares
+/// non-line shapes and snaps a line's angle to eighths of a turn, Option
+/// grows a non-line shape symmetrically from its anchor. A line ignores both
+/// beyond the snap — it is stored as its bounding box.
+fn shape_drag_rect(
+    kind: compositor_core::document::ShapeKind,
+    anchor: CGPoint,
+    end: CGPoint,
+    square: bool,
+    from_center: bool,
+) -> CGRect {
+    let is_line = kind == compositor_core::document::ShapeKind::Line;
+    let mut end = end;
+    if is_line && square {
+        // Shift on a line snaps its angle to eighths of a turn.
+        let dx = end.x - anchor.x;
+        let dy = end.y - anchor.y;
+        let angle = ((dy.atan2(dx)) / std::f64::consts::FRAC_PI_4).round()
+            * std::f64::consts::FRAC_PI_4;
+        let length = dx.hypot(dy);
+        end = CGPoint::new(
+            anchor.x + angle.cos() * length,
+            anchor.y + angle.sin() * length,
+        );
+    }
+    let mut rect = compositor_core::selection::drag_box_rect(
+        anchor,
+        end,
+        !is_line && square,
+        !is_line && from_center,
+    );
+    if !is_line && from_center {
+        // Option grows the shape from its center.
+        rect = CGRect::new(
+            2.0 * anchor.x - end.x,
+            2.0 * anchor.y - end.y,
+            (end.x - anchor.x) * 2.0,
+            (end.y - anchor.y) * 2.0,
+        );
+    }
+    rect
+}
+
 /// Which of the crop rect's 8 handles is under `doc`, if any.
-fn handle_at(rect: CGRect, doc: CGPoint) -> Option<usize> {
-    const HANDLE: f64 = 8.0;
+fn handle_at(rect: CGRect, doc: CGPoint) -> Option<usize> {    const HANDLE: f64 = 8.0;
     let corners = [
         (rect.min_x(), rect.min_y()),
         (rect.mid_x(), rect.min_y()),
@@ -1223,6 +1313,92 @@ fn nice_tick(rough: f64) -> f64 {
         .copied()
         .find(|candidate| *candidate >= rough)
         .unwrap_or(10000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_at, nice_tick, shape_drag_rect};
+    use compositor_core::document::ShapeKind;
+    use compositor_core::geometry::{CGPoint, CGRect};
+
+    #[test]
+    fn nice_tick_rounds_up_to_a_ruler_step() {
+        assert_eq!(nice_tick(0.4), 1.0);
+        assert_eq!(nice_tick(3.0), 5.0);
+        assert_eq!(nice_tick(7.5), 10.0);
+        assert_eq!(nice_tick(120.0), 250.0);
+        // Beyond the last candidate it saturates.
+        assert_eq!(nice_tick(99_999.0), 10_000.0);
+    }
+
+    #[test]
+    fn handle_at_hits_corners_and_edges_but_not_center() {
+        let rect = CGRect::new(0.0, 0.0, 100.0, 60.0);
+        // Top-left corner handle (index 0) ...
+        assert_eq!(handle_at(rect, CGPoint::new(2.0, -3.0)), Some(0));
+        // ... and the right-middle edge handle (index 3).
+        assert_eq!(handle_at(rect, CGPoint::new(103.0, 30.0)), Some(3));
+        // Well inside the rect there is no handle.
+        assert_eq!(handle_at(rect, CGPoint::new(50.0, 30.0)), None);
+        // Far outside any handle either.
+        assert_eq!(handle_at(rect, CGPoint::new(60.0, 90.0)), None);
+    }
+
+    #[test]
+    fn handle_at_walks_the_eight_handles_clockwise() {
+        let rect = CGRect::new(0.0, 0.0, 100.0, 60.0);
+        // Corners, then edge midpoints, clockwise from the top-left.
+        let expected = [
+            (0.0, 0.0, 0),
+            (50.0, 0.0, 1),
+            (100.0, 0.0, 2),
+            (100.0, 30.0, 3),
+            (100.0, 60.0, 4),
+            (50.0, 60.0, 5),
+            (0.0, 60.0, 6),
+            (0.0, 30.0, 7),
+        ];
+        for (x, y, index) in expected {
+            assert_eq!(handle_at(rect, CGPoint::new(x, y)), Some(index), "at {x},{y}");
+        }
+    }
+
+    #[test]
+    fn shape_drag_rect_squares_and_centers() {
+        let anchor = CGPoint::new(10.0, 10.0);
+        // No modifiers: the plain anchor→point box.
+        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), false, false);
+        assert_eq!(rect, CGRect::new(10.0, 10.0, 13.0, 17.0));
+        // Shift squares it to the longer side, keeping the drag direction.
+        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), true, false);
+        assert_eq!(rect, CGRect::new(10.0, 10.0, 17.0, 17.0));
+        // Option grows a symmetric shape around the anchor.
+        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), false, true);
+        assert_eq!(rect, CGRect::new(-3.0, -7.0, 26.0, 34.0));
+        // Backwards drags normalize to positive sizes.
+        let rect = shape_drag_rect(ShapeKind::Ellipse, anchor, CGPoint::new(-5.0, 4.0), false, false);
+        assert_eq!(rect, CGRect::new(-5.0, 4.0, 15.0, 6.0));
+    }
+
+    #[test]
+    fn shape_drag_line_snaps_to_eighths_and_ignores_modifiers() {
+        let anchor = CGPoint::new(0.0, 0.0);
+        // Shift snaps a shallow drag to exactly horizontal.
+        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(100.0, 7.0), true, false);
+        assert_eq!(rect, CGRect::new(0.0, 0.0, 100.0, 0.0));
+        // A 3-4-5-ish drag snaps to the 45° diagonal, keeping its length
+        // (drag_box_rect rounds the snapped end to whole pixels).
+        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), true, false);
+        let snapped = (164.0f64.sqrt() * std::f64::consts::FRAC_1_SQRT_2).round();
+        assert_eq!(rect.size.width, snapped);
+        assert_eq!(rect.size.height, snapped);
+        // Without shift, no snap.
+        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), false, false);
+        assert_eq!(rect, CGRect::new(0.0, 0.0, 10.0, 8.0));
+        // A line ignores Option centering: it stays the plain box.
+        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), false, true);
+        assert_eq!(rect, CGRect::new(0.0, 0.0, 10.0, 8.0));
+    }
 }
 
 // MARK: Drag events

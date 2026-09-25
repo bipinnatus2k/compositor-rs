@@ -136,6 +136,8 @@ impl AppState {
             SheetKind::Levels => {
                 self.begin_preview();
                 let mut sheet = SheetState { ..base };
+                // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
+                sheet.checkbox_a = true;
                 sheet.sliders = vec![
                     self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
                     self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
@@ -277,11 +279,16 @@ impl AppState {
             | SliderRole::LevelsWhite
             | SliderRole::LevelsOutBlack
             | SliderRole::LevelsOutWhite => {
-                let settings = self.levels_settings_from_sheet(cx);
+                let preview = sheet.checkbox_a;
                 if let Some(base) = self.preview_base.clone() {
-                    let mut adjusted = base.as_ref().clone();
-                    levels_apply_settings(&mut adjusted, &settings);
-                    self.preview = Some(std::sync::Arc::new(adjusted));
+                    if preview {
+                        let settings = self.levels_settings_from_sheet(cx);
+                        let mut adjusted = base.as_ref().clone();
+                        levels_apply_settings(&mut adjusted, &settings);
+                        self.preview = Some(std::sync::Arc::new(adjusted));
+                    } else {
+                        self.preview = Some(base);
+                    }
                 }
             }
             SliderRole::Hue | SliderRole::Saturation | SliderRole::Lightness => {
@@ -329,6 +336,25 @@ impl AppState {
                 };
                 self.apply_filter_preview(kind, settings);
             }
+        }
+        self.revision += 1;
+        cx.notify();
+    }
+
+    /// Rebuilds the Levels preview after the Preview checkbox flips: unchecked
+    /// shows the untouched pixels, exactly as Swift's `edit.preview` does.
+    pub fn refresh_levels_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.preview_base.clone() else {
+            return;
+        };
+        let preview = self.sheet.as_ref().map(|s| s.checkbox_a).unwrap_or(true);
+        if preview {
+            let settings = self.levels_settings_from_sheet(cx);
+            let mut adjusted = base.as_ref().clone();
+            levels_apply_settings(&mut adjusted, &settings);
+            self.preview = Some(std::sync::Arc::new(adjusted));
+        } else {
+            self.preview = Some(base);
         }
         self.revision += 1;
         cx.notify();

@@ -20,6 +20,9 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
     let snap_grid = session.snap_to_grid;
     let snap_layers = session.snap_to_layers;
     let snap_bounds = session.snap_to_document_bounds;
+    let snapping = session.snapping_enabled;
+    let lock_guides = session.locks_guides;
+    let transform_controls = session.shows_transform_controls;
     let bar = gpui_kit::div()
         .flex()
         .flex_row()
@@ -47,8 +50,14 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
             menu.menu("Undo", Box::new(keys::Undo))
                 .menu("Redo", Box::new(keys::Redo))
                 .separator()
+                .menu("Cut", Box::new(keys::Cut))
+                .menu("Copy", Box::new(keys::CopyPixels))
+                .menu("Copy Merged", Box::new(keys::CopyMerged))
+                .menu("Paste", Box::new(keys::PastePixels))
+                .separator()
                 .menu("Fill Foreground", Box::new(keys::FillForeground))
                 .menu("Fill Background", Box::new(keys::FillBackground))
+                .menu("Content-Aware Fill", Box::new(keys::ContentAwareFill))
                 .separator()
                 .menu("Free Transform", Box::new(keys::FreeTransform))
                 .separator()
@@ -57,6 +66,8 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
         .child(menu_button("menu-image", "Image", |menu, _, _| {
             menu.menu("Image Size…", Box::new(keys::ImageSize))
                 .menu("Canvas Size…", Box::new(keys::CanvasSize))
+                .separator()
+                .menu("Invert", Box::new(keys::InvertPixels))
                 .separator()
                 .menu("Trim…", Box::new(keys::TrimSheet))
                 .menu("Crop to Selection", Box::new(keys::CropToSelection))
@@ -68,6 +79,11 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
             menu.menu("New Layer", Box::new(keys::NewLayer))
                 .menu("Duplicate Layer", Box::new(keys::DuplicateLayer))
                 .menu("Delete Layer", Box::new(keys::DeleteLayer))
+                .separator()
+                .menu("Create Clipping Mask", Box::new(keys::ToggleClippingMask))
+                .separator()
+                .menu("Move Layer Up", Box::new(keys::MoveLayerUp))
+                .menu("Move Layer Down", Box::new(keys::MoveLayerDown))
                 .separator()
                 .menu("Merge Down", Box::new(keys::MergeDown))
                 .menu("New Group", Box::new(keys::NewGroup))
@@ -95,11 +111,13 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
                 .menu("Camera Raw Filter…", Box::new(keys::FilterCameraRaw))
         }))
         .child(menu_button("menu-view", "View", move |menu, _, _| {
-            menu.menu_with_check("Rulers", rulers, Box::new(keys::ToggleRulers))
+            menu.menu_with_check("Show Transform Controls", transform_controls, Box::new(keys::ShowTransformControls))
+                .menu_with_check("Rulers", rulers, Box::new(keys::ToggleRulers))
                 .menu_with_check("Grid", grid, Box::new(keys::ToggleGrid))
                 .menu_with_check("Guides", guides, Box::new(keys::ToggleGuides))
                 .menu_with_check("Pixel Grid", pixel_grid, Box::new(keys::TogglePixelGrid))
                 .separator()
+                .menu_with_check("Snap", snapping, Box::new(keys::SnapToggle))
                 .menu_with_check("Snap to Guides", snap_guides, Box::new(keys::SnapGuides))
                 .menu_with_check("Snap to Grid", snap_grid, Box::new(keys::SnapGrid))
                 .menu_with_check("Snap to Layers", snap_layers, Box::new(keys::SnapLayers))
@@ -108,6 +126,8 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
                     snap_bounds,
                     Box::new(keys::SnapBounds),
                 )
+                .separator()
+                .menu_with_check("Lock Guides", lock_guides, Box::new(keys::LockGuides))
         }))
         .child(menu_button("menu-window", "Window", |menu, _, _| {
             menu.menu("Reset Panel Layout", Box::new(keys::ResetPanels))

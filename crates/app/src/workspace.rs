@@ -48,6 +48,7 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_new_canvas))
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_save_as))
             .on_action(cx.listener(Self::on_export))
             .on_action(cx.listener(Self::on_export_jpeg))
             .on_action(cx.listener(Self::on_import_images))
@@ -96,6 +97,8 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_toggle_guides))
             .on_action(cx.listener(Self::on_toggle_pixel_grid))
             .on_action(cx.listener(Self::on_snap_guides))
+            .on_action(cx.listener(Self::on_snap_toggle))
+            .on_action(cx.listener(Self::on_lock_guides))
             .on_action(cx.listener(Self::on_snap_grid))
             .on_action(cx.listener(Self::on_snap_layers))
             .on_action(cx.listener(Self::on_snap_bounds))
@@ -117,6 +120,22 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_nudge_down_more))
             .on_action(cx.listener(Self::on_brush_smaller))
             .on_action(cx.listener(Self::on_brush_larger))
+            .on_action(cx.listener(Self::on_brush_softer))
+            .on_action(cx.listener(Self::on_brush_harder))
+            .on_action(cx.listener(Self::on_blend_mode_previous))
+            .on_action(cx.listener(Self::on_blend_mode_next))
+            .on_action(cx.listener(Self::on_cycle_shape_kind))
+            .on_action(cx.listener(Self::on_show_transform_controls))
+            .on_action(cx.listener(Self::on_invert_pixels))
+            .on_action(cx.listener(Self::on_toggle_clipping_mask))
+            .on_action(cx.listener(Self::on_move_layer_down))
+            .on_action(cx.listener(Self::on_move_layer_up))
+            .on_action(cx.listener(Self::on_cut))
+            .on_action(cx.listener(Self::on_copy_pixels))
+            .on_action(cx.listener(Self::on_copy_merged))
+            .on_action(cx.listener(Self::on_paste_pixels))
+            .on_action(cx.listener(Self::on_content_aware_fill))
+            .on_action(cx.listener(Self::on_toggle_levels_preview))
             .on_action(cx.listener(Self::on_finish_lasso))
             .on_action(cx.listener(Self::on_cancel))
             // Layout
@@ -230,6 +249,9 @@ impl AppState {
         self.open_sheet(SheetKind::Open, _w, cx);
     }
     fn on_save(&mut self, _: &keys::SaveDocument, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::SaveComp, _w, cx);
+    }
+    fn on_save_as(&mut self, _: &keys::SaveAs, _w: &mut Window, cx: &mut Context<Self>) {
         self.open_sheet(SheetKind::SaveComp, _w, cx);
     }
     fn on_export(&mut self, _: &keys::ExportPng, _w: &mut Window, cx: &mut Context<Self>) {
@@ -412,6 +434,14 @@ impl AppState {
         self.session.snap_to_guides = !self.session.snap_to_guides;
         self.touch(cx);
     }
+    fn on_snap_toggle(&mut self, _: &keys::SnapToggle, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.snapping_enabled = !self.session.snapping_enabled;
+        self.touch(cx);
+    }
+    fn on_lock_guides(&mut self, _: &keys::LockGuides, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.locks_guides = !self.session.locks_guides;
+        self.touch(cx);
+    }
     fn on_snap_grid(&mut self, _: &keys::SnapGrid, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snap_to_grid = !self.session.snap_to_grid;
         self.touch(cx);
@@ -482,6 +512,76 @@ impl AppState {
     }
     fn on_brush_larger(&mut self, _: &keys::BrushLarger, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, w, cx| t.resize_brush(1.25, w, cx));
+    }
+    fn on_brush_softer(&mut self, _: &keys::BrushSofter, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, w, cx| t.change_brush_hardness(false, w, cx));
+    }
+    fn on_brush_harder(&mut self, _: &keys::BrushHarder, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, w, cx| t.change_brush_hardness(true, w, cx));
+    }
+    fn on_blend_mode_previous(&mut self, _: &keys::BlendModePrevious, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.cycle_blend_mode(false);
+        cx.notify();
+    }
+    fn on_blend_mode_next(&mut self, _: &keys::BlendModeNext, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.cycle_blend_mode(true);
+        cx.notify();
+    }
+    fn on_cycle_shape_kind(&mut self, _: &keys::CycleShapeKind, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.toggle_shape_kind();
+        cx.notify();
+    }
+    fn on_show_transform_controls(&mut self, _: &keys::ShowTransformControls, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.shows_transform_controls = !self.session.shows_transform_controls;
+        self.touch(cx);
+    }
+    fn on_invert_pixels(&mut self, _: &keys::InvertPixels, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.invert_pixels();
+        self.touch(cx);
+    }
+    fn on_toggle_clipping_mask(&mut self, _: &keys::ToggleClippingMask, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.session.active_layer_id {
+            self.session.toggle_clipping_mask(id);
+        }
+        self.touch(cx);
+    }
+    fn on_move_layer_down(&mut self, _: &keys::MoveLayerDown, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.move_active_layer(-1);
+        self.touch(cx);
+    }
+    fn on_move_layer_up(&mut self, _: &keys::MoveLayerUp, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.move_active_layer(1);
+        self.touch(cx);
+    }
+    fn on_cut(&mut self, _: &keys::Cut, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.cut_selection();
+            t.touch(cx);
+        });
+    }
+    fn on_copy_pixels(&mut self, _: &keys::CopyPixels, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.copy_selection();
+            t.touch(cx);
+        });
+    }
+    fn on_copy_merged(&mut self, _: &keys::CopyMerged, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.copy_merged_selection();
+            t.touch(cx);
+        });
+    }
+    fn on_paste_pixels(&mut self, _: &keys::PastePixels, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.paste_pixels();
+            t.touch(cx);
+        });
+    }
+    fn on_content_aware_fill(&mut self, _: &keys::ContentAwareFill, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| t.run_content_aware_fill(cx));
+    }
+    fn on_toggle_levels_preview(&mut self, _: &keys::ToggleLevelsPreview, _w: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_levels_preview(cx);
     }
     fn on_finish_lasso(&mut self, _: &keys::FinishLasso, _w: &mut Window, cx: &mut Context<Self>) {
         if self.session.lasso_draft.is_some() {

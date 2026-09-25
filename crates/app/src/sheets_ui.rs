@@ -343,7 +343,24 @@ impl AppState {
                 let channel = sheet.channel;
                 let histogram = sheet.histogram;
                 let sliders = sheet.sliders.clone();
+                let preview = sheet.checkbox_a;
                 body = body
+                    .child(sheet_row(
+                        "Preview",
+                        labeled_checkbox(
+                            &app,
+                            "levels-preview",
+                            "Preview",
+                            preview,
+                            |state, checked, _, cx| {
+                                if let Some(sheet) = state.sheet.as_mut() {
+                                    sheet.checkbox_a = checked;
+                                }
+                                state.refresh_levels_preview(cx);
+                            },
+                        )
+                        .into_any_element(),
+                    ))
                     .child(sheet_row(
                         "Channel",
                         dropdown(
@@ -734,7 +751,12 @@ impl AppState {
                     width = ((w * width as f64) / 100.0).round() as usize;
                     height = ((h * height as f64) / 100.0).round() as usize;
                 }
-                self.session.resize_image_to(width, height, Some(resolution));
+                self.session.resize_image_to(
+                    width,
+                    height,
+                    Some(resolution),
+                    compositor_core::transform::LayerSampling::High,
+                );
                 self.fit_for = (0, 0);
             }
             SheetKind::CanvasSize => {

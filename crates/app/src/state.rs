@@ -30,6 +30,26 @@ pub const RULER_SIZE: f32 = 20.0;
 pub const MIN_ZOOM: f64 = 0.008;
 pub const MAX_ZOOM: f64 = 32.0;
 
+/// Document coordinates to viewport pixels under the given zoom and pan.
+/// Pure so tests can cover it without a window.
+pub fn doc_to_screen_at(zoom: f64, pan: (f64, f64), x: f64, y: f64) -> (f32, f32) {
+    ((x * zoom + pan.0) as f32, (y * zoom + pan.1) as f32)
+}
+
+/// Viewport pixels back to document coordinates; the inverse of
+/// `doc_to_screen_at`.
+pub fn screen_to_doc_at(zoom: f64, pan: (f64, f64), x: f32, y: f32) -> CGPoint {
+    CGPoint::new(
+        (x as f64 - pan.0) / zoom,
+        (y as f64 - pan.1) / zoom,
+    )
+}
+
+/// Clamps a zoom factor to the editor's supported range.
+pub fn clamp_zoom(zoom: f64) -> f64 {
+    zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
 /// What the pointer is currently doing on the canvas.
 pub enum CanvasDrag {
     /// Hand tool or middle-mouse panning.
@@ -286,6 +306,84 @@ impl AppState {
         self.set_status(format!("Brush size {:.0} px", next), cx);
     }
 
+    /// Shift-[ / Shift-]: hardness in Photoshop's 25% steps (0, 25, 50, 75, 100%).
+    pub fn change_brush_hardness(&mut self, increase: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.session.change_brush_hardness(increase);
+        let next = self.session.brush_settings.hardness;
+        let slider = self.brush_sliders[1].clone();
+        slider.update(cx, |state, cx| {
+            state.set_value(
+                gpui_kit::component::slider::SliderValue::Single((next * 100.0) as f32),
+                window,
+                cx,
+            )
+        });
+        self.set_status(format!("Brush hardness {:.0}%", next * 100.0), cx);
+    }
+
+    /// Content-Aware Fill (Shift-Delete): heals the selection from surrounding
+    /// pixels and commits it as one undo step, without opening a sheet.
+    pub fn run_content_aware_fill(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self
+            .session
+            .active_layer()
+            .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()))
+        else {
+            return;
+        };
+        let selection = self.session.selection().and_then(|s| {
+            self.session
+                .document
+                .as_ref()
+                .map(|d| s.clip(d.size()))
+        });
+        if self.session.selection().is_none() {
+            return;
+        }
+        let job = FilterJob {
+            kind: FilterKind::ContentAwareFill,
+            image: &base,
+            settings: FilterSettings::default(),
+            scale: 1.0,
+            selection,
+            mapping: CGAffineTransform::IDENTITY,
+            seed: 7,
+            noise_origin: CGPoint::ZERO,
+            camera_raw_clipping: None,
+            visualize_point_color: -1,
+            sharpen_mask: false,
+        };
+        let result = compositor_core::filters::run_filter(&job);
+        if let Some(id) = self.session.active_layer_id {
+            self.session.history.begin(
+                "Content-Aware Fill",
+                &self.session.document,
+                self.session.active_layer_id,
+            );
+            if let Some(doc) = self.session.document.as_mut() {
+                if let Some(layer) = doc.layer_mut(id) {
+                    layer.asset = Some(ImportedImage::new(result, layer.name.clone()));
+                }
+            }
+            self.session
+                .history
+                .end(&self.session.document, self.session.active_layer_id);
+        }
+        self.touch(cx);
+    }
+
+    /// Option-P with the Levels sheet open: flips its Preview checkbox.
+    pub fn toggle_levels_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(sheet) = self.sheet.as_mut() else {
+            return;
+        };
+        if sheet.kind != SheetKind::Levels {
+            return;
+        }
+        sheet.checkbox_a = !sheet.checkbox_a;
+        self.refresh_levels_preview(cx);
+    }
+
     /// Every mutation funnels through here so the frame image rebuilds.
     pub fn touch(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
@@ -307,17 +405,11 @@ impl AppState {
     }
 
     pub fn doc_to_screen(&self, x: f64, y: f64) -> (f32, f32) {
-        (
-            (x * self.zoom + self.pan.0) as f32,
-            (y * self.zoom + self.pan.1) as f32,
-        )
+        doc_to_screen_at(self.zoom, self.pan, x, y)
     }
 
     pub fn screen_to_doc(&self, x: f32, y: f32) -> CGPoint {
-        CGPoint::new(
-            (x as f64 - self.pan.0) / self.zoom,
-            (y as f64 - self.pan.1) / self.zoom,
-        )
+        screen_to_doc_at(self.zoom, self.pan, x, y)
     }
 
     /// The document rect in viewport pixels.
@@ -332,7 +424,7 @@ impl AppState {
 
     pub fn zoom_at(&mut self, screen: (f32, f32), factor: f64) {
         let doc = self.screen_to_doc(screen.0, screen.1);
-        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom = clamp_zoom(self.zoom * factor);
         self.pan = (
             screen.0 as f64 - doc.x * self.zoom,
             screen.1 as f64 - doc.y * self.zoom,
@@ -702,3 +794,48 @@ pub fn bgra_render_image(bitmap: &Bitmap) -> Arc<RenderImage> {
         .expect("bitmap size matches data");
     Arc::new(RenderImage::new(vec![Frame::new(buffer)]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_zoom, doc_to_screen_at, screen_to_doc_at, MAX_ZOOM, MIN_ZOOM};
+
+    #[test]
+    fn doc_to_screen_applies_zoom_and_pan() {
+        // A 100x100 document at 2x zoom, panned so its origin sits at (40, 30).
+        let (sx, sy) = doc_to_screen_at(2.0, (40.0, 30.0), 10.0, 5.0);
+        assert_eq!((sx, sy), (60.0, 40.0));
+        // Identity zoom and zero pan map document coordinates unchanged.
+        assert_eq!(doc_to_screen_at(1.0, (0.0, 0.0), 12.5, 3.25), (12.5, 3.25));
+    }
+
+    #[test]
+    fn screen_doc_roundtrip_recovers_document_point() {
+        let zoom = 0.35;
+        let pan = (-123.0, 456.5);
+        let (sx, sy) = doc_to_screen_at(zoom, pan, 88.0, -21.0);
+        let doc = screen_to_doc_at(zoom, pan, sx, sy);
+        // Screen coordinates are f32, so the roundtrip loses some precision.
+        assert!((doc.x - 88.0).abs() < 1e-3, "x = {}", doc.x);
+        assert!((doc.y - -21.0).abs() < 1e-3, "y = {}", doc.y);
+    }
+
+    #[test]
+    fn clamp_zoom_keeps_zoom_in_range() {
+        assert_eq!(clamp_zoom(1.0), 1.0);
+        assert_eq!(clamp_zoom(0.000_001), MIN_ZOOM);
+        assert_eq!(clamp_zoom(1_000.0), MAX_ZOOM);
+        assert_eq!(clamp_zoom(2.5), 2.5);
+    }
+
+    #[test]
+    fn screen_doc_roundtrip_holds_at_zoom_extremes() {
+        for zoom in [MIN_ZOOM, 0.1, 1.0, 8.0, MAX_ZOOM] {
+            let pan = (37.5, -18.25);
+            let (sx, sy) = doc_to_screen_at(zoom, pan, 250.0, 90.0);
+            let doc = screen_to_doc_at(zoom, pan, sx, sy);
+            assert!((doc.x - 250.0).abs() < 1e-2, "zoom {zoom}: x = {}", doc.x);
+            assert!((doc.y - 90.0).abs() < 1e-2, "zoom {zoom}: y = {}", doc.y);
+        }
+    }
+}
+

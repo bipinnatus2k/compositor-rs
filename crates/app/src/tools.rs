@@ -64,6 +64,21 @@ fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::tool_title;
+    use compositor_core::document::NavigationTool;
+
+    #[test]
+    fn tool_title_names_tools_and_eraser_variant() {
+        assert_eq!(tool_title(NavigationTool::Move, false), "Move");
+        assert_eq!(tool_title(NavigationTool::Idle, false), "No tool");
+        // The brush has two modes depending on the eraser toggle.
+        assert_eq!(tool_title(NavigationTool::Brush, false), "Brush");
+        assert_eq!(tool_title(NavigationTool::Brush, true), "Eraser");
+    }
+}
+
 impl AppState {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
         if tool == NavigationTool::Brush {

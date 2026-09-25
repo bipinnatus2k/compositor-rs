@@ -1,27 +1,20 @@
 //! Compositor: a Photoshop-like image editor. The binary opens one dark
 //! window (see `workspace.rs`) whose state is the `EditorSession` plus the
-//! viewport, tools and sheets.
+//! viewport, tools and sheets. All application logic lives in the library
+//! target (`lib.rs`), so the binary only wires up the window.
 
-mod canvas;
-mod keys;
-mod layers_panel;
-mod menu;
-mod sheets;
-mod sheets_ui;
-mod state;
-mod tools;
-mod ui;
-mod workspace;
-
+use compositor_app::{keys, state};
 use gpui_kit::{px, point, size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::AppContext;
-
+use gpui_kit::assets::AllAssets;
 use state::AppState;
 
 fn main() {
-    gpui_kit::application().run(|cx| {
+    gpui_kit::application()
+        .with_assets(AllAssets)
+        .run(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(keys::bindings());
         Theme::change(ThemeMode::Dark, None, cx);
