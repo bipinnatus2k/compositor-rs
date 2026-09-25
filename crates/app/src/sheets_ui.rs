@@ -399,14 +399,52 @@ impl AppState {
                     .child(labeled_slider_sheet(&sliders, 4, "Output White"))
                     .child(sheet_row(
                         "Auto",
-                        Button::new("levels-auto")
-                            .label("Auto")
-                            .small()
-                            .outline()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.levels_auto(window, cx);
-                            }))
-                            .into_any_element(),
+                        gpui_kit::div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                Button::new("levels-auto-contrast")
+                                    .label("Contrast")
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.levels_auto_mode(
+                                            compositor_core::adjust::levels_auto::LevelsAuto::Contrast,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element(),
+                            )
+                            .child(
+                                Button::new("levels-auto-color")
+                                    .label("Color")
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.levels_auto_mode(
+                                            compositor_core::adjust::levels_auto::LevelsAuto::Color,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element(),
+                            )
+                            .child(
+                                Button::new("levels-auto-neutral")
+                                    .label("Neutral")
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.levels_auto_mode(
+                                            compositor_core::adjust::levels_auto::LevelsAuto::Neutral,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element(),
+                            ),
                     ));
             }
             SheetKind::HueSaturation => {

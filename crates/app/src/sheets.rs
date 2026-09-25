@@ -10,8 +10,13 @@ use compositor_core::adjust::{
     hue_saturation_apply, levels_apply_settings, ColorRange, LevelsChannel, LevelsSettings,
     RangeAdjustment,
 };
+use compositor_core::adjust::levels_auto::LevelsAuto;
 use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::{FilterKind, FilterSettings};
+use compositor_core::geometry::CGAffineTransform;
+use compositor_core::raster::Bitmap;
+use compositor_core::selection::SelectionClip;
+use compositor_core::transform::LayerTransform;
 
 use crate::state::{AppState, SheetKind, SheetState};
 
@@ -116,6 +121,7 @@ impl AppState {
             based_on: 0,
             sides: [true, true, true, true],
             histogram: [0.0; 1024],
+            levels: LevelsSettings::default(),
         };
         match kind {
             SheetKind::NewCanvas => SheetState {
@@ -153,9 +159,18 @@ impl AppState {
                     self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
                 ];
                 if let Some(pixels) = self.preview_base.clone() {
+                    // With a selection, bins are weighted by the selection's
+                    // coverage on the layer's pixel grid (LevelsFilter.histogram,
+                    // Levels.swift:90-96).
+                    let coverage = histogram_coverage(
+                        self.preview_base_transform,
+                        self.selection_clip(),
+                        pixels.width,
+                        pixels.height,
+                    );
                     compositor_core::adjust::levels_histogram(
                         pixels.as_ref(),
-                        None,
+                        coverage.as_ref(),
                         &mut sheet.histogram,
                     );
                 }
@@ -236,21 +251,22 @@ impl AppState {
             SheetKind::Filter(filter) => {
                 self.begin_preview();
                 let mut sheet = SheetState { ..base };
+                let defaults = FilterSettings::default();
                 match filter {
                     FilterKind::GaussianBlur => {
                         sheet.sliders = vec![self.make_slider(
-                            0.1, 250.0, 4.0, SliderRole::Radius, cx,
+                            0.1, 250.0, defaults.radius as f32, SliderRole::Radius, cx,
                         )];
                     }
                     FilterKind::MotionBlur => {
                         sheet.sliders = vec![
-                            self.make_slider(-90.0, 90.0, 0.0, SliderRole::Angle, cx),
-                            self.make_slider(1.0, 2000.0, 20.0, SliderRole::Distance, cx),
+                            self.make_slider(-90.0, 90.0, defaults.angle as f32, SliderRole::Angle, cx),
+                            self.make_slider(1.0, 2000.0, defaults.distance as f32, SliderRole::Distance, cx),
                         ];
                     }
                     FilterKind::AddNoise => {
                         sheet.sliders = vec![self.make_slider(
-                            0.1, 400.0, 12.0, SliderRole::Amount, cx,
+                            0.1, 400.0, defaults.amount as f32, SliderRole::Amount, cx,
                         )];
                     }
                     FilterKind::LensCorrection => {
@@ -354,6 +370,7 @@ impl AppState {
                         let settings = self.levels_settings_from_sheet(cx);
                         let mut adjusted = base.as_ref().clone();
                         levels_apply_settings(&mut adjusted, &settings);
+                        adjusted = self.blend_adjusted(adjusted);
                         self.preview = Some(std::sync::Arc::new(adjusted));
                     } else {
                         self.preview = Some(base);
@@ -386,6 +403,7 @@ impl AppState {
                 if let Some(base) = self.preview_base.clone() {
                     let mut adjusted = base.as_ref().clone();
                     hue_saturation_apply(&mut adjusted, &settings);
+                    adjusted = self.blend_adjusted(adjusted);
                     self.preview = Some(std::sync::Arc::new(adjusted));
                 }
             }
@@ -424,6 +442,7 @@ impl AppState {
             let settings = self.levels_settings_from_sheet(cx);
             let mut adjusted = base.as_ref().clone();
             levels_apply_settings(&mut adjusted, &settings);
+            adjusted = self.blend_adjusted(adjusted);
             self.preview = Some(std::sync::Arc::new(adjusted));
         } else {
             self.preview = Some(base);
@@ -433,7 +452,10 @@ impl AppState {
     }
 
     fn levels_settings_from_sheet(&self, cx: &gpui_kit::App) -> LevelsSettings {
-        let mut settings = LevelsSettings::default();
+        // The Auto modes set every channel's range at once; those keep their
+        // values while the sliders stay the source of truth for the visible
+        // channel's range.
+        let mut settings = self.sheet.as_ref().map(|sheet| sheet.levels).unwrap_or_default();
         settings.channel = match self.sheet.as_ref().map(|s| s.channel).unwrap_or(0) {
             1 => LevelsChannel::Red,
             2 => LevelsChannel::Green,
@@ -492,38 +514,30 @@ impl AppState {
         settings
     }
 
-    /// Levels Auto: maps the 0.5% and 99.5% histogram percentiles to the
-    /// input black/white sliders.
+    /// The Levels sheet's Auto button: Contrast, the shared-interval mode.
     pub fn levels_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(histogram) = self.sheet.as_ref().map(|sheet| sheet.histogram) else {
-            return;
+        self.levels_auto_mode(LevelsAuto::Contrast, window, cx);
+    }
+
+    /// `autoLevels` (LevelsAutomatic.swift): the mode's settings replace the
+    /// edit's wholesale, then the visible sliders follow the current channel's
+    /// range and the preview refreshes, exactly as manual slider edits do.
+    pub fn levels_auto_mode(
+        &mut self,
+        mode: LevelsAuto,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (histogram, channel) = {
+            let Some(sheet) = self.sheet.as_ref() else { return };
+            (sheet.histogram, sheet.channel)
         };
-        let total: f64 = histogram.iter().sum();
-        if total <= 0.0 {
-            return;
+        let settings = mode.settings(&histogram);
+        let values = levels_auto_slider_values(&settings, channel);
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.levels = settings;
         }
-        let mut cumulative = 0.0;
-        let mut low = 0usize;
-        let mut high = 1023usize;
-        for (index, value) in histogram.iter().enumerate() {
-            cumulative += value;
-            if cumulative >= total * 0.005 {
-                low = index;
-                break;
-            }
-        }
-        cumulative = 0.0;
-        for (index, value) in histogram.iter().enumerate() {
-            cumulative += value;
-            if cumulative >= total * 0.995 {
-                high = index;
-                break;
-            }
-        }
-        let scale = 255.0 / 1023.0;
-        let low_value = (low as f32 * scale).clamp(0.0, 254.0);
-        let high_value = (high as f32 * scale).clamp(1.0, 255.0);
-        for (index, value) in [(0usize, low_value), (2usize, high_value)] {
+        for (index, value) in values.into_iter().enumerate() {
             if let Some(slider) = self.sheet.as_ref().and_then(|s| s.sliders.get(index)) {
                 let slider = slider.clone();
                 slider.update(cx, |state, cx| {
@@ -531,7 +545,18 @@ impl AppState {
                 });
             }
         }
-        self.apply_slider(SliderRole::LevelsInputBlack, low_value, cx);
+        self.apply_slider(SliderRole::LevelsInputBlack, values[0], cx);
+    }
+
+    /// Blends an adjustment result back over the untouched base through the
+    /// selection, as `LevelsFilter.run`/`HueSaturationFilter.run` do before
+    /// the pixels reach the layer (Levels.swift:80-82, HueSaturation.swift:
+    /// 244-250). Without a selection the adjustment stands alone.
+    fn blend_adjusted(&self, adjusted: Bitmap) -> Bitmap {
+        let Some(base) = self.preview_base.as_deref() else {
+            return adjusted;
+        };
+        blend_through_selection(base, adjusted, self.preview_base_transform, self.selection_clip())
     }
 
     /// Re-runs the noise filters when their checkboxes change.
@@ -636,3 +661,168 @@ impl AppState {
         self.touch(cx);
     }
 }
+
+/// Slider values (input black, gamma, input white, output black, output
+/// white) shown for `channel` after Auto replaces the settings.
+fn levels_auto_slider_values(settings: &LevelsSettings, channel: usize) -> [f32; 5] {
+    let range = settings.ranges[channel.min(3)];
+    [
+        range.black as f32,
+        range.gamma as f32,
+        range.white as f32,
+        range.output_black as f32,
+        range.output_white as f32,
+    ]
+}
+
+/// The placement transform `adjust::pixel::coverage` samples by: it maps each
+/// pixel center through `mapping⁻¹` before reading the selection, so the
+/// `pixel_to_document` placement has to be handed to it inverted — then every
+/// pixel is sampled at its own document position (`PixelAdjust.coverage`,
+/// Levels.swift:90-96).
+fn coverage_mapping(
+    transform: Option<LayerTransform>,
+    width: usize,
+    height: usize,
+) -> CGAffineTransform {
+    let mapping = transform
+        .map(|t| compositor_core::raster::pixel_to_document(&t, width as f64, height as f64))
+        .unwrap_or(CGAffineTransform::IDENTITY);
+    mapping.inverted()
+}
+
+/// `PixelAdjust.blend(over:through:)`: coverage × adjusted + (1 − coverage) ×
+/// original, with the selection rasterized on the layer's pixel grid through
+/// its placement. No selection keeps the adjustment whole.
+fn blend_through_selection(
+    base: &Bitmap,
+    adjusted: Bitmap,
+    transform: Option<LayerTransform>,
+    clip: Option<SelectionClip>,
+) -> Bitmap {
+    let Some(clip) = clip else {
+        return adjusted;
+    };
+    let mapping = coverage_mapping(transform, base.width, base.height);
+    compositor_core::adjust::pixel::blend(&adjusted, base, &clip, &mapping)
+}
+
+/// The Levels histogram's per-pixel weights: the selection's coverage on the
+/// layer's own pixel grid (`PixelAdjust.coverage(...)` in
+/// `LevelsFilter.histogram`, Levels.swift:90-96).
+fn histogram_coverage(
+    transform: Option<LayerTransform>,
+    clip: Option<SelectionClip>,
+    width: usize,
+    height: usize,
+) -> Option<compositor_core::raster::GrayMask> {
+    let clip = clip?;
+    let mapping = coverage_mapping(transform, width, height);
+    Some(compositor_core::adjust::pixel::coverage(
+        &clip, width, height, &mapping,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blend_through_selection, histogram_coverage, levels_auto_slider_values};
+    use compositor_core::adjust::levels_auto::LevelsAuto;
+    use compositor_core::filters::FilterSettings;
+    use compositor_core::geometry::{CGPoint, CGRect, CGSize};
+    use compositor_core::raster::Bitmap;
+    use compositor_core::selection::{DocumentSelection, SelectionPath};
+    use compositor_core::transform::LayerTransform;
+
+    /// A selection covering document x 2…6 in a 10×1 canvas.
+    fn strip_clip() -> compositor_core::selection::SelectionClip {
+        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.0, 0.0, 4.0, 1.0)));
+        selection.clip(CGSize::new(10.0, 1.0))
+    }
+
+    fn solid(width: usize, value: [u8; 4]) -> Bitmap {
+        let mut bitmap = Bitmap::new(width, 1);
+        for x in 0..width {
+            bitmap.set_pixel(x, 0, value);
+        }
+        bitmap
+    }
+
+    #[test]
+    fn blend_through_selection_limits_the_adjustment() {
+        let base = solid(10, [0, 0, 0, 255]);
+        let adjusted = solid(10, [255, 255, 255, 255]);
+        let blended = blend_through_selection(&base, adjusted, None, Some(strip_clip()));
+        // Fully inside the selection the adjustment wins; outside, the base.
+        assert_eq!(blended.pixel(3, 0), [255, 255, 255, 255]);
+        assert_eq!(blended.pixel(8, 0), [0, 0, 0, 255]);
+        assert_eq!(blended.pixel(0, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn blend_through_selection_follows_the_layer_placement() {
+        let base = solid(10, [0, 0, 0, 255]);
+        let adjusted = solid(10, [255, 255, 255, 255]);
+        // The same selection over a layer shifted two pixels right: the
+        // layer's pixels sitting under document x 2…6 are the ones adjusted,
+        // with the selection's soft edge falling at the rim.
+        let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
+        let blended = blend_through_selection(&base, adjusted, Some(transform), Some(strip_clip()));
+        assert_eq!(blended.pixel(0, 0), [255, 255, 255, 255]);
+        assert_eq!(blended.pixel(2, 0), [255, 255, 255, 255]);
+        let rim = blended.pixel(3, 0)[0];
+        assert!((100..=155).contains(&rim), "rim {rim}");
+        assert_eq!(blended.pixel(4, 0), [0, 0, 0, 255]);
+        assert_eq!(blended.pixel(8, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn blend_without_selection_keeps_the_adjustment_whole() {
+        let base = solid(4, [0, 0, 0, 255]);
+        let adjusted = solid(4, [255, 255, 255, 255]);
+        let blended = blend_through_selection(&base, adjusted.clone(), None, None);
+        for x in 0..4 {
+            assert_eq!(blended.pixel(x, 0), [255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn histogram_coverage_places_the_selection_on_the_layer_grid() {
+        assert!(histogram_coverage(None, None, 10, 1).is_none());
+        let coverage = histogram_coverage(None, Some(strip_clip()), 10, 1).unwrap();
+        assert_eq!(coverage.value(3, 0), 255);
+        assert_eq!(coverage.value(8, 0), 0);
+        // A layer shifted two pixels right reads the selection from the grid
+        // positions that actually sit under it.
+        let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
+        let shifted = histogram_coverage(Some(transform), Some(strip_clip()), 10, 1).unwrap();
+        assert_eq!(shifted.value(1, 0), 255);
+        assert_eq!(shifted.value(4, 0), 0);
+        assert_eq!(shifted.value(6, 0), 0);
+    }
+
+    #[test]
+    fn auto_slider_values_follow_the_current_channel() {
+        let mut bins = [0.0; 1024];
+        for c in 1..4 {
+            bins[c * 256 + 20 * c] = 100.0;
+            bins[c * 256 + 200 + c * 10] = 100.0;
+        }
+        // Contrast touches only the composite range: the RGB sliders move,
+        // a channel's sliders stay put.
+        let contrast = LevelsAuto::Contrast.settings(&bins);
+        assert_eq!(levels_auto_slider_values(&contrast, 0), [20.0, 1.0, 230.0, 0.0, 255.0]);
+        assert_eq!(levels_auto_slider_values(&contrast, 1), [0.0, 1.0, 255.0, 0.0, 255.0]);
+        // Color's per-channel ranges show up when that channel is visible.
+        let color = LevelsAuto::Color.settings(&bins);
+        assert_eq!(levels_auto_slider_values(&color, 3), [60.0, 1.0, 230.0, 0.0, 255.0]);
+    }
+
+    #[test]
+    fn filter_slider_defaults_match_filters_swift() {
+        let defaults = FilterSettings::default();
+        assert_eq!(defaults.radius, 1.0);
+        assert_eq!(defaults.distance, 10.0);
+        assert_eq!(defaults.amount, 10.0);
+    }
+}
+

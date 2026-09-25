@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::{
-    px, App, AppContext, Bounds, Context, DispatchPhase, Entity, FocusHandle, KeyDownEvent,
+    px, App, AppContext, Bounds, Context, Entity, FocusHandle, KeyDownEvent,
     KeyUpEvent, Pixels, Point, RenderImage, Subscription, Window,
 };
 use gpui_kit::component::input::InputState;
@@ -18,7 +18,7 @@ use image::Frame;
 use compositor_core::document::CanvasDocument;
 use compositor_core::document::ImageLayer;
 use compositor_core::filters::{FilterJob, FilterKind, FilterSettings};
-use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
+use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::raster::{ImportedImage, Bitmap};
 use compositor_core::render;
@@ -119,6 +119,10 @@ pub struct SheetState {
     pub sides: [bool; 4],
     /// Histogram of the adjusted pixels (Levels).
     pub histogram: [f64; 1024],
+    /// The full Levels settings behind the sliders: Auto replaces every
+    /// channel's range at once, while the sliders only ever edit the visible
+    /// channel's range on top of this.
+    pub levels: compositor_core::adjust::LevelsSettings,
 }
 
 /// Everything the window shows, owned as a single GPUI entity.
@@ -140,7 +144,7 @@ pub struct AppState {
     pub status: Option<String>,
     pub rename: Option<uuid::Uuid>,
     pub rename_input: Option<Entity<InputState>>,
-    thumbnails: HashMap<uuid::Uuid, (u64, Arc<RenderImage>)>,
+    thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
     /// Document dims the viewport was last fit for.
     pub fit_for: (usize, usize),
     /// The active layer's pixels when an adjustment sheet opened, and the
@@ -516,12 +520,7 @@ impl AppState {
         else {
             return;
         };
-        let selection = self.session.selection().and_then(|s| {
-            self.session
-                .document
-                .as_ref()
-                .map(|d| s.clip(d.size()))
-        });
+        let selection = self.selection_clip();
         if self.session.selection().is_none() {
             return;
         }
@@ -741,20 +740,38 @@ impl AppState {
         self.frame_image.clone().unwrap()
     }
 
-    /// The cached thumbnail texture for one layer row.
+    /// The cached thumbnail texture for one layer row, keyed by layer and by
+    /// whether the mask is the row's subject (the mask thumbnail swaps in).
     pub fn thumbnail_image(
         &mut self,
         id: uuid::Uuid,
         layer: &ImageLayer,
     ) -> Option<Arc<RenderImage>> {
-        if let Some((rev, image)) = self.thumbnails.get(&id) {
+        let mask_selected = self.session.is_mask_selected && layer.mask.is_some();
+        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected)) {
             if *rev == self.revision {
                 return Some(image.clone());
             }
         }
-        let thumbnail = render::layer_thumbnail(layer)?;
+        let document = self.session.document.as_ref()?;
+        let canvas = compositor_core::geometry::CGSize::new(
+            document.width as f64,
+            document.height as f64,
+        );
+        // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
+        // frame, whatever the layer's own bounds.
+        let thumbnail = if mask_selected {
+            render::mask_canvas_thumbnail(
+                layer.mask.as_ref()?,
+                &layer.mask_transform(),
+                canvas,
+            )?
+        } else {
+            render::layer_canvas_thumbnail(layer, canvas)?
+        };
         let image = bgra_render_image(&thumbnail);
-        self.thumbnails.insert(id, (self.revision, image.clone()));
+        self.thumbnails
+            .insert((id, mask_selected), (self.revision, image.clone()));
         Some(image)
     }
 
@@ -850,15 +867,20 @@ impl AppState {
         self.close_sheet(cx);
     }
 
-    /// Runs `filter` over the preview base and shows it live on canvas.
-    pub fn apply_filter_preview(&mut self, kind: FilterKind, settings: FilterSettings) {
-        let Some(base) = self.preview_base.clone() else { return };
-        let selection = self.session.selection().and_then(|s| {
+    /// The active selection clipped to the canvas (`selection?.clip(canvas:)`).
+    pub(crate) fn selection_clip(&self) -> Option<compositor_core::selection::SelectionClip> {
+        self.session.selection().and_then(|selection| {
             self.session
                 .document
                 .as_ref()
-                .map(|d| s.clip(d.size()))
-        });
+                .map(|document| selection.clip(document.size()))
+        })
+    }
+
+    /// Runs `filter` over the preview base and shows it live on canvas.
+    pub fn apply_filter_preview(&mut self, kind: FilterKind, settings: FilterSettings) {
+        let Some(base) = self.preview_base.clone() else { return };
+        let selection = self.selection_clip();
         let job = FilterJob {
             kind,
             image: &base,
