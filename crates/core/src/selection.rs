@@ -4,8 +4,12 @@
 //! Swift represents an outline as a `CGPath` with boolean operations. Here an
 //! outline is a set of closed rings (polygons with holes), and the boolean
 //! operations run on `geo`'s robust polygon engine. Coverage rasterization is
-//! an antialiased scanline fill; feathering is a Gaussian blur with σ =
-//! feather / 2, exactly as the Swift `DocumentSelection.coverage` does.
+//! an analytic area fill: each pixel stores the exact area of its square
+//! where the nonzero winding number is inside — the same integral Core
+//! Graphics evaluates when it antialiases `fillPath(using: .winding)`.
+//! Feathering is a Gaussian blur with σ = feather / 2 over edge-clamped
+//! samples (`CIImage.clampedToExtent`, not zero padding), exactly as the
+//! Swift `DocumentSelection.coverage` does.
 
 use crate::geometry::{CGFloat, CGAffineTransform, CGPoint, CGRect, CGSize};
 use crate::raster::GrayMask;
@@ -132,26 +136,9 @@ impl SelectionPath {
     }
 
     pub fn contains(&self, point: CGPoint) -> bool {
-        // Even-odd across all rings.
-        let mut inside = false;
-        for ring in &self.rings {
-            let n = ring.len();
-            if n < 3 {
-                continue;
-            }
-            let mut j = n - 1;
-            for i in 0..n {
-                let a = ring[j];
-                let b = ring[i];
-                if ((b.y > point.y) != (a.y > point.y))
-                    && (point.x < (a.x - b.x) * (point.y - b.y) / (a.y - b.y) + b.x)
-                {
-                    inside = !inside;
-                }
-                j = i;
-            }
-        }
-        inside
+        // CGPath.contains uses the winding rule: crossings count with sign
+        // (down +1, up -1) and any nonzero total is inside.
+        winding_contains(&self.rings, point.x, point.y)
     }
 
     pub fn union(&self, other: &SelectionPath) -> SelectionPath {
@@ -171,6 +158,9 @@ impl SelectionPath {
     /// buffered `width / 2` outward and `width / 2` inward; the band is the
     /// difference, unioned across rings.
     pub fn stroke_band(&self, width: CGFloat) -> SelectionPath {
+        // Every ring contributes its band and the pieces union — a tiny ring
+        // whose inner offset degenerates is covered outright, so contracting
+        // still removes it.
         let d = width / 2.0;
         let mut band: Option<SelectionPath> = None;
         for ring in &self.rings {
@@ -179,12 +169,20 @@ impl SelectionPath {
             }
             let outward = offset_ring(ring, d, true);
             let inward = offset_ring(ring, d, false);
-            if outward.len() < 3 || inward.len() < 3 {
+            let degenerate = inward.len() >= 3
+                && signed_area(&inward).abs() >= signed_area(ring).abs();
+            let piece = if outward.len() < 3 {
                 continue;
-            }
-            let outer = SelectionPath::from_polygon(outward);
-            let inner = SelectionPath::from_polygon(inward);
-            let piece = outer.subtract(&inner);
+            } else if inward.len() < 3 || degenerate {
+                // The ring is thinner than the band, or its inner offset
+                // flipped inside out on a tiny ring: band all the way across.
+                let mut outward = outward;
+                SelectionPath::from_polygon(outward)
+            } else {
+                let outer = SelectionPath::from_polygon(outward);
+                let inner = SelectionPath::from_polygon(inward);
+                outer.subtract(&inner)
+            };
             band = Some(match band {
                 None => piece,
                 Some(existing) => existing.union(&piece),
@@ -280,7 +278,7 @@ fn offset_ring(ring: &[CGPoint], d: f64, outward: bool) -> Vec<CGPoint> {
             while delta < -std::f64::consts::PI {
                 delta += std::f64::consts::TAU;
             }
-            let steps = ((delta.abs() / (std::f64::consts::PI / 8.0)).ceil() as usize).max(2).min(32);
+            let steps = ((delta.abs() / (std::f64::consts::PI / 16.0)).ceil() as usize).max(2).min(64);
             for s in 0..=steps {
                 let t = a0 + delta * (s as f64 / steps as f64);
                 result.push(CGPoint::new(cur.x + d * t.cos(), cur.y + d * t.sin()));
@@ -442,7 +440,13 @@ impl DocumentSelection {
     pub fn coverage(&self, width: usize, height: usize) -> GrayMask {
         let mut mask = rasterize(&self.path, width, height, self.antialiased || self.feather > 0.0);
         if self.feather > 0.0 {
-            // A feathered edge fades either side of the outline, as Photoshop's does.
+            // A feathered edge fades either side of the outline, as Photoshop's
+            // does. `gaussian_blur_gray` takes the standard deviation — σ =
+            // feather / 2, the same parameter Swift passes to
+            // `applyingGaussianBlur(sigma:)` — and clamps samples at the mask
+            // border, which is exactly what `CIImage.clampedToExtent` does
+            // (the blur never reads zeros past the edge), so a selection that
+            // runs off the rasterized area keeps full coverage to the border.
             mask = crate::raster::gaussian_blur_gray(&mask, self.feather / 2.0);
         }
         mask
@@ -501,34 +505,23 @@ impl SelectionClip {
     }
 }
 
-/// Antialiased scanline rasterization of an outline into a `width` × `height`
-/// mask. Even-odd winding, matching `.winding` fill for the simple outlines
-/// selections draw (the boolean engine never emits overlapping rings).
+/// Rasterization of an outline into a `width` × `height` mask. Winding fill,
+/// matching `.winding` fill (the boolean engine never emits overlapping rings;
+/// same-winding overlaps stay inside, as the tests pin down).
+///
+/// Antialiased mode is an *analytic area fill*, not a sampled approximation:
+/// each pixel stores the exact area of its square where the winding number is
+/// nonzero — the same per-pixel integral Core Graphics evaluates when it
+/// antialiases `fillPath(using: .winding)`. An edge pixel that is 7/8 inside
+/// therefore stores 223, where a 4×4 supersample grid (whose samples all land
+/// on the inside) would round up to a hard 255.
 pub fn rasterize(path: &SelectionPath, width: usize, height: usize, antialiased: bool) -> GrayMask {
     let mut mask = GrayMask::new(width.max(1), height.max(1));
     if path.rings.is_empty() || width == 0 || height == 0 {
         return mask;
     }
     if antialiased {
-        const SS: usize = 4; // 4×4 supersampling per pixel.
-        let total = SS * SS;
-        for y in 0..height {
-            for x in 0..width {
-                let mut hits = 0u32;
-                for sy in 0..SS {
-                    let py = y as f64 + (sy as f64 + 0.5) / SS as f64;
-                    for sx in 0..SS {
-                        let px = x as f64 + (sx as f64 + 0.5) / SS as f64;
-                        if point_in_path(&path.rings, px, py) {
-                            hits += 1;
-                        }
-                    }
-                }
-                if hits > 0 {
-                    mask.data[y * width + x] = ((hits as u32 * 255 + total as u32 / 2) / total as u32) as u8;
-                }
-            }
-        }
+        rasterize_antialiased(&path.rings, &mut mask);
     } else {
         for y in 0..height {
             let py = y as f64 + 0.5;
@@ -544,7 +537,227 @@ pub fn rasterize(path: &SelectionPath, width: usize, height: usize, antialiased:
 }
 
 fn point_in_path(rings: &[Vec<CGPoint>], px: f64, py: f64) -> bool {
-    let mut inside = false;
+    winding_contains(rings, px, py)
+}
+
+/// One outline edge clipped to a scanline row. Its x is linear in y
+/// (`x_ref` is x at the row top; `slope` is dx/dy), and `dir` is the winding
+/// sign the `.winding` rule assigns (downward edges +1, upward −1) — the same
+/// convention `winding_contains` applies at a point.
+struct RowEdge {
+    x_ref: f64,
+    slope: f64,
+    dir: i32,
+    /// The edge's y extent within the row.
+    y_lo: f64,
+    y_hi: f64,
+}
+
+/// Analytic area-coverage fill of `rings` (nonzero winding rule) into `mask`.
+///
+/// Per scanline row, the row is split at every vertex and every pair of edge
+/// crossings, so each y-band has a constant active edge set in a constant
+/// left-to-right order; the inside region is then a disjoint set of trapezoids
+/// bounded by linear edges. Each trapezoid's exact overlap with every pixel
+/// column it touches is integrated in closed form and accumulated, so the
+/// accumulated value per pixel *is* its covered area (≤ 1), rounded once to
+/// 0–255 at the end of the row.
+fn rasterize_antialiased(rings: &[Vec<CGPoint>], mask: &mut GrayMask) {
+    let width = mask.width;
+    let height = mask.height;
+    let mut acc = vec![0.0f64; width];
+    for row in 0..height {
+        let y0 = row as f64;
+        let y1 = y0 + 1.0;
+        let mut edges: Vec<RowEdge> = Vec::new();
+        for ring in rings {
+            let n = ring.len();
+            if n < 3 {
+                continue;
+            }
+            let mut j = n - 1;
+            for i in 0..n {
+                let a = ring[j];
+                let b = ring[i];
+                // Same crossing convention as `winding_contains`: horizontal
+                // edges never cross the scanline.
+                if a.y != b.y {
+                    let (e_lo, e_hi) = if a.y < b.y { (a.y, b.y) } else { (b.y, a.y) };
+                    if e_hi > y0 && e_lo < y1 {
+                        let slope = (b.x - a.x) / (b.y - a.y);
+                        edges.push(RowEdge {
+                            x_ref: a.x + (y0 - a.y) * slope,
+                            slope,
+                            dir: if a.y < b.y { 1 } else { -1 },
+                            y_lo: e_lo.max(y0),
+                            y_hi: e_hi.min(y1),
+                        });
+                    }
+                }
+                j = i;
+            }
+        }
+        if !edges.is_empty() {
+            fill_row_coverage(&edges, y0, &mut acc);
+        }
+        let out = &mut mask.data[row * width..row * width + width];
+        for (x, slot) in out.iter_mut().enumerate() {
+            let v = (acc[x].min(1.0) * 255.0).round() as u8;
+            *slot = v;
+        }
+        acc.fill(0.0);
+    }
+}
+
+/// Accumulates the covered area of every pixel column across one scanline row.
+fn fill_row_coverage(edges: &[RowEdge], y0: f64, acc: &mut [f64]) {
+    let y1 = y0 + 1.0;
+    // Vertex events: split where an edge starts or ends inside the row, so
+    // every band has a fixed active edge set.
+    let mut events = vec![y0, y1];
+    for e in edges {
+        if e.y_lo > y0 && e.y_lo < y1 {
+            events.push(e.y_lo);
+        }
+        if e.y_hi > y0 && e.y_hi < y1 {
+            events.push(e.y_hi);
+        }
+    }
+    sort_dedup(&mut events);
+    for pair in events.windows(2) {
+        let (ya, yb) = (pair[0], pair[1]);
+        if yb - ya < 1e-12 {
+            continue;
+        }
+        let active: Vec<&RowEdge> = edges
+            .iter()
+            .filter(|e| e.y_lo <= ya + 1e-9 && e.y_hi >= yb - 1e-9)
+            .collect();
+        if active.len() < 2 {
+            continue;
+        }
+        // Two edges' crossings swap order where their x(y) meet; split there
+        // too, so each sub-band's inside spans are clean trapezoids.
+        let mut cuts = vec![ya, yb];
+        for (i, e1) in active.iter().enumerate() {
+            for e2 in &active[i + 1..] {
+                let ds = e1.slope - e2.slope;
+                if ds.abs() > 1e-12 {
+                    // x_ref is x at the row top y0, not at ya.
+                    let y_cut = y0 + (e2.x_ref - e1.x_ref) / ds;
+                    if y_cut > ya + 1e-12 && y_cut < yb - 1e-12 {
+                        cuts.push(y_cut);
+                    }
+                }
+            }
+        }
+        sort_dedup(&mut cuts);
+        for pair in cuts.windows(2) {
+            let (ca, cb) = (pair[0], pair[1]);
+            if cb - ca < 1e-12 {
+                continue;
+            }
+            let ym = 0.5 * (ca + cb);
+            let mut crossings: Vec<(f64, i32, f64)> = active
+                .iter()
+                .map(|e| (e.x_ref + e.slope * (ym - y0), e.dir, e.slope))
+                .collect();
+            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // Sweep right to left: the span between crossings i-1 and i is
+            // inside when the winding number to its right is nonzero — the
+            // same rule `winding_contains` applies at a point (a closed ring's
+            // crossings sum to zero, so everything left of the first crossing
+            // is outside).
+            let mut suffix = 0i32;
+            for i in (1..crossings.len()).rev() {
+                suffix += crossings[i].1;
+                if suffix == 0 {
+                    continue;
+                }
+                let (xl, slope_l) = (crossings[i - 1].0, crossings[i - 1].2);
+                let (xr, slope_r) = (crossings[i].0, crossings[i].2);
+                let xl_ca = xl + slope_l * (ca - ym);
+                let xr_ca = xr + slope_r * (ca - ym);
+                let xl_cb = xl + slope_l * (cb - ym);
+                let xr_cb = xr + slope_r * (cb - ym);
+                let x_min = xl_ca.min(xl_cb).min(xr_ca).min(xr_cb).floor();
+                let x_max = xl_ca.max(xl_cb).max(xr_ca).max(xr_cb).ceil();
+                let first = (x_min.max(0.0) as usize).min(acc.len());
+                let last = (x_max.max(0.0) as usize).min(acc.len());
+                if first >= last {
+                    continue;
+                }
+                for (col, slot) in acc[first..last].iter_mut().enumerate() {
+                    let cx = (first + col) as f64;
+                    *slot += span_column_overlap(
+                        xl_ca, slope_l, xr_ca, slope_r, cx, cx + 1.0, ca, cb,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Exact ∫ over y ∈ [ya, yb] of the overlap between the pixel column
+/// [col_min, col_max] and the span between two linear edges x = xl(y),
+/// x = xr(y) (given as value at ya plus slope). The overlap is piecewise
+/// linear in y and every corner — either edge meeting either column side —
+/// is a breakpoint, so the trapezoid rule over those breakpoints integrates
+/// it exactly.
+fn span_column_overlap(
+    xl0: f64,
+    sxl: f64,
+    xr0: f64,
+    sxr: f64,
+    col_min: f64,
+    col_max: f64,
+    ya: f64,
+    yb: f64,
+) -> f64 {
+    let xl_yb = xl0 + sxl * (yb - ya);
+    let xr_yb = xr0 + sxr * (yb - ya);
+    // Cheap exact reject: the span stays entirely on one side of the column
+    // across the whole band (a diagonal span that merely crosses into the
+    // column part of the time must still be integrated).
+    if xr0.max(xr_yb) <= col_min || xl0.min(xl_yb) >= col_max {
+        return 0.0;
+    }
+    let overlap = |y: f64| -> f64 {
+        let xl = xl0 + sxl * (y - ya);
+        let xr = xr0 + sxr * (y - ya);
+        (xr.min(col_max) - xl.max(col_min)).max(0.0)
+    };
+    let mut cuts = vec![ya, yb];
+    for (x0, s) in [(xl0, sxl), (xr0, sxr)] {
+        if s.abs() > 1e-15 {
+            for bound in [col_min, col_max] {
+                let t = ya + (bound - x0) / s;
+                if t > ya + 1e-12 && t < yb - 1e-12 {
+                    cuts.push(t);
+                }
+            }
+        }
+    }
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut area = 0.0;
+    for pair in cuts.windows(2) {
+        area += 0.5 * (overlap(pair[0]) + overlap(pair[1])) * (pair[1] - pair[0]);
+    }
+    area
+}
+
+/// Sorts ascending and merges near-duplicates (vertex ys computed from
+/// different edges can differ by rounding noise).
+fn sort_dedup(values: &mut Vec<f64>) {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values.dedup_by(|a, b| *a - *b < 1e-9);
+}
+
+/// The nonzero winding rule (`fillPath(using: .winding)` /
+/// `path.contains(point, using: .winding)`): each edge crossing the ray adds
+/// +1 when it points down and -1 when it points up; nonzero is inside.
+fn winding_contains(rings: &[Vec<CGPoint>], px: f64, py: f64) -> bool {
+    let mut winding = 0i32;
     for ring in rings {
         let n = ring.len();
         if n < 3 {
@@ -554,13 +767,16 @@ fn point_in_path(rings: &[Vec<CGPoint>], px: f64, py: f64) -> bool {
         for i in 0..n {
             let a = ring[j];
             let b = ring[i];
-            if ((b.y > py) != (a.y > py)) && (px < (a.x - b.x) * (py - b.y) / (a.y - b.y) + b.x) {
-                inside = !inside;
+            if (a.y > py) != (b.y > py) {
+                let x_at = (a.x - b.x) * (py - b.y) / (a.y - b.y) + b.x;
+                if px < x_at {
+                    winding += if a.y < b.y { 1 } else { -1 };
+                }
             }
             j = i;
         }
     }
-    inside
+    winding != 0
 }
 
 /// `DragBox.rect(from:to:square:fromCenter:)` — the box a drag from `anchor` to
@@ -682,6 +898,113 @@ mod tests {
     }
 
     #[test]
+    fn rasterize_exact_fractional_edge_coverage() {
+        // An edge at x = 2.125 leaves exactly 7/8 of the pixel covered; the
+        // analytic fill stores round(0.875 * 255) = 223 where the old 4×4
+        // sample grid (all its samples land right of 2.125) rounded up to a
+        // hard 255. Same for the 1/8 sliver on the far side.
+        let p = rect_path(2.125, 2.0, 4.0, 4.0);
+        let mask = rasterize(&p, 8, 8, true);
+        assert_eq!(mask.value(4, 3), 255);
+        assert_eq!(mask.value(2, 3), 223);
+        assert_eq!(mask.value(6, 3), 32);
+        assert_eq!(mask.value(1, 3), 0);
+        assert_eq!(mask.value(7, 3), 0);
+    }
+
+    #[test]
+    fn rasterize_exact_diagonal_coverage() {
+        // Right triangle with hypotenuse x + y = 2.25: pixel areas under a
+        // diagonal are integrated exactly, not sampled. (0.71875 → 183 and
+        // the corner sliver 0.03125 → 8; a 4×4 grid gives 175 and 0.)
+        let p = SelectionPath::from_polygon(vec![
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(2.25, 0.0),
+            CGPoint::new(0.0, 2.25),
+        ]);
+        let mask = rasterize(&p, 2, 2, true);
+        assert_eq!(mask.value(0, 0), 255);
+        assert_eq!(mask.value(1, 0), 183);
+        assert_eq!(mask.value(0, 1), 183);
+        assert_eq!(mask.value(1, 1), 8);
+    }
+
+    #[test]
+    fn rasterize_winding_overlap_and_hole_exact() {
+        // The winding rule through the analytic fill: nested same-winding
+        // rings stay inside (winding 2 ≠ 0) right through the inner ring, and
+        // the reversed ring is a hole with exactly zero coverage.
+        let square = |x0: f64, y0: f64, x1: f64, y1: f64, reverse: bool| {
+            let mut ring = vec![
+                CGPoint::new(x0, y0),
+                CGPoint::new(x1, y0),
+                CGPoint::new(x1, y1),
+                CGPoint::new(x0, y1),
+            ];
+            if reverse {
+                ring.reverse();
+            }
+            ring
+        };
+        let overlap = SelectionPath {
+            rings: vec![
+                square(0.0, 0.0, 16.0, 16.0, false),
+                square(6.0, 6.0, 10.0, 10.0, false),
+            ],
+        };
+        let mask = rasterize(&overlap, 16, 16, true);
+        assert_eq!(mask.value(3, 8), 255);
+        assert_eq!(mask.value(6, 8), 255); // even-odd would hollow this out
+        let hole = SelectionPath {
+            rings: vec![
+                square(0.0, 0.0, 16.0, 16.0, false),
+                square(6.0, 6.0, 10.0, 10.0, true),
+            ],
+        };
+        let mask = rasterize(&hole, 16, 16, true);
+        assert_eq!(mask.value(3, 8), 255);
+        assert_eq!(mask.value(5, 8), 255); // inside the outer ring, outside the hole
+        assert_eq!(mask.value(6, 8), 0);
+        assert_eq!(mask.value(8, 8), 0);
+    }
+
+    #[test]
+    fn feathered_coverage_clamps_at_mask_edges() {
+        // clampedToExtent: a selection wider than the rasterized area stays at
+        // full coverage everywhere after the blur — zero padding would dim the
+        // borders toward the outside (a corner would lose about half the
+        // kernel's mass per axis).
+        let sel = DocumentSelection {
+            path: rect_path(-8.0, -8.0, 32.0, 32.0),
+            antialiased: true,
+            feather: 4.0,
+        };
+        let mask = sel.coverage(16, 16);
+        assert!(mask.data.iter().all(|v| *v == 255), "a clamped blur keeps a full mask full");
+    }
+
+    #[test]
+    fn feather_falloff_matches_gaussian_sigma() {
+        // σ = feather / 2: with feather 2 (σ = 1) a vertical outline at x = 4
+        // blurs to ≈ 255·Φ(±0.5) on the flank pixels — 77 outside, 178 inside
+        // (the continuous step response). A kernel sized by radius instead of
+        // σ would flatten these toward 128.
+        let sel = DocumentSelection {
+            path: rect_path(4.0, 0.0, 10.0, 8.0),
+            antialiased: true,
+            feather: 2.0,
+        };
+        let mask = sel.coverage(12, 8);
+        assert!(mask.value(6, 4) >= 248, "interior settles: {}", mask.value(6, 4));
+        let left = mask.value(3, 4);
+        let right = mask.value(4, 4);
+        assert!(left > 55 && left < 100, "left={left}");
+        assert!(right > 155 && right < 200, "right={right}");
+        assert!(mask.value(2, 4) < 30, "outer flank decays: {}", mask.value(2, 4));
+        assert!(mask.value(5, 4) > 220, "inner flank recovers: {}", mask.value(5, 4));
+    }
+
+    #[test]
     fn coverage_feather_softens() {
         let p = rect_path(2.0, 2.0, 8.0, 8.0);
         let sel = DocumentSelection {
@@ -744,7 +1067,72 @@ mod tests {
     }
 
     #[test]
-    fn ellipse_contains_center_not_corners() {
+    fn same_winding_nested_rings_stay_inside() {
+        // The winding rule: a second ring winding the *same* way doubles the
+        // winding number — the area stays inside (even-odd would punch a
+        // hole). A ring winding the opposite way is a hole.
+        let square = |x0: f64, y0: f64, x1: f64, y1: f64, reverse: bool| {
+            let mut ring = vec![
+                CGPoint::new(x0, y0),
+                CGPoint::new(x1, y0),
+                CGPoint::new(x1, y1),
+                CGPoint::new(x0, y1),
+            ];
+            if reverse {
+                ring.reverse();
+            }
+            ring
+        };
+        let path = SelectionPath {
+            rings: vec![
+                square(0.0, 0.0, 100.0, 100.0, false),
+                square(20.0, 20.0, 80.0, 80.0, false), // same winding: still inside
+            ],
+        };
+        assert!(path.contains(CGPoint::new(50.0, 50.0)));
+        let path = SelectionPath {
+            rings: vec![
+                square(0.0, 0.0, 100.0, 100.0, false),
+                square(20.0, 20.0, 80.0, 80.0, true), // opposite winding: hole
+            ],
+        };
+        assert!(!path.contains(CGPoint::new(50.0, 50.0)));
+    }
+
+    #[test]
+    fn ellipse_area_matches_the_box() {
+        // The kappa-flattened oval covers close to the analytic ellipse area.
+        let path = SelectionPath::ellipse(CGRect::new(0.0, 0.0, 100.0, 100.0));
+        let mask = rasterize(&path, 100, 100, false);
+        let covered: u64 = mask.data.iter().map(|v| u64::from(*v > 127)).sum();
+        let analytic = (std::f64::consts::PI / 4.0 * 100.0 * 100.0).round() as u64;
+        let drift = (covered as f64 - analytic as f64).abs() / analytic as f64;
+        assert!(drift < 0.02, "covered={covered} analytic={analytic}");
+        // A wide flat ellipse keeps its shape too.
+        let wide = SelectionPath::ellipse(CGRect::new(0.0, 0.0, 100.0, 20.0));
+        let mask = rasterize(&wide, 100, 20, false);
+        let covered: u64 = mask.data.iter().map(|v| u64::from(*v > 127)).sum();
+        let analytic = (std::f64::consts::PI / 4.0 * 100.0 * 20.0).round() as u64;
+        let drift = (covered as f64 - analytic as f64).abs() / analytic as f64;
+        assert!(drift < 0.03, "covered={covered} analytic={analytic}");
+    }
+
+    #[test]
+    fn tiny_ring_band_covers_the_whole_ring() {
+        // A 2×2 ring is thinner than any real band: stroking covers it
+        // outright, so contracting removes it entirely.
+        let tiny = SelectionPath::from_polygon(vec![
+            CGPoint::new(10.0, 10.0),
+            CGPoint::new(12.0, 10.0),
+            CGPoint::new(12.0, 12.0),
+            CGPoint::new(10.0, 12.0),
+        ]);
+        let band = tiny.stroke_band(6.0);
+        assert!(band.contains(CGPoint::new(11.0, 11.0)), "the tiny ring bands");
+    }
+
+    #[test]
+    fn falloff_matches_formula() {
         let e = SelectionPath::ellipse(CGRect::new(0.0, 0.0, 10.0, 10.0));
         assert!(e.contains(CGPoint::new(5.0, 5.0)));
         assert!(!e.contains(CGPoint::new(0.4, 0.4)));

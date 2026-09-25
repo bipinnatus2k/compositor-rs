@@ -181,9 +181,8 @@ impl PsdReader {
         cursor.skip(ranges)?;
         let name_count = cursor.u8()? as usize;
         let name_bytes = cursor.bytes(name_count)?;
-        // Swift decodes macOSRoman with an ISO Latin 1 fallback; Latin 1 shares
-        // the ASCII range, which is what layer names in practice use.
-        layer.name = String::from_utf8_lossy(&name_bytes).into_owned();
+        // `String(bytes:encoding:.macOSRoman) ?? String(bytes:encoding:.isoLatin1)`.
+        layer.name = macos_roman_to_string(name_bytes);
         let name_pad = (4 - ((name_count + 1) % 4)) % 4;
         cursor.skip(name_pad)?;
         while cursor.offset + 12 <= extra_end {
@@ -465,6 +464,42 @@ impl Default for RawLayer {
     }
 }
 
+/// `String(bytes:encoding:.macOSRoman)` for Pascal-string layer names: bytes
+/// 0x00-0x7F are ASCII; 0x80-0xFF follow Apple's Mac OS Roman table (Unicode
+/// consortium `ROMAN.TXT`). Roman assigns all 256 bytes, so the decode never
+/// fails and the Swift ISO Latin 1 fallback is unreachable; `from_utf8_lossy`
+/// turned every high byte into U+FFFD instead.
+fn macos_roman_to_string(bytes: &[u8]) -> String {
+    const HIGH: [u16; 128] = [
+        0x00C4, 0x00C5, 0x00C7, 0x00C9, 0x00D1, 0x00D6, 0x00DC, 0x00E1, // 0x80-0x87
+        0x00E0, 0x00E2, 0x00E4, 0x00E3, 0x00E5, 0x00E7, 0x00E9, 0x00E8, // 0x88-0x8F
+        0x00EA, 0x00EB, 0x00ED, 0x00EC, 0x00EE, 0x00EF, 0x00F1, 0x00F3, // 0x90-0x97
+        0x00F2, 0x00F4, 0x00F6, 0x00F5, 0x00FA, 0x00F9, 0x00FB, 0x00FC, // 0x98-0x9F
+        0x2020, 0x00B0, 0x00A2, 0x00A3, 0x00A7, 0x2022, 0x00B6, 0x00DF, // 0xA0-0xA7
+        0x00AE, 0x00A9, 0x2122, 0x00B4, 0x00A8, 0x2260, 0x00C6, 0x00D8, // 0xA8-0xAF
+        0x221E, 0x00B1, 0x2264, 0x2265, 0x00A5, 0x00B5, 0x2202, 0x2211, // 0xB0-0xB7
+        0x220F, 0x03C0, 0x222B, 0x00AA, 0x00BA, 0x03A9, 0x00E6, 0x00F8, // 0xB8-0xBF
+        0x00BF, 0x00A1, 0x00AC, 0x221A, 0x0192, 0x2248, 0x2206, 0x00AB, // 0xC0-0xC7
+        0x00BB, 0x2026, 0x00A0, 0x00C0, 0x00C3, 0x00D5, 0x0152, 0x0153, // 0xC8-0xCF
+        0x2013, 0x2014, 0x201C, 0x201D, 0x2018, 0x2019, 0x00F7, 0x25CA, // 0xD0-0xD7
+        0x00FF, 0x0178, 0x2044, 0x20AC, 0x2039, 0x203A, 0xFB01, 0xFB02, // 0xD8-0xDF
+        0x2021, 0x00B7, 0x201A, 0x201E, 0x2030, 0x00C2, 0x00CA, 0x00C1, // 0xE0-0xE7
+        0x00CB, 0x00C8, 0x00CD, 0x00CE, 0x00CF, 0x00CC, 0x00D3, 0x00D4, // 0xE8-0xEF
+        0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC, // 0xF0-0xF7
+        0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7, // 0xF8-0xFF
+    ];
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                char::from_u32(HIGH[(b - 0x80) as usize] as u32).unwrap()
+            }
+        })
+        .collect()
+}
+
 /// `PSDReader.unicodeName`: UTF-16 units with a NUL-trimmed decode.
 fn unicode_name(data: &[u8]) -> Option<String> {
     if data.len() < 4 {
@@ -725,5 +760,56 @@ mod tests {
         assert!(PsdReader::ADJUSTMENT_KEYS.contains(&"levl"));
         assert!(PsdReader::ADJUSTMENT_KEYS.contains(&"vibA"));
         assert!(!PsdReader::ADJUSTMENT_KEYS.contains(&"SoCo"));
+    }
+
+    #[test]
+    fn macos_roman_decodes_high_bytes() {
+        // 0x80 is 'Ä' (U+00C4) and 0x8E is 'é' (U+00E9) in Mac OS Roman;
+        // from_utf8_lossy turned both into U+FFFD. (0xE9 is 'È' in MacRoman —
+        // the é of ISO Latin 1 — which is exactly why the table is needed.)
+        assert_eq!(macos_roman_to_string(&[0x80]), "\u{00C4}");
+        assert_eq!(macos_roman_to_string(&[0x8E]), "\u{00E9}");
+        assert_eq!(macos_roman_to_string(b"Caf\x8E"), "Caf\u{00E9}");
+        assert_eq!(macos_roman_to_string(&[0xE9]), "\u{00C8}");
+        // ASCII passes through untouched.
+        assert_eq!(macos_roman_to_string(b"Layer 1"), "Layer 1");
+        // Spot checks from Apple's table: left double quote, euro, Apple logo.
+        assert_eq!(macos_roman_to_string(&[0xD2]), "\u{201C}");
+        assert_eq!(macos_roman_to_string(&[0xDB]), "\u{20AC}");
+        assert_eq!(macos_roman_to_string(&[0xF0]), "\u{F8FF}");
+        // Roman assigns every byte, so nothing decodes to U+FFFD.
+        for b in 0x80u8..=0xFF {
+            let decoded = macos_roman_to_string(&[b]);
+            assert!(!decoded.contains('\u{FFFD}'), "0x{b:02X} became U+FFFD");
+        }
+    }
+
+    #[test]
+    fn pascal_layer_name_decodes_macos_roman() {
+        // A layer record whose Pascal name is "Café" with a raw high byte:
+        // read_record must decode it via macOSRoman, not lose it to U+FFFD.
+        let name = b"Caf\x8E";
+        let name_pad = (4 - ((name.len() + 1) % 4)) % 4;
+        let extra_length = 4 + 4 + 1 + name.len() + name_pad;
+        let mut data = Vec::new();
+        for value in [0i32, 0, 20, 20] {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+        data.extend_from_slice(&0u16.to_be_bytes()); // channel count
+        data.extend_from_slice(b"8BIM");
+        data.extend_from_slice(b"norm");
+        data.push(255); // opacity
+        data.push(0); // clipping
+        data.push(0); // flags
+        data.push(0); // pad
+        data.extend_from_slice(&(extra_length as u32).to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // mask length
+        data.extend_from_slice(&0u32.to_be_bytes()); // blending ranges
+        data.push(name.len() as u8);
+        data.extend_from_slice(name);
+        data.extend(std::iter::repeat(0u8).take(name_pad));
+        let mut cursor = PsdCursor { data: &data, offset: 0 };
+        let layer = PsdReader::read_record(&mut cursor).unwrap();
+        assert_eq!(layer.name, "Caf\u{00E9}");
     }
 }

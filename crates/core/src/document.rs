@@ -238,7 +238,9 @@ impl LayoutGrid {
 
 /// Immutable, normalized layer-local coverage. Regular grayscale images use
 /// white for reveal, black for hide, and intermediate gray for soft coverage.
-#[derive(Clone, PartialEq)]
+/// Equality is the Swift one: the mask *image* compares by identity (`===`),
+/// the rest by value.
+#[derive(Debug, Clone)]
 pub struct LayerMask {
     pub asset: ImportedImage,
     pub is_enabled: bool,
@@ -247,6 +249,15 @@ pub struct LayerMask {
     pub placement: Option<LayerTransform>,
     /// Linked, layer and mask move together; unlinked, each transforms on its own.
     pub is_linked: bool,
+}
+
+impl PartialEq for LayerMask {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.asset.image, &other.asset.image)
+            && self.is_enabled == other.is_enabled
+            && self.placement == other.placement
+            && self.is_linked == other.is_linked
+    }
 }
 
 impl LayerMask {
@@ -310,12 +321,20 @@ impl LayerMask {
     }
 }
 
-/// Port of `LayerText` (`TypeTool.swift`).
-#[derive(Clone, PartialEq)]
+/// Port of `LayerText` (`TypeTool.swift`). Equality: style by value, image
+/// by identity.
+#[derive(Debug, Clone)]
 pub struct LayerText {
     pub style: LayerTextStyle,
     pub image: Arc<Bitmap>,
 }
+
+impl PartialEq for LayerText {
+    fn eq(&self, other: &Self) -> bool {
+        self.style == other.style && std::sync::Arc::ptr_eq(&self.image, &other.image)
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TextAlignment {
@@ -497,8 +516,10 @@ impl ShapeKind {
     }
 }
 
-/// Port of `ImageLayer` (`EditorSession.swift`).
-#[derive(Clone, PartialEq)]
+/// Port of `ImageLayer` (`EditorSession.swift`). Equality follows Swift's
+/// `ImageLayer.==`: the asset's image compares by identity (`===`), the rest
+/// by value.
+#[derive(Debug, Clone)]
 pub struct ImageLayer {
     pub id: Uuid,
     pub asset: Option<ImportedImage>,
@@ -516,6 +537,30 @@ pub struct ImageLayer {
     pub shape: Option<LayerShape>,
     pub effects: Option<crate::effects::LayerEffects>,
     pub text: Option<LayerText>,
+}
+
+impl PartialEq for ImageLayer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.is_visible == other.is_visible
+            && self.transform == other.transform
+            && match (&self.asset, &other.asset) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(&a.image, &b.image),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.parent_id == other.parent_id
+            && self.is_group == other.is_group
+            && self.opacity == other.opacity
+            && self.blend_mode == other.blend_mode
+            && self.mask == other.mask
+            && self.mask_source_id == other.mask_source_id
+            && self.adjustment == other.adjustment
+            && self.shape == other.shape
+            && self.text == other.text
+            && self.effects == other.effects
+    }
 }
 
 impl ImageLayer {
@@ -869,6 +914,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layer_mask_equality_is_image_identity() {
+        let image = Bitmap::new(4, 4);
+        let make = |image: Bitmap| crate::document::LayerMask {
+            asset: crate::raster::ImportedImage::new(image, "M"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        };
+        let a = make(image.clone());
+        let b = make(image.clone());
+        assert_ne!(a, b, "same bytes, different mask");
+        assert_eq!(a, a.clone(), "the same mask equals itself");
+    }
+
+    #[test]
+    fn layer_text_equality_is_image_identity() {
+        let make = |image: Bitmap| LayerText {
+            style: LayerTextStyle::default(),
+            image: std::sync::Arc::new(image),
+        };
+        let a = make(Bitmap::new(4, 4));
+        let b = make(Bitmap::new(4, 4));
+        assert_ne!(a, b);
+        assert_eq!(a, a.clone(), "the same image equals itself");
+    }
+
     fn palette_hex_roundtrip() {
         let c = PaletteColor::new(1.0, 0.5, 0.0);
         let hex = c.hex();

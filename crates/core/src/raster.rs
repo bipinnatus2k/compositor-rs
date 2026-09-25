@@ -214,11 +214,21 @@ impl GrayMask {
 
 /// Port of `ImportedImage`: the source pixels, a small thumbnail, and the
 /// display name. Images are immutable and shared; snapshots copy the `Arc`s.
-#[derive(Clone, PartialEq)]
+/// Equality follows Swift's class identity: two images are equal only when
+/// they are the *same* image (`===`), not when their bytes coincide.
+#[derive(Debug, Clone)]
 pub struct ImportedImage {
     pub image: Arc<Bitmap>,
     pub thumbnail: Arc<Bitmap>,
     pub name: String,
+}
+
+impl PartialEq for ImportedImage {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.image, &other.image)
+            && std::sync::Arc::ptr_eq(&self.thumbnail, &other.thumbnail)
+            && self.name == other.name
+    }
 }
 
 impl ImportedImage {
@@ -343,9 +353,10 @@ pub fn bilinear_sample(src: &Bitmap, x: f64, y: f64) -> [u8; 4] {
     out
 }
 
-/// Resamples a bitmap to `w` × `h`. `High` uses successive box halving before
-/// bilinear when shrinking (the port of `DownsampleCache` sharp halving +
-/// CG high interpolation); `Smooth` is plain bilinear; `Nearest` point-samples.
+/// Resamples a bitmap to `w` × `h`. `High` uses successive sharp halvings
+/// before the final pass when shrinking (the port of `DownsampleCache` sharp
+/// halving + `LayerRenderer.interpolation`); `Smooth` is plain bilinear;
+/// `Nearest` point-samples.
 pub fn resample(src: &Bitmap, w: usize, h: usize, sampling: LayerSampling) -> Bitmap {
     let mut out = Bitmap::new(w.max(1), h.max(1));
     if w == 0 || h == 0 || src.width == 0 || src.height == 0 {
@@ -362,24 +373,24 @@ pub fn resample(src: &Bitmap, w: usize, h: usize, sampling: LayerSampling) -> Bi
             }
         }
         LayerSampling::Smooth | LayerSampling::High => {
-            let mut shrunk: Bitmap;
-            let mut steps = 0usize;
+            let mut shrunk = src.clone();
             if sampling == LayerSampling::High {
-                // Halve while more than 2× the target on an axis.
-                let mut cur = src.clone();
-                while (cur.width / 2).max(1) >= w.max(2) && (cur.height / 2).max(1) >= h.max(2)
-                    && cur.width > 2
-                    && cur.height > 2
-                {
-                    cur = halve(&cur);
-                    steps += 1;
-                    if steps > 20 {
-                        break;
-                    }
+                // Large reductions draw from sharp halvings: `factor < 0.5`
+                // enables them (DownsampleCache.level), so a 0.5 factor
+                // exactly is left for the final resample.
+                let mut level = downsample_level(w as f64 / src.width as f64);
+                while level > 0 && (shrunk.width > 1 || shrunk.height > 1) {
+                    shrunk = halve(&shrunk);
+                    level -= 1;
                 }
-                shrunk = cur;
-            } else {
-                shrunk = src.clone();
+            }
+            // LayerRenderer.interpolation: a shrink's final pass is Low
+            // (bilinear) whatever the layer's sampling; an enlargement with
+            // High keeps the layer's own quality — the Lanczos kernel the
+            // halvings themselves use.
+            let factor = (w as f64 / shrunk.width as f64).min(h as f64 / shrunk.height as f64);
+            if sampling == LayerSampling::High && factor > 1.0 {
+                return lanczos_resize(&shrunk, out.width, out.height, 3);
             }
             let sw = shrunk.width as f64;
             let sh = shrunk.height as f64;
@@ -395,29 +406,135 @@ pub fn resample(src: &Bitmap, w: usize, h: usize, sampling: LayerSampling) -> Bi
     out
 }
 
+/// `DownsampleCache.level(for:)` — halvings to draw from when an image lands
+/// `factor` output pixels per image pixel: the most that still leave the copy
+/// at least that large (0 from half size up). `maxLevel` is 6; past this the
+/// final resample does the rest.
+pub fn downsample_level(factor: f64) -> usize {
+    const MAX_LEVEL: usize = 6;
+    if !factor.is_finite() || factor <= 0.0 || factor >= 0.5 {
+        return 0;
+    }
+    ((1.0 / factor).log2().floor() as isize).clamp(0, MAX_LEVEL as isize) as usize
+}
+
 /// One box-filter halving step (`DownsampleCache`'s sharp halving).
 pub fn halve(src: &Bitmap) -> Bitmap {
-    let w = (src.width / 2).max(1);
-    let h = (src.height / 2).max(1);
+    // vImage-scale "high quality" is a Lanczos resample (`DownsampleCache`
+    // halving); the output rounds the half size up ((w + 1) / 2).
+    let w = ((src.width + 1) / 2).max(1);
+    let h = ((src.height + 1) / 2).max(1);
+    lanczos_resize(src, w, h, 3)
+}
+
+/// Continuous-coordinate Lanczos3 point sample — CG's `.high` interpolation
+/// quality, the filter an enlargement's final pass draws with.
+pub fn lanczos_sample(src: &Bitmap, x: f64, y: f64) -> [u8; 4] {
+    if src.width == 0 || src.height == 0 {
+        return [0, 0, 0, 0];
+    }
+    let x0 = x.floor() as isize;
+    let y0 = y.floor() as isize;
+    let mut acc = [0.0f64; 4];
+    let mut sum = 0.0f64;
+    for ty in (y0 - 2)..=(y0 + 3) {
+        let wy = lanczos3(ty as f64 - y);
+        if wy == 0.0 {
+            continue;
+        }
+        let yi = clamp_i(ty, 0, src.height as isize - 1) as usize;
+        for tx in (x0 - 2)..=(x0 + 3) {
+            let wx = lanczos3(tx as f64 - x);
+            if wx == 0.0 {
+                continue;
+            }
+            let w = wx * wy;
+            let p = src.pixel(clamp_i(tx, 0, src.width as isize - 1) as usize, yi);
+            for c in 0..4 {
+                acc[c] += p[c] as f64 * w;
+            }
+            sum += w;
+        }
+    }
+    if sum.abs() < 1e-9 {
+        return bilinear_sample(src, x, y);
+    }
+    [
+        (acc[0] / sum).round().clamp(0.0, 255.0) as u8,
+        (acc[1] / sum).round().clamp(0.0, 255.0) as u8,
+        (acc[2] / sum).round().clamp(0.0, 255.0) as u8,
+        (acc[3] / sum).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Separable Lanczos resize with radius `a` and clamped edges.
+pub fn lanczos_resize(src: &Bitmap, w: usize, h: usize, a: i32) -> Bitmap {
+    let sx = w as f64 / src.width as f64;
+    let sy = h as f64 / src.height as f64;
+    // Horizontal pass.
+    let fx_scale = (a as f64 / sx.min(1.0)).ceil().max(1.0) as i64;
+    let mut tmp = Bitmap::new(w, src.height);
+    for y in 0..src.height {
+        for x in 0..w {
+            let center = (x as f64 + 0.5) / sx - 0.5;
+            let lo = (center - fx_scale as f64).ceil() as i64;
+            let hi = (center + fx_scale as f64).floor() as i64;
+            let mut acc = [0.0f64; 4];
+            let mut sum = 0.0f64;
+            for tap in lo..=hi {
+                let tap_c = tap.clamp(0, src.width as i64 - 1) as usize;
+                let lw = lanczos3((tap as f64 - center) / sx);
+                let px = src.pixel(tap_c, y);
+                for c in 0..4 {
+                    acc[c] += px[c] as f64 * lw;
+                }
+                sum += lw;
+            }
+            let o = (y * w + x) * 4;
+            for c in 0..4 {
+                tmp.data[o + c] = (acc[c] / sum).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    // Vertical pass.
+    let fy_scale = (a as f64 / sy.min(1.0)).ceil().max(1.0) as i64;
     let mut out = Bitmap::new(w, h);
     for y in 0..h {
-        let y0 = (y * 2).min(src.height - 1);
-        let y1 = (y * 2 + 1).min(src.height - 1);
+        let center = (y as f64 + 0.5) / sy - 0.5;
+        let lo = (center - fy_scale as f64).ceil() as i64;
+        let hi = (center + fy_scale as f64).floor() as i64;
         for x in 0..w {
-            let x0 = (x * 2).min(src.width - 1);
-            let x1 = (x * 2 + 1).min(src.width - 1);
-            let p00 = src.pixel(x0, y0);
-            let p10 = src.pixel(x1, y0);
-            let p01 = src.pixel(x0, y1);
-            let p11 = src.pixel(x1, y1);
-            let mut px = [0u8; 4];
-            for i in 0..4 {
-                px[i] = ((p00[i] as u32 + p10[i] as u32 + p01[i] as u32 + p11[i] as u32 + 2) / 4) as u8;
+            let mut acc = [0.0f64; 4];
+            let mut sum = 0.0f64;
+            for tap in lo..=hi {
+                let tap_c = tap.clamp(0, src.height as i64 - 1) as usize;
+                let lw = lanczos3((tap as f64 - center) / sy);
+                let px = tmp.pixel(x, tap_c);
+                for c in 0..4 {
+                    acc[c] += px[c] as f64 * lw;
+                }
+                sum += lw;
             }
-            out.set_pixel(x, y, px);
+            let o = (y * w + x) * 4;
+            for c in 0..4 {
+                out.data[o + c] = (acc[c] / sum).round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
     out
+}
+
+/// The Lanczos kernel with a = 3.
+fn lanczos3(x: f64) -> f64 {
+    let x = x.abs();
+    if x < 1e-8 {
+        return 1.0;
+    }
+    if x >= 3.0 {
+        return 0.0;
+    }
+    let px = std::f64::consts::PI * x;
+    3.0 * px.sin() * (px / 3.0).sin() / (px * px)
 }
 
 /// Draws `src` stretched over `rect` in `dst`'s coordinate space with nearest
@@ -509,19 +626,15 @@ pub fn draw_affine(
     let scale_y = transform.c.hypot(transform.d);
     let mut source = src.clone();
     let mut t = *transform;
-    if sampling == LayerSampling::High && (scale_x < 0.5 || scale_y < 0.5) {
+    if sampling == LayerSampling::High {
+        // DownsampleCache.level: `factor < 0.5` enables sharp halvings, so a
+        // 0.5 factor exactly is left to the final pass.
+        let mut level = downsample_level(scale_x);
         let mut factor = 1.0f64;
-        while scale_x * factor <= 0.5 || scale_y * factor <= 0.5 {
-            let next = Bitmap {
-                width: source.width / 2,
-                height: source.height / 2,
-                data: Vec::new(),
-            };
-            if next.width < 1 || next.height < 1 {
-                break;
-            }
+        while level > 0 && (source.width > 1 || source.height > 1) {
             source = halve(&source);
             factor *= 2.0;
+            level -= 1;
         }
         // Pre-shrink applies to the source before the placement: p' = t * shrink.
         t = t.concat(&CGAffineTransform::scale(factor, factor));
@@ -541,8 +654,13 @@ pub fn draw_affine(
             if p.x < 0.0 || p.y < 0.0 || p.x >= source.width as f64 || p.y >= source.height as f64 {
                 continue;
             }
+            // LayerRenderer.interpolation: a shrink's final pass is Low
+            // (bilinear); an enlargement with High keeps the layer's own
+            // quality — the Lanczos kernel the halvings themselves use.
             let s = if exact {
                 source.pixel(p.x as usize, p.y as usize)
+            } else if sampling == LayerSampling::High && scale_x.min(scale_y) > 1.0 {
+                lanczos_sample(&source, p.x, p.y)
             } else {
                 sample_bitmap(&source, p.x, p.y, sampling)
             };
@@ -599,6 +717,58 @@ pub fn gaussian_blur_rgba(src: &Bitmap, sigma: f64) -> Bitmap {
 }
 
 /// Gaussian blur on a grayscale mask.
+/// `gaussian_blur_rgba` with **transparent** out-of-bounds samples
+/// (`CIImage(cgImage:)` is unclamped: a blur spreads into transparency at the
+/// image's own edges rather than smearing them outwards).
+pub fn gaussian_blur_rgba_unclamped(src: &Bitmap, sigma: f64) -> Bitmap {
+    if sigma <= 0.0 {
+        return src.clone();
+    }
+    let radius = (sigma * 4.0).ceil() as usize;
+    let kernel = gaussian_kernel(sigma, radius);
+    let w = src.width;
+    let h = src.height;
+    let mut tmp = Bitmap::new(w, h);
+    let mut dst = Bitmap::new(w, h);
+    // Horizontal pass: out-of-bounds taps are transparent (premultiplied 0).
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 4];
+            for (i, k) in kernel.iter().enumerate() {
+                let sx = x as isize + i as isize - radius as isize;
+                if sx < 0 || sx >= w as isize {
+                    continue;
+                }
+                let px = src.pixel(sx as usize, y);
+                for c in 0..4 {
+                    acc[c] += px[c] as f32 * *k as f32;
+                }
+            }
+            let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
+            tmp.set_pixel(x, y, out);
+        }
+    }
+    // Vertical pass.
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 4];
+            for (i, k) in kernel.iter().enumerate() {
+                let sy = y as isize + i as isize - radius as isize;
+                if sy < 0 || sy >= h as isize {
+                    continue;
+                }
+                let px = tmp.pixel(x, sy as usize);
+                for c in 0..4 {
+                    acc[c] += px[c] as f32 * *k as f32;
+                }
+            }
+            let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
+            dst.set_pixel(x, y, out);
+        }
+    }
+    dst
+}
+
 pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
     if sigma <= 0.0 {
         return src.clone();
@@ -702,6 +872,44 @@ mod tests {
     use crate::geometry::{CGPoint, CGSize};
 
     #[test]
+    fn halve_rounds_half_sizes_up_and_keeps_flat_colors() {
+        // (w + 1) / 2 rounding: odd sides round up.
+        let mut flat = Bitmap::new(5, 7);
+        for pixel in flat.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[40, 80, 120, 255]);
+        }
+        let out = halve(&flat);
+        assert_eq!((out.width, out.height), (3, 4), "ceil((5,7)/2) = (3,4)");
+        // A flat image stays flat (Lanczos keeps DC exactly).
+        for pixel in out.data.chunks_exact(4) {
+            assert_eq!(pixel, [40, 80, 120, 255]);
+        }
+        let mut two = Bitmap::new(2, 2);
+        for pixel in two.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[200, 200, 200, 255]);
+        }
+        let out = halve(&two);
+        assert_eq!((out.width, out.height), (1, 1), "(w+1)/2 rounding");
+        assert_eq!(out.pixel(0, 0)[0], 200);
+    }
+
+    #[test]
+    fn imported_image_equality_is_identity() {
+        let image = Bitmap::new(4, 4);
+        let a = ImportedImage::new(image.clone(), "L");
+        let b = ImportedImage::new(image.clone(), "L");
+        // The same bytes in a different image are NOT equal (Swift's ===).
+        assert_ne!(a, b);
+        // The very same image is.
+        let c = ImportedImage {
+            image: a.image.clone(),
+            thumbnail: a.thumbnail.clone(),
+            name: "L".into(),
+        };
+        assert_eq!(a, c);
+    }
+
+    #[test]
     fn falloff_matches_formula() {
         // exp(-2.5)/1-exp(-2.5) normalizes to 0 at u = 1 and 1 at u = 0.
         assert!((falloff(0.0) - 1.0).abs() < 1e-9);
@@ -783,6 +991,98 @@ mod tests {
         let out = resample(&b, 4, 1, LayerSampling::Nearest);
         assert_eq!(out.pixel(0, 0)[0], 10);
         assert_eq!(out.pixel(3, 0)[0], 200);
+    }
+
+    #[test]
+    fn downsample_level_matches_swift_tiers() {
+        // DownsampleCache.level: 0 from half size up, floor(log2(1/factor))
+        // below it, capped at maxLevel 6; non-finite and non-positive are 0.
+        assert_eq!(downsample_level(1.0), 0);
+        assert_eq!(downsample_level(0.5), 0);
+        assert_eq!(downsample_level(0.49), 1);
+        assert_eq!(downsample_level(0.25), 2);
+        assert_eq!(downsample_level(0.24), 2);
+        assert_eq!(downsample_level(0.001), 6);
+        assert_eq!(downsample_level(0.0), 0);
+        assert_eq!(downsample_level(f64::NAN), 0);
+    }
+
+    #[test]
+    fn resample_high_leaves_exact_half_to_the_final_pass() {
+        // A 0.5 factor exactly gets no sharp halving (Swift `factor < 0.5`),
+        // so High and Smooth draw the same plain-bilinear result.
+        let mut b = Bitmap::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                b.set_pixel(x, y, [(20 + x * 50) as u8, (200 - y * 40) as u8, 5, 255]);
+            }
+        }
+        let high = resample(&b, 2, 2, LayerSampling::High);
+        let smooth = resample(&b, 2, 2, LayerSampling::Smooth);
+        assert_eq!(high.data, smooth.data);
+        // A deep shrink still halvings first: 8→2 (factor 0.25, level 2)
+        // equals halving twice by hand and resampling the result.
+        let mut big = Bitmap::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                big.set_pixel(x, y, [(x * 31) as u8, (y * 17) as u8, (x * y) as u8, 255]);
+            }
+        }
+        let high = resample(&big, 2, 2, LayerSampling::High);
+        let hand = resample(&halve(&halve(&big)), 2, 2, LayerSampling::Smooth);
+        assert_eq!(high.data, hand.data);
+    }
+
+    #[test]
+    fn resample_high_enlarging_uses_the_sharp_final_pass() {
+        // LayerRenderer.interpolation: enlarging with High keeps the layer's
+        // own quality (CG .high — Lanczos), unlike the shrink's Low bilinear.
+        let mut b = Bitmap::new(2, 2);
+        b.set_pixel(0, 0, [255, 0, 0, 255]);
+        b.set_pixel(1, 0, [0, 255, 0, 255]);
+        b.set_pixel(0, 1, [0, 0, 255, 255]);
+        b.set_pixel(1, 1, [255, 255, 0, 255]);
+        let high = resample(&b, 8, 8, LayerSampling::High);
+        let smooth = resample(&b, 8, 8, LayerSampling::Smooth);
+        assert_eq!(high.data, lanczos_resize(&b, 8, 8, 3).data);
+        assert_ne!(high.data, smooth.data);
+    }
+
+    #[test]
+    fn draw_affine_enlarging_high_sharpens() {
+        // Same rule through the affine draw path: a 4× upscale with High
+        // differs from Smooth's bilinear, and 1:1 still draws untouched.
+        let mut b = Bitmap::new(2, 2);
+        b.set_pixel(0, 0, [255, 255, 255, 255]);
+        b.set_pixel(1, 0, [0, 0, 0, 255]);
+        b.set_pixel(0, 1, [0, 0, 0, 255]);
+        b.set_pixel(1, 1, [255, 255, 255, 255]);
+        let mut high = Bitmap::new(8, 8);
+        draw_affine(
+            &mut high,
+            &b,
+            &CGAffineTransform::scale(4.0, 4.0),
+            LayerSampling::High,
+            None,
+        );
+        let mut smooth = Bitmap::new(8, 8);
+        draw_affine(
+            &mut smooth,
+            &b,
+            &CGAffineTransform::scale(4.0, 4.0),
+            LayerSampling::Smooth,
+            None,
+        );
+        assert_ne!(high.data, smooth.data);
+        let mut same = Bitmap::new(2, 2);
+        draw_affine(
+            &mut same,
+            &b,
+            &CGAffineTransform::IDENTITY,
+            LayerSampling::High,
+            None,
+        );
+        assert_eq!(same.data, b.data);
     }
 
     #[test]

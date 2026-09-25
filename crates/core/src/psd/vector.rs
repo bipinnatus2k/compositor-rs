@@ -151,6 +151,7 @@ impl PsdVector {
                     .collect()
             })
             .collect();
+        let closed: Vec<bool> = subpaths.iter().map(|(_, closed)| *closed).collect();
         if fill_enabled {
             if let Some(fill_color) = fill {
                 let color = PaletteColor::new(fill_color.0, fill_color.1, fill_color.2);
@@ -159,10 +160,13 @@ impl PsdVector {
         }
         if stroke_enabled {
             if let Some(stroke_rgb) = stroke_color {
-                // Closed subpaths repeat their first point, so the closing edge
-                // is an ordinary segment; every polyline strokes as open.
-                for points in &shifted {
-                    let outline = stroke_outline(points, false, stroke_width, 10.0);
+                // CG strokes a closed subpath with the same miter join at the
+                // closing corner (`closeSubpath`, `setLineJoin(.miter)`,
+                // `setMiterLimit(10)`, bevel past the limit) as at every other
+                // vertex; pass `closed` so the last-to-first corner is joined
+                // rather than butt-capped the way an open polyline ends.
+                for (points, closed) in shifted.iter().zip(&closed) {
+                    let outline = stroke_outline(points, *closed, stroke_width, 10.0);
                     if !outline.is_empty() {
                         fill_polygons(&mut image, &[outline], PaletteColor::new(stroke_rgb.0, stroke_rgb.1, stroke_rgb.2));
                     }
@@ -721,8 +725,28 @@ fn joint(
     }
 }
 
-/// Non-zero-winding fill with box-filtered anti-aliasing (8 samples per pixel
-/// vertically, exact horizontal span coverage), composited source-over.
+/// Non-zero-winding fill with analytic (Core Graphics-style) anti-aliasing,
+/// composited source-over.
+///
+/// Rather than sampling a fixed sub-pixel grid, each pixel accumulates the
+/// exact signed area of the winding region inside it. Working one pixel row
+/// band `[y, y+1)` at a time, every edge active in the band contributes
+/// `delta · ∫ clamp(px+1 − max(px, x_edge(t)), 0, 1) dt` to column `px` —
+/// the trapezoid it sweeps across the column — split into a partial-height
+/// winding term plus an in-column trapezoid; columns right of an edge's span
+/// receive the full band height through a prefix-summed winding event. The
+/// pixel's gray level is the |signed area| clamped to 1: a half-covered edge
+/// pixel is exactly 0.5 instead of a 16-step grid estimate, and a simple
+/// polygon's total coverage equals its analytic area.
+///
+/// Declared substitution (rust-vs-swift-diff-report §9.2-3): the Swift fills
+/// through Core Graphics' analytic anti-aliased winding rasterizer; this
+/// scanline integrator is the file's stand-in `CGContext` (see the module
+/// docs), an intentional replacement rather than a bug to be made bit-exact.
+/// Signed-area accumulation is the standard analytic nonzero rasterizer:
+/// opposite windings overlapping inside one pixel cancel, and any excess
+/// (|area| > 1) clamps to solid, matching CG outside degenerate
+/// self-overlaps.
 fn fill_polygons(target: &mut Bitmap, polys: &[Vec<CGPoint>], color: PaletteColor) {
     let mut edges: Vec<[f64; 4]> = Vec::new();
     let mut min_x = f64::INFINITY;
@@ -758,52 +782,105 @@ fn fill_polygons(target: &mut Bitmap, polys: &[Vec<CGPoint>], color: PaletteColo
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    const SAMPLES: usize = 8;
+    let cols = x1 - x0;
     let mut coverage = vec![0.0f32; target.width * target.height];
-    let mut crossings: Vec<(f64, i32)> = Vec::new();
+    // Per-band accumulators indexed relative to x0. `area_row` holds the
+    // signed trapezoid each straddling edge sweeps inside the column,
+    // `height_row` the partial band height over which its winding already
+    // applies, and `full_events` marks where the full band height starts
+    // (one slot past the window so right-of-window edges can park safely).
+    let mut area_row = vec![0.0f64; cols];
+    let mut height_row = vec![0.0f64; cols];
+    let mut full_events = vec![0.0f64; cols + 1];
+    // Edge segments active in the current band: x at the band's top and
+    // bottom, the clipped t-range, and the winding direction.
+    let mut segs: Vec<[f64; 5]> = Vec::new();
     for y in y0..y1 {
-        for sample in 0..SAMPLES {
-            let yc = y as f64 + (sample as f64 + 0.5) / SAMPLES as f64;
-            crossings.clear();
-            for edge in &edges {
-                let (ax, ay, bx, by) = (edge[0], edge[1], edge[2], edge[3]);
-                // Half-open rule so shared vertices count once.
-                if (ay <= yc) != (by <= yc) {
-                    let x = ax + (yc - ay) * (bx - ax) / (by - ay);
-                    crossings.push((x, if by > ay { 1 } else { -1 }));
-                }
-            }
-            if crossings.is_empty() {
+        segs.clear();
+        for edge in &edges {
+            let (ax, ay, bx, by) = (edge[0], edge[1], edge[2], edge[3]);
+            // Half-open span [min(ay,by), max(ay,by)) so shared vertices
+            // count once, clipped to this band.
+            let t0 = ay.min(by).max(y as f64);
+            let t1 = ay.max(by).min(y as f64 + 1.0);
+            if t0 >= t1 {
                 continue;
             }
-            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let row_start = y * target.width;
-            let mut wind = 0i32;
-            let mut span_start = 0.0f64;
-            for &(x, dir) in &crossings {
-                if wind == 0 {
-                    span_start = x;
-                }
-                wind += dir;
-                if wind == 0 {
-                    let xa = span_start.max(x0 as f64);
-                    let xb = x.min(x1 as f64);
-                    if xb > xa {
-                        let first = xa.floor() as usize;
-                        let last = ((xb.ceil() as usize).min(x1)).max(first);
-                        for px in first..last {
-                            if px >= target.width {
-                                break;
-                            }
-                            let lo = (px as f64).max(xa);
-                            let hi = ((px + 1) as f64).min(xb);
-                            if hi > lo {
-                                coverage[row_start + px] += ((hi - lo) / SAMPLES as f64) as f32;
-                            }
-                        }
-                    }
-                }
+            let x_at = |t: f64| ax + (t - ay) * (bx - ax) / (by - ay);
+            segs.push([x_at(t0), x_at(t1), t0, t1, if by > ay { 1.0 } else { -1.0 }]);
+        }
+        if segs.is_empty() {
+            continue;
+        }
+        area_row.fill(0.0);
+        height_row.fill(0.0);
+        full_events.fill(0.0);
+        for &[xa, xb, s0, s1, delta] in &segs {
+            let height = s1 - s0;
+            let slope = (xb - xa) / height;
+            // Columns the segment straddles get the exact trapezoid and the
+            // partial-height winding; every column from the last one on gets
+            // the full band height through the event below. Segments entirely
+            // left of the window (clipped shapes, negative coordinates) fire
+            // their event at the first column so their winding still counts.
+            let last = (xa.max(xb).floor() as isize).min(x1 as isize - 1);
+            for px in (xa.min(xb).floor() as isize).max(x0 as isize)..=last {
+                let left = px as f64;
+                // Band height over which the edge's winding applies in this
+                // column: where the edge sits at or left of the pixel's left
+                // boundary (an edge exactly on it counts, matching the old
+                // `crossing <= sample` rule).
+                let (h, area) = if slope == 0.0 {
+                    let h = if xa <= left { height } else { 0.0 };
+                    let area = if left < xa && xa < left + 1.0 {
+                        (left + 1.0 - xa) * height
+                    } else {
+                        0.0
+                    };
+                    (h, area)
+                } else {
+                    let t_left = s0 + (left - xa) / slope;
+                    let h = if xb > xa {
+                        t_left.max(s0).min(s1) - s0
+                    } else {
+                        s1 - t_left.max(s0).min(s1)
+                    };
+                    // ∫ (left + 1 − x(t)) dt over {left < x(t) < left+1}:
+                    // the exact sliver the edge sweeps through the column.
+                    let t_right = s0 + (left + 1.0 - xa) / slope;
+                    let (lo, hi) = if t_left <= t_right {
+                        (t_left, t_right)
+                    } else {
+                        (t_right, t_left)
+                    };
+                    let lo = lo.max(s0);
+                    let hi = hi.min(s1);
+                    let area = if lo < hi {
+                        let x_lo = xa + (lo - s0) * slope;
+                        let x_hi = xa + (hi - s0) * slope;
+                        (hi - lo) * (left + 1.0) - (x_lo + x_hi) * (hi - lo) * 0.5
+                    } else {
+                        0.0
+                    };
+                    (h, area)
+                };
+                let idx = (px - x0 as isize) as usize;
+                height_row[idx] += delta * h;
+                area_row[idx] += delta * area;
             }
+            let event = (last + 1).max(x0 as isize).min(x1 as isize);
+            full_events[(event - x0 as isize) as usize] += delta * height;
+        }
+        // Sweep the band left to right: the pixel's signed winding area is
+        // the full-height winding accumulated so far plus this column's
+        // partial-height and trapezoid terms.
+        let row_start = y * target.width;
+        let mut full = 0.0f64;
+        for px in x0..x1 {
+            let idx = px - x0;
+            full += full_events[idx];
+            let a = (full + height_row[idx] + area_row[idx]).abs().min(1.0) as f32;
+            coverage[row_start + px] = a;
         }
     }
     for y in y0..y1 {
@@ -897,5 +974,181 @@ mod tests {
             data.extend_from_slice(&value.to_bits().to_be_bytes());
         }
         data
+    }
+
+    fn has_point(outline: &[CGPoint], x: f64, y: f64) -> bool {
+        outline.iter().any(|p| (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9)
+    }
+
+    /// Right triangle (2,2)-(10,2)-(2,10) with `flatten`'s repeated first
+    /// point, stroked at width 2 with CG's miter limit 10.
+    fn triangle_with_repeated_point() -> Vec<CGPoint> {
+        vec![
+            CGPoint::new(2.0, 2.0),
+            CGPoint::new(10.0, 2.0),
+            CGPoint::new(2.0, 10.0),
+            CGPoint::new(2.0, 2.0),
+        ]
+    }
+
+    #[test]
+    fn closed_triangle_stroke_joins_the_closing_corner() {
+        // The closing joint at (2,2) sits where the left edge's offset line
+        // (x = 2 + 1) crosses the bottom edge's offset line (y = 2 + 1).
+        let outline = stroke_outline(&triangle_with_repeated_point(), true, 2.0, 10.0);
+        assert!(has_point(&outline, 3.0, 3.0), "outline {outline:?} lacks the closing miter point (3, 3)");
+        // The offset feet (3,2) are replaced by the miter point, unlike the
+        // old open-polyline behavior.
+        assert!(!has_point(&outline, 3.0, 2.0));
+        // Stroking the same ring as an open polyline (the previous behavior)
+        // butt-caps the corner instead of joining it.
+        let open = stroke_outline(&triangle_with_repeated_point(), false, 2.0, 10.0);
+        assert!(!has_point(&open, 3.0, 3.0));
+        assert!(has_point(&open, 3.0, 2.0));
+    }
+
+    #[test]
+    fn closed_triangle_stroke_bevels_past_the_miter_limit() {
+        // The closing miter is sqrt(2) long, so 0.7071x the width; limit 0.5
+        // falls back to the bevel feet instead of the intersection point.
+        let outline = stroke_outline(&triangle_with_repeated_point(), true, 2.0, 0.5);
+        assert!(has_point(&outline, 3.0, 2.0), "outline {outline:?} lacks the bevel foot (3, 2)");
+        assert!(has_point(&outline, 2.0, 3.0));
+        assert!(!has_point(&outline, 3.0, 3.0));
+    }
+
+    #[test]
+    fn raster_stroke_covers_the_closed_path_closing_corner() {
+        // 64 so the fixed-point thirds decode exactly (2^24 / 64 = 2^18).
+        let canvas = CGSize::new(64.0, 64.0);
+        let fixed = |value: f64, span: f64| (value / span * 16_777_216.0).round() as i32;
+        let knot = |ax: f64, ay: f64| {
+            let (fy, fx) = (fixed(ay, canvas.height), fixed(ax, canvas.width));
+            let mut body = Vec::new();
+            for _ in 0..3 {
+                body.extend_from_slice(&fy.to_be_bytes());
+                body.extend_from_slice(&fx.to_be_bytes());
+            }
+            body
+        };
+        let record = |selector: i16, body: &[u8]| {
+            let mut out = selector.to_be_bytes().to_vec();
+            out.resize(26, 0);
+            out[2..body.len().min(24) + 2].copy_from_slice(body);
+            out
+        };
+        // Closed square (2,2)-(8,8) as a `vmsk`: length record naming four
+        // knots, then the knots.
+        let mut mask = vec![0, 0, 0, 3, 0, 0, 0, 0];
+        let mut count = 4i16.to_be_bytes().to_vec();
+        count.resize(24, 0);
+        mask.extend_from_slice(&record(0, &count));
+        for (x, y) in [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)] {
+            mask.extend_from_slice(&record(1, &knot(x, y)));
+        }
+        // Stroke-only `vstk`: enabled, width 2, opaque red.
+        let mut stroke = b"strokeEnabled".to_vec();
+        stroke.extend_from_slice(b"bool");
+        stroke.push(1);
+        stroke.extend_from_slice(b"fillEnabled");
+        stroke.extend_from_slice(b"bool");
+        stroke.push(0);
+        stroke.extend_from_slice(b"strokeStyleLineWidth");
+        stroke.extend_from_slice(b"UntF");
+        stroke.extend_from_slice(b"#Pxl");
+        stroke.extend_from_slice(&2.0f64.to_bits().to_be_bytes());
+        stroke.extend_from_slice(&crate_color(1.0, 0.0, 0.0)[4..]);
+        let mut extra = HashMap::new();
+        extra.insert("vmsk".to_string(), mask);
+        extra.insert("vstk".to_string(), stroke);
+        let out = PsdVector::raster(&extra, canvas, MAX_SHAPE_PIXELS).unwrap().unwrap();
+        assert_eq!(out.bounds.origin.x, 0.0);
+        assert_eq!(out.bounds.size.width, 10.0);
+        // The 2px ring covers [1,9]x[1,9]. The closing corner pixel is painted
+        // now that the ring closes with a join (butt caps left it empty; a
+        // bevel still covers half of it, a miter all of it).
+        assert!(out.image.pixel(1, 1)[3] >= 100, "closing corner alpha {}", out.image.pixel(1, 1)[3]);
+        assert_eq!(out.image.pixel(5, 1)[3], 255);
+        assert_eq!(out.image.pixel(5, 5)[3], 0);
+    }
+
+    #[test]
+    fn fill_polygons_antialiases_a_half_pixel_diagonal_edge() {
+        // Right triangle (0,0)-(10,0)-(0,10): the hypotenuse x + y = 10
+        // crosses the ten diagonal pixels (9,0)...(0,9) mid-pixel, so each
+        // must land strictly between empty and solid (partial coverage proves
+        // the anti-aliasing; the analytic integrator puts each at exactly
+        // 128), and the summed coverage must track the analytic area 50
+        // within 1.5% — only u8 quantization noise remains.
+        let mut image = Bitmap::new(10, 10);
+        let poly = vec![
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(10.0, 0.0),
+            CGPoint::new(0.0, 10.0),
+        ];
+        fill_polygons(&mut image, &[poly], PaletteColor::new(1.0, 1.0, 1.0));
+        let mut total = 0u64;
+        for y in 0..10 {
+            for x in 0..10 {
+                let alpha = image.pixel(x, y)[3];
+                total += alpha as u64;
+                if x + y == 9 {
+                    assert!(
+                        alpha > 0 && alpha < 255,
+                        "diagonal pixel ({x}, {y}) alpha {alpha} shows no anti-aliasing"
+                    );
+                }
+            }
+        }
+        assert_eq!(image.pixel(2, 2)[3], 255, "interior pixel must stay solid");
+        assert_eq!(image.pixel(9, 9)[3], 0, "outside pixel must stay empty");
+        let covered = total as f64 / 255.0;
+        let area = 10.0 * 10.0 / 2.0;
+        let error = (covered - area).abs() / area;
+        assert!(
+            error < 0.015,
+            "total coverage {covered} vs analytic area {area} off by {:.1}%",
+            error * 100.0
+        );
+    }
+
+    #[test]
+    fn fill_polygons_matches_the_analytic_triangle_area() {
+        // Right triangle (0,0)-(10,0)-(0,10) on a 10×10 mask: the analytic
+        // integrator must keep every hypotenuse pixel strictly inside
+        // (0, 255) — each diagonal pixel is exactly half covered, so 128 —
+        // keep the interior solid, and sum to within 1.5% of the analytic
+        // area 50 (45 solid pixels + 10 halves → 50.02, quantization only).
+        let mut image = Bitmap::new(10, 10);
+        let poly = vec![
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(10.0, 0.0),
+            CGPoint::new(0.0, 10.0),
+        ];
+        fill_polygons(&mut image, &[poly], PaletteColor::new(1.0, 1.0, 1.0));
+        let mut total = 0u64;
+        for y in 0..10 {
+            for x in 0..10 {
+                let alpha = image.pixel(x, y)[3];
+                total += alpha as u64;
+                if x + y == 9 {
+                    assert!(
+                        alpha > 0 && alpha < 255,
+                        "diagonal pixel ({x}, {y}) alpha {alpha} shows no anti-aliasing"
+                    );
+                }
+            }
+        }
+        assert_eq!(image.pixel(2, 2)[3], 255, "interior pixel must stay solid");
+        assert_eq!(image.pixel(9, 9)[3], 0, "outside pixel must stay empty");
+        assert_eq!(image.pixel(9, 0)[3], 128, "half-covered pixel must be exactly half");
+        let covered = total as f64 / 255.0;
+        let area = 10.0 * 10.0 / 2.0;
+        let error = (covered - area).abs() / area;
+        assert!(
+            error < 0.015,
+            "total coverage {covered} vs analytic area {area} off by {:.1}%",
+            error * 100.0
+        );
     }
 }

@@ -1,6 +1,9 @@
 //! Port of `Compositor/Document/HueSaturation.swift` — the Hue/Saturation
 //! adjustment (Photoshop's ⌘U), including the per-range bands, the colorize
-//! mode, and the exact HSL conversion the Swift filter applies.
+//! mode, and the 33³ color cube (`CIColorCube`) the Swift filter renders
+//! through. The same HSL math that Swift uses to fill the cube fills it here;
+//! the cube is then applied with f32 trilinear interpolation, exactly as
+//! `CIColorCube` does.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -463,6 +466,137 @@ pub fn shifted_hue(hue: f64, settings: &HueSaturationSettings) -> f64 {
     }
 }
 
+/// `HueSaturationFilter.dimension` (HueSaturation.swift:234) — 33 points per
+/// axis: fast to build, smooth enough.
+pub const CUBE_DIMENSION: usize = 33;
+
+/// The color cube Swift hands to `CIColorCube` (`HueSaturationFilter.cube`,
+/// HueSaturation.swift:274-293). Entries are unpremultiplied sRGB RGBA
+/// quadruples ordered with red varying fastest — the layout `CIColorCube`
+/// expects — and stored as f32 because that is the arithmetic CIColorCube
+/// quantizes and interpolates in.
+#[derive(Debug, Clone)]
+pub struct ColorCube {
+    dimension: usize,
+    /// `dimension * dimension * dimension * 4` values, red fastest, blue slowest.
+    data: Vec<f32>,
+}
+
+impl ColorCube {
+    /// `HueSaturationFilter.cube` — every lattice corner converted to HSL,
+    /// adjusted, and back, through the exact per-pixel math (`adjust_hsl`, the
+    /// port of Swift's `adjust`). The per-hue response is sampled once, exactly
+    /// as Swift does, to keep the ~36k entries cheap.
+    pub fn build(settings: &HueSaturationSettings) -> ColorCube {
+        let response = hue_response(settings);
+        let dimension = CUBE_DIMENSION;
+        let mut data = vec![0.0f32; dimension * dimension * dimension * 4];
+        let mut index = 0;
+        let step = (dimension - 1) as f64;
+        for blue in 0..dimension {
+            for green in 0..dimension {
+                for red in 0..dimension {
+                    let (r, g, b) = adjust_hsl(
+                        red as f64 / step,
+                        green as f64 / step,
+                        blue as f64 / step,
+                        settings,
+                        Some(&response),
+                    );
+                    data[index] = r as f32;
+                    data[index + 1] = g as f32;
+                    data[index + 2] = b as f32;
+                    data[index + 3] = 1.0;
+                    index += 4;
+                }
+            }
+        }
+        ColorCube { dimension, data }
+    }
+
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+
+    /// Offset of a lattice point's RGBA quadruple: blue outermost, red innermost,
+    /// matching both the Swift builder loop and CIColorCube's data order.
+    fn index(&self, red: usize, green: usize, blue: usize) -> usize {
+        ((blue * self.dimension + green) * self.dimension + red) * 4
+    }
+
+    /// `CIColorCube`'s lookup: locate the 8 surrounding lattice points
+    /// (lattice coordinate = color × (dimension − 1)) and trilinearly
+    /// interpolate between them in f32.
+    pub fn sample(&self, red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
+        let last = self.dimension - 1;
+        let max = last as f32;
+        let axis = |value: f32| -> (usize, usize, f32) {
+            let scaled = value.clamp(0.0, 1.0) * max;
+            let low = (scaled as usize).min(last);
+            let high = (low + 1).min(last);
+            (low, high, scaled - low as f32)
+        };
+        let (r0, r1, fr) = axis(red);
+        let (g0, g1, fg) = axis(green);
+        let (b0, b1, fb) = axis(blue);
+        let corner = |r: usize, g: usize, b: usize, c: usize| {
+            let i = self.index(r, g, b) + c;
+            self.data[i]
+        };
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            let c000 = corner(r0, g0, b0, c);
+            let c100 = corner(r1, g0, b0, c);
+            let c010 = corner(r0, g1, b0, c);
+            let c110 = corner(r1, g1, b0, c);
+            let c001 = corner(r0, g0, b1, c);
+            let c101 = corner(r1, g0, b1, c);
+            let c011 = corner(r0, g1, b1, c);
+            let c111 = corner(r1, g1, b1, c);
+            let c00 = c000 + (c100 - c000) * fr;
+            let c10 = c010 + (c110 - c010) * fr;
+            let c01 = c001 + (c101 - c001) * fr;
+            let c11 = c011 + (c111 - c011) * fr;
+            let c0 = c00 + (c10 - c00) * fg;
+            let c1 = c01 + (c11 - c01) * fg;
+            out[c] = c0 + (c1 - c0) * fb;
+        }
+        (out[0], out[1], out[2])
+    }
+
+    /// Builds a cube from raw RGBA data (test helper: `dimension` × 4 f32
+    /// values per entry, red varying fastest).
+    #[cfg(test)]
+    fn from_data(dimension: usize, data: Vec<f32>) -> ColorCube {
+        assert_eq!(data.len(), dimension * dimension * dimension * 4);
+        ColorCube { dimension, data }
+    }
+}
+
+/// Applies the cube to a whole RGBA8 premultiplied buffer the way
+/// `CIColorCube` does (HueSaturation.swift:238-239): unpremultiply around the
+/// lookup, interpolate in f32, premultiply again. Fully transparent pixels
+/// stay untouched, as in the old per-pixel path.
+pub fn apply_cube_rgba8(data: &mut [u8], cube: &ColorCube) {
+    for p in data.chunks_exact_mut(4) {
+        let a = p[3] as f32;
+        if a == 0.0 {
+            continue;
+        }
+        let r = p[0] as f32 * 255.0 / a / 255.0;
+        let g = p[1] as f32 * 255.0 / a / 255.0;
+        let b = p[2] as f32 * 255.0 / a / 255.0;
+        let (nr, ng, nb) = cube.sample(r, g, b);
+        p[0] = (nr * 255.0).round().clamp(0.0, a) as u8;
+        p[1] = (ng * 255.0).round().clamp(0.0, a) as u8;
+        p[2] = (nb * 255.0).round().clamp(0.0, a) as u8;
+    }
+}
+
 fn to_hsl(red: f64, green: f64, blue: f64) -> (f64, f64, f64) {
     let high = red.max(green).max(blue);
     let low = red.min(green).min(blue);
@@ -630,5 +764,218 @@ mod tests {
         let mut s = HueSaturationSettings::default();
         s.set_hue(30.0);
         assert_eq!(shifted_hue(10.0, &s), 40.0);
+    }
+
+    /// The old per-pixel render path (exact f64 HSL, no cube), kept as the
+    /// reference for the LUT-equivalence test: unpremultiply, `adjust_hsl`,
+    /// premultiply.
+    fn exact_pixel_apply(data: &[u8], settings: &HueSaturationSettings) -> Vec<u8> {
+        let response = hue_response(settings);
+        let mut out = data.to_vec();
+        for p in out.chunks_exact_mut(4) {
+            let a = p[3] as f64;
+            if a == 0.0 {
+                continue;
+            }
+            let r = (p[0] as f64 * 255.0 / a).min(255.0) / 255.0;
+            let g = (p[1] as f64 * 255.0 / a).min(255.0) / 255.0;
+            let b = (p[2] as f64 * 255.0 / a).min(255.0) / 255.0;
+            let (nr, ng, nb) = adjust_hsl(r, g, b, settings, Some(&response));
+            for (i, v) in [nr, ng, nb].iter().enumerate() {
+                p[i] = ((v * 255.0).round() as u8).min(p[3]);
+            }
+        }
+        out
+    }
+
+    /// A synthetic premultiplied RGBA8 image spanning the gamut, including
+    /// translucent pixels (stored color ≤ alpha, as real premultiplied data is).
+    fn synthetic_rgba8(width: u32, height: u32) -> Vec<u8> {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let alpha = [255u8, 255, 170, 80][(x % 4) as usize];
+                let unpremultiplied = [
+                    ((x * 17) % 256) as u32,
+                    ((y * 23) % 256) as u32,
+                    ((x * 13 + y * 7) % 256) as u32,
+                ];
+                for u in unpremultiplied {
+                    data.push(((u * alpha as u32 + 127) / 255) as u8);
+                }
+                data.push(alpha);
+            }
+        }
+        data
+    }
+
+    /// §7.1-2 (a): with identity settings the cube must map every lattice
+    /// point to itself (within f32 epsilon), alpha must be 1 everywhere, and
+    /// the entry order must be blue outermost / red innermost.
+    #[test]
+    fn cube_identity_maps_every_lattice_point_to_itself() {
+        let cube = ColorCube::build(&HueSaturationSettings::default());
+        assert_eq!(cube.dimension(), CUBE_DIMENSION);
+        assert_eq!(cube.data().len(), CUBE_DIMENSION * CUBE_DIMENSION * CUBE_DIMENSION * 4);
+        let step = (CUBE_DIMENSION - 1) as f64;
+        let mut index = 0;
+        for blue in 0..CUBE_DIMENSION {
+            for green in 0..CUBE_DIMENSION {
+                for red in 0..CUBE_DIMENSION {
+                    let expected = [red as f64 / step, green as f64 / step, blue as f64 / step];
+                    for c in 0..3 {
+                        let got = cube.data()[index + c] as f64;
+                        assert!(
+                            (got - expected[c]).abs() < 1e-6,
+                            "lattice ({red},{green},{blue}) channel {c}: {got} != {}",
+                            expected[c]
+                        );
+                    }
+                    assert_eq!(cube.data()[index + 3], 1.0);
+                    index += 4;
+                }
+            }
+        }
+        // Spot-check the index arithmetic against the sequential walk above.
+        for &(r, g, b) in &[(1usize, 0usize, 0usize), (0, 5, 7), (32, 32, 32), (2, 31, 17)] {
+            let i = cube.index(r, g, b);
+            let expected = [r as f64 / 32.0, g as f64 / 32.0, b as f64 / 32.0];
+            for c in 0..3 {
+                assert!((cube.data()[i + c] as f64 - expected[c]).abs() < 1e-6);
+            }
+        }
+    }
+
+    /// §7.1-2 (b): sampling strictly between lattice points blends the
+    /// neighbors. With a cube that stores its own lattice coordinate per
+    /// channel, the blend has an exactly representable f32 expectation.
+    #[test]
+    fn trilinear_sample_blends_between_lattice_points() {
+        let dimension = CUBE_DIMENSION;
+        let mut data = vec![0.0f32; dimension * dimension * dimension * 4];
+        for b in 0..dimension {
+            for g in 0..dimension {
+                for r in 0..dimension {
+                    let i = ((b * dimension + g) * dimension + r) * 4;
+                    data[i] = r as f32 / 32.0;
+                    data[i + 1] = g as f32 / 32.0;
+                    data[i + 2] = b as f32 / 32.0;
+                    data[i + 3] = 1.0;
+                }
+            }
+        }
+        let cube = ColorCube::from_data(dimension, data);
+
+        // 0.515625 × 32 = 16.5: halfway between lattice 16 and 17 on green,
+        // with red and blue exactly on lattice points 8 and 24.
+        let got = cube.sample(0.25, 0.515625, 0.75);
+        assert_eq!(got.0, 0.25);
+        assert_eq!(got.1, 0.515625); // (16/32 + 17/32) / 2, exact in f32
+        assert_eq!(got.2, 0.75);
+
+        // Fractional on all three axes at once.
+        let got = cube.sample(0.515625, 0.515625, 0.515625);
+        assert_eq!(got.0, 0.515625);
+        assert_eq!(got.1, 0.515625);
+        assert_eq!(got.2, 0.515625);
+
+        // Off-lattice midpoint of asymmetric lattice values (red 10↔11).
+        let got = cube.sample(10.5 / 32.0, 0.0, 0.0);
+        assert_eq!(got.0, 10.5 / 32.0);
+
+        // Inputs outside 0…1 clamp to the cube's edge lattice points.
+        let got = cube.sample(-0.5, 1.5, 0.5);
+        assert_eq!(got.0, 0.0);
+        assert_eq!(got.1, 1.0);
+        assert_eq!(got.2, 0.5);
+    }
+
+    /// §7.1-2 (c): the cube path (what Swift's CIColorCube does) stays within
+    /// a couple of 1/255 steps of the exact per-pixel f64 math — the residual
+    /// is the f32 quantization of the 33-point LUT plus trilinear blending.
+    #[test]
+    fn cube_apply_matches_exact_math_within_quantization_tolerance() {
+        let mut settings = HueSaturationSettings::default();
+        settings.set_hue(30.0);
+        settings.set_saturation(20.0);
+        settings.set_lightness(-10.0);
+
+        let data = synthetic_rgba8(16, 16);
+        let exact = exact_pixel_apply(&data, &settings);
+
+        let cube = ColorCube::build(&settings);
+        let mut lut = data.clone();
+        apply_cube_rgba8(&mut lut, &cube);
+
+        let mut max_diff = 0u8;
+        for (a, b) in exact.iter().zip(lut.iter()) {
+            max_diff = max_diff.max(a.abs_diff(*b));
+        }
+        assert!(
+            max_diff <= 3,
+            "cube output diverges from exact math by {max_diff}/255"
+        );
+    }
+
+    /// A per-range adjustment through the default reds band. Pixels whose
+    /// whole lattice cell sits on one side of the band edge track the exact
+    /// math within rounding; across the whole image the bound is wider
+    /// because the band's hue edge falls inside single lattice cells, so
+    /// near-edge pixels trilinearly blend adjusted and unadjusted corners —
+    /// the CIColorCube behavior being ported, not a defect of this code (the
+    /// measured worst case for these settings is 18/255).
+    #[test]
+    fn cube_apply_stays_close_for_range_adjustments() {
+        let mut settings = HueSaturationSettings::default();
+        settings.range = ColorRange::Reds;
+        settings.set_hue(-60.0);
+        settings.set_saturation(-30.0);
+        settings.set_lightness(15.0);
+
+        let data = synthetic_rgba8(16, 16);
+        let exact = exact_pixel_apply(&data, &settings);
+        let cube = ColorCube::build(&settings);
+        let mut lut = data.clone();
+        apply_cube_rgba8(&mut lut, &cube);
+
+        let mut max_diff = 0u8;
+        for (a, b) in exact.iter().zip(lut.iter()) {
+            max_diff = max_diff.max(a.abs_diff(*b));
+        }
+        assert!(
+            max_diff <= 20,
+            "worst band-edge blend diverges from exact math by {max_diff}/255"
+        );
+
+        // Pure red (hue 0, deep inside the band: every lattice corner has
+        // g = b = 0) and pure green (hue 120, far outside it) are exact
+        // within rounding.
+        let mut probes = vec![255u8, 0, 0, 255, 0, 255, 0, 255];
+        let probe_exact = exact_pixel_apply(&probes, &settings);
+        apply_cube_rgba8(&mut probes, &cube);
+        for (a, b) in probe_exact.iter().zip(probes.iter()) {
+            assert!(a.abs_diff(*b) <= 2, "probe {a} vs {b}");
+        }
+    }
+
+    /// Colorize bakes one hue into every lattice entry; the LUT must still
+    /// track the exact math.
+    #[test]
+    fn cube_apply_matches_exact_math_for_colorize() {
+        let settings = HueSaturationSettings::colorize_start();
+        let data = synthetic_rgba8(16, 16);
+        let exact = exact_pixel_apply(&data, &settings);
+        let cube = ColorCube::build(&settings);
+        let mut lut = data.clone();
+        apply_cube_rgba8(&mut lut, &cube);
+
+        let mut max_diff = 0u8;
+        for (a, b) in exact.iter().zip(lut.iter()) {
+            max_diff = max_diff.max(a.abs_diff(*b));
+        }
+        assert!(
+            max_diff <= 3,
+            "cube output diverges from exact math by {max_diff}/255"
+        );
     }
 }

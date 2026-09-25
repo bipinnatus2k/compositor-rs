@@ -369,9 +369,21 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
         FilterKind::RemoveBackground => crate::tools::subject_removal::run(image, &settings),
         FilterKind::ContentAwareFill => crate::tools::content_fill::run(image),
         FilterKind::GaussianBlur => {
-            // Not clamped: a blur softens the layer's edges and spreads into
-            // the room made for it, rather than smearing the border outwards.
-            crate::raster::gaussian_blur_rgba(image, settings.radius * job.scale)
+            // Filters.swift: the blur runs on the whole image and is cropped
+            // back to the extent. CI's input is transparent outside its finite
+            // extent, so the blur spreads into transparent room and content at
+            // the bitmap's own edge softens outwards instead of the border
+            // smearing inwards. Grow the bitmap by transparent padding, blur
+            // the grown image (the edge clamp in `gaussian_blur_rgba` then only
+            // ever lands in the transparent pad), and trim the pad away.
+            let sigma = settings.radius * job.scale;
+            let pad = (sigma * 3.0).ceil().max(1.0) as usize;
+            let grown = grow_to_fit(image, pad);
+            let blurred = crate::raster::gaussian_blur_rgba(&grown, sigma);
+            crop_bitmap(
+                &blurred,
+                &CGRect::new(pad as f64, pad as f64, image.width as f64, image.height as f64),
+            )
         }
         FilterKind::MotionBlur => motion_blur(image, settings.distance * job.scale, settings.angle),
         FilterKind::AddNoise => {
@@ -411,13 +423,25 @@ pub fn motion_blur(image: &Bitmap, distance: f64, angle_degrees: f64) -> Bitmap 
     let radians = angle_degrees * std::f64::consts::PI / 180.0;
     let dir_x = radians.cos();
     let dir_y = -radians.sin();
-    // Normalized weights across the streak (box).
-    let steps = radius * 2 + 1;
-    let weight = 1.0 / steps as f32;
+    // CIMotionBlur tapers like a Gaussian whose spread is about its radius:
+    // weight each tap by exp(-t^2 / 2sigma^2) with sigma = radius, normalized.
+    let sigma = radius as f64;
+    let mut weights = vec![0.0f64; (radius * 2 + 1) as usize];
+    let mut total = 0.0f64;
+    for i in -radius..=radius {
+        let w = (-(i as f64) * (i as f64) / (2.0 * sigma * sigma)).exp();
+        weights[(i + radius) as usize] = w;
+        total += w;
+    }
+    for w in weights.iter_mut() {
+        *w /= total;
+    }
+    let weights = weights;
     let mut acc = vec![0.0f32; image.width * image.height * 4];
     for i in -radius..=radius {
         let dx = dir_x * i as f64;
         let dy = dir_y * i as f64;
+        let weight = weights[(i + radius) as usize] as f32;
         for y in 0..image.height {
             for x in 0..image.width {
                 let sx = (x as f64 + 0.5 + dx).floor();
@@ -478,6 +502,20 @@ pub fn crop_bitmap(image: &Bitmap, rect: &CGRect) -> Bitmap {
         let src = ((y0 + y) * image.width + x0) * 4;
         let dst = y * w * 4;
         out.data[dst..dst + w * 4].copy_from_slice(&image.data[src..src + w * 4]);
+    }
+    out
+}
+
+/// Expands `image` by `pad` transparent pixels on every side, with the
+/// original pixels landing at (pad, pad): the room a Core Image blur spreads
+/// into (`CIImage(cgImage:)` is transparent outside its extent).
+fn grow_to_fit(image: &Bitmap, pad: usize) -> Bitmap {
+    let mut out = Bitmap::new(image.width + pad * 2, image.height + pad * 2);
+    for y in 0..image.height {
+        let src = y * image.width * 4;
+        let dst = ((pad + y) * out.width + pad) * 4;
+        out.data[dst..dst + image.width * 4]
+            .copy_from_slice(&image.data[src..src + image.width * 4]);
     }
     out
 }
@@ -591,6 +629,93 @@ mod tests {
         assert!(peak > 50 && peak < 120, "{peak}");
         assert!(out.pixel(8, 0)[0] > 0 && out.pixel(8, 0)[0] < peak);
         assert_eq!(out.pixel(8, 0)[0], out.pixel(12, 0)[0]);
+    }
+
+    /// A Gaussian Blur job at scale 1 with no selection.
+    fn gaussian_job(image: &Bitmap, radius: f64) -> FilterJob<'_> {
+        FilterJob {
+            kind: FilterKind::GaussianBlur,
+            image,
+            settings: FilterSettings {
+                radius,
+                ..Default::default()
+            },
+            scale: 1.0,
+            selection: None,
+            mapping: CGAffineTransform::IDENTITY,
+            seed: 0,
+            noise_origin: CGPoint::ZERO,
+            camera_raw_clipping: None,
+            visualize_point_color: -1,
+            sharpen_mask: false,
+        }
+    }
+
+    #[test]
+    fn gaussian_spreads_into_transparent_room() {
+        // CI semantics: the blur draws from the transparent room around the
+        // block, so the block softens and bleeds outward without a border
+        // being smeared through it.
+        let mut img = Bitmap::new(100, 100);
+        for y in 40..60 {
+            for x in 40..60 {
+                img.set_pixel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let out = run_filter(&gaussian_job(&img, 6.0));
+        assert_eq!((out.width, out.height), (100, 100), "trim keeps the input size");
+        // The block's core stays strongly opaque.
+        assert!(out.pixel(50, 50)[3] > 180, "core: {:?}", out.pixel(50, 50));
+        // Just outside the block the blur has spread into the transparent room.
+        assert!(out.pixel(63, 50)[3] > 0, "outward spread: {:?}", out.pixel(63, 50));
+        // The far corner stays empty.
+        assert_eq!(out.pixel(2, 2)[3], 0);
+    }
+
+    #[test]
+    fn gaussian_edge_content_spreads_outward() {
+        // A fully opaque 50x50 image with 10 transparent rows appended: the
+        // bitmap's top edge is content. The blur decays it into the transparent
+        // room instead of the edge clamp holding the border at full alpha.
+        let mut img = Bitmap::new(50, 60);
+        for y in 0..50 {
+            for x in 0..50 {
+                img.set_pixel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let out = run_filter(&gaussian_job(&img, 0.5));
+        let edge = out.pixel(25, 0)[3];
+        assert!(edge > 0 && edge < 255, "top edge decays outward: {edge}");
+        // Deeper in, the content stays fully solid.
+        assert_eq!(out.pixel(25, 12)[3], 255);
+    }
+
+    #[test]
+    fn motion_blur_taper_decays_with_distance() {
+        // A single bright dot: the core stays bright, the trail decays
+        // monotonically and symmetrically (CIMotionBlur's tapered kernel).
+        let mut img = Bitmap::new(60, 60);
+        for y in 28..33 {
+            for x in 28..33 {
+                img.set_pixel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let out = motion_blur(&img, 20.0, 0.0);
+        let core = out.pixel(30, 30)[0];
+        let near = out.pixel(38, 30)[0];
+        let mid = out.pixel(44, 30)[0];
+        let far = out.pixel(50, 30)[0];
+        // The Gaussian core keeps only ~1/3 of a 5px dot's energy at
+        // sigma = radius = 6 — the taper is the point.
+        assert!(core > near && near > mid && mid >= far,
+            "taper decays: {core}/{near}/{mid}/{far}");
+        assert!(far <= 20, "far tail is nearly clear: {far}");
+        assert!(
+            i64::from(near) - i64::from(out.pixel(22, 30)[0]) <= 8,
+            "symmetric about the source: {:?} vs {:?}",
+            near,
+            out.pixel(22, 30)
+        );
     }
 
     #[test]

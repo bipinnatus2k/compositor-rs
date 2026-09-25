@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use crate::document::{CanvasDocument, ImageLayer};
-use crate::geometry::{CGFloat, CGPoint, CGRect, CGSize};
+use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use crate::raster::{resample, Bitmap, ImportedImage};
 use crate::transform::{LayerSampling, LayerTransform};
 use serde::{Deserialize, Serialize};
@@ -139,13 +139,41 @@ impl CanvasSizeOptions {
 /// `CanvasResizer.resize`: re-places every layer for the new canvas size. Layer
 /// pixels are preserved; the content shifts by the offset and the extension
 /// area stays empty (the sheet's fill color is a document background).
-pub fn resize_canvas(document: &CanvasDocument, options: &CanvasSizeOptions) -> CanvasDocument {
+pub fn resize_canvas(
+    document: &CanvasDocument,
+    options: &CanvasSizeOptions,
+) -> Result<CanvasDocument, String> {
+    // Defensive checks (`CanvasResizer.resize`).
+    if !(1..=30_000).contains(&options.width)
+        || !(1..=30_000).contains(&options.height)
+        || options.anchor > 8
+    {
+        return Err("the canvas is too large".to_string());
+    }
     let offset = options.offset(document.width, document.height);
+    if !offset.x.is_finite()
+        || !offset.y.is_finite()
+        || offset.x.abs() > 1_000_000.0
+        || offset.y.abs() > 1_000_000.0
+    {
+        return Err("the canvas offset is out of range".to_string());
+    }
+    // Nothing to do keeps everything, the selection included.
+    if options.width == document.width
+        && options.height == document.height
+        && offset.x == 0.0
+        && offset.y == 0.0
+    {
+        return Ok(document.clone());
+    }
     let mut result = document.clone();
     result.width = options.width;
     result.height = options.height;
     for layer in result.layers.iter_mut() {
         layer.transform.origin = layer.transform.origin + offset;
+        if !layer.transform.is_valid() {
+            return Err("a layer would land out of range".to_string());
+        }
         if let Some(mask) = layer.mask.as_mut() {
             if let Some(placement) = mask.placement.as_mut() {
                 placement.origin = placement.origin + offset;
@@ -154,12 +182,109 @@ pub fn resize_canvas(document: &CanvasDocument, options: &CanvasSizeOptions) -> 
     }
     result.guides = document.guides.iter().map(|g| g.offset(offset.x, offset.y)).collect();
     result.selection = None;
-    result
+    // A colored extension is separate bottom-layer content; the old canvas
+    // intersection stays transparent, holes in the artwork included.
+    if let Some(color) = options.fill {
+        let grew = options.width > document.width || options.height > document.height;
+        if grew {
+            let used: u64 = document
+                .layers
+                .iter()
+                .filter_map(|l| l.asset.as_ref())
+                .map(|a| a.image.width as u64 * a.image.height as u64)
+                .sum();
+            if options.width * options.height > (100_000_000 - used) as usize
+                || result.layers.len() >= 10_000
+            {
+                return Err("the canvas is too large".to_string());
+            }
+            if ![color.red, color.green, color.blue]
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            {
+                return Err("the extension color is out of range".to_string());
+            }
+            let mut extension = Bitmap::new(options.width, options.height);
+            let fill = [
+                ((color.red * 255.0).round() as f32 / 255.0),
+                ((color.green * 255.0).round() as f32 / 255.0),
+                ((color.blue * 255.0).round() as f32 / 255.0),
+            ];
+            for pixel in extension.data.chunks_exact_mut(4) {
+                let a = 255.0f32;
+                for c in 0..3 {
+                    pixel[c] = (fill[c] * a).round() as u8;
+                }
+                pixel[3] = a.round() as u8;
+            }
+            // The old canvas area stays transparent, holes included.
+            {
+                let clear_rect = CGRect::new(
+                    offset.x,
+                    offset.y,
+                    document.width as f64,
+                    document.height as f64,
+                );
+                let x_lo = clear_rect.min_x().max(0.0) as usize;
+                let y_lo = clear_rect.min_y().max(0.0) as usize;
+                let x_hi = (clear_rect.max_x().ceil() as usize).min(extension.width);
+                let y_hi = (clear_rect.max_y().ceil() as usize).min(extension.height);
+                for y in y_lo..y_hi {
+                    for x in x_lo..x_hi {
+                        let o = (y * extension.width + x) * 4;
+                        extension.data[o..o + 4].fill(0);
+                    }
+                }
+            }
+            let thumbnail = crate::raster::thumbnail_of(&extension);
+            let mut layer = ImageLayer::with_asset(
+                ImportedImage::with_thumbnail(extension, thumbnail, "Canvas Extension"),
+                CGPoint::ZERO,
+            );
+            layer.name = "Canvas Extension".to_string();
+            layer.transform = LayerTransform::new(
+                CGPoint::ZERO,
+                CGSize::new(options.width as f64, options.height as f64),
+            );
+            result.layers.insert(0, layer);
+        }
+    }
+    Ok(result)
 }
 
-/// `ImageResizer`: resamples every layer (and mask) to the new pixel size.
-/// Layer transforms scale proportionally; the resolution is set explicitly.
-pub fn resize_image(document: &CanvasDocument, new_width: usize, new_height: usize, resolution: Option<f64>) -> CanvasDocument {
+/// `ImageResizer.resize`: resamples every layer (and mask) into its scaled
+/// bounding box — a rotated layer lands axis-aligned, with the requested
+/// sampling. Uniform 1×1 masks and masks placed apart keep their pixels; the
+/// placement scales with the canvas. Same-size requests only set the
+/// resolution. Returns None when a dimension, resolution, or pixel budget is
+/// out of range.
+pub fn resize_image(
+    document: &CanvasDocument,
+    new_width: usize,
+    new_height: usize,
+    resolution: Option<f64>,
+    sampling: crate::transform::LayerSampling,
+) -> Option<CanvasDocument> {
+    if !(1..=30_000).contains(&new_width) || !(1..=30_000).contains(&new_height) {
+        return None;
+    }
+    if let Some(dpi) = resolution {
+        if !dpi.is_finite() || !(1.0..=9600.0).contains(&dpi) {
+            return None;
+        }
+    }
+    if new_width == document.width && new_height == document.height {
+        // Same size: only the resolution changes; layers, guides and the
+        // selection stay put.
+        let mut same = document.clone();
+        if let Some(dpi) = resolution {
+            same.resolution = dpi;
+        }
+        return Some(same);
+    }
+    if new_width * new_height > 100_000_000 {
+        return None;
+    }
     let sx = new_width as f64 / document.width as f64;
     let sy = new_height as f64 / document.height as f64;
     let mut result = document.clone();
@@ -168,39 +293,111 @@ pub fn resize_image(document: &CanvasDocument, new_width: usize, new_height: usi
     if let Some(dpi) = resolution {
         result.resolution = dpi;
     }
-    for layer in result.layers.iter_mut() {
-        resize_layer_pixels(layer, sx, sy);
-    }
     result.guides = document.guides.iter().map(|g| g.scaled(sx, sy)).collect();
     result.selection = None;
-    result
-}
-
-fn resize_layer_pixels(layer: &mut ImageLayer, sx: f64, sy: f64) {
-    let t = &mut layer.transform;
-    t.origin = CGPoint::new(t.origin.x * sx, t.origin.y * sy);
-    t.size = CGSize::new(t.size.width * sx, t.size.height * sy);
-    if let Some(asset) = layer.asset.as_ref() {
-        let old = asset.image.as_ref();
-        let w = ((old.width as f64 * sx).round() as usize).max(1);
-        let h = ((old.height as f64 * sy).round() as usize).max(1);
-        let resized = resample(old, w, h, LayerSampling::High);
-        let thumbnail = crate::raster::thumbnail_of(&resized);
-        layer.asset = Some(ImportedImage::with_thumbnail(resized, thumbnail, asset.name.clone()));
-    }
-    if let Some(mask) = layer.mask.as_mut() {
-        let old = mask.asset.image.as_ref();
-        let w = ((old.width as f64 * sx).round() as usize).max(1);
-        let h = ((old.height as f64 * sy).round() as usize).max(1);
-        let resized = resample(old, w, h, LayerSampling::High);
-        let thumbnail = crate::raster::thumbnail_of(&resized);
-        mask.asset = ImportedImage::with_thumbnail(resized, thumbnail, mask.asset.name.clone());
-        if let Some(placement) = mask.placement.as_mut() {
-            placement.origin = CGPoint::new(placement.origin.x * sx, placement.origin.y * sy);
-            placement.size = CGSize::new(placement.size.width * sx, placement.size.height * sy);
+    let scaling = CGAffineTransform::scale(sx, sy);
+    let mut used_pixels = 0u64;
+    let mut used_mask_pixels = 0u64;
+    for layer in result.layers.iter_mut() {
+        // Each transformed layer rasterizes into its scaled bounding box:
+        // nonuniform scaling of a rotated box would shear a
+        // width/height/angle transform.
+        let corners: Vec<CGPoint> = layer
+            .transform
+            .corners()
+            .iter()
+            .map(|p| CGPoint::new(p.x * sx, p.y * sy))
+            .collect();
+        let left = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min).floor();
+        let top = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).floor();
+        let width = (corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max).ceil() - left) as usize;
+        let height = (corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max).ceil() - top) as usize;
+        let mut transform = LayerTransform::new(
+            CGPoint::new(left, top),
+            CGSize::new(width as f64, height as f64),
+        );
+        transform.sampling = sampling;
+        if !transform.is_valid() || width == 0 || height == 0 {
+            return None;
+        }
+        if layer.asset.is_some() {
+            if !(1..=30_000).contains(&width)
+                || !(1..=30_000).contains(&height)
+                || width as u64 * height as u64 > 100_000_000 - used_pixels
+            {
+                return None;
+            }
+            used_pixels += width as u64 * height as u64;
+            if let Some(asset) = layer.asset.as_ref() {
+                let source_transform = LayerTransform {
+                    sampling,
+                    ..layer.transform
+                };
+                let mapping = scaling
+                    .concat(&crate::raster::pixel_to_document(
+                        &source_transform,
+                        asset.image.width as f64,
+                        asset.image.height as f64,
+                    ))
+                    .translate(-left, -top);
+                let mut out = Bitmap::new(width, height);
+                crate::raster::draw_affine(
+                    &mut out,
+                    asset.image.as_ref(),
+                    &mapping,
+                    sampling,
+                    None,
+                );
+                let thumbnail = crate::raster::thumbnail_of(&out);
+                layer.asset = Some(ImportedImage::with_thumbnail(
+                    out,
+                    thumbnail,
+                    asset.name.clone(),
+                ));
+            }
+        }
+        layer.transform = transform;
+        if let Some(mask) = layer.mask.as_mut() {
+            let uniform = mask.asset.image.width == 1 && mask.asset.image.height == 1;
+            if uniform || mask.placement.is_some() {
+                // Uniform masks are resolution independent; a mask placed
+                // apart keeps its pixels while the placement scales.
+                if let Some(placement) = mask.placement.as_mut() {
+                    let unit_to_document = placement.unit_to_document();
+                    *placement = placement.placing(&unit_to_document.concat(&scaling));
+                }
+            } else {
+                if width as u64 * height as u64 > 100_000_000 - used_mask_pixels {
+                    return None;
+                }
+                used_mask_pixels += width as u64 * height as u64;
+                let source_transform = LayerTransform {
+                    sampling,
+                    ..layer.transform
+                };
+                let mapping = scaling
+                    .concat(&crate::raster::pixel_to_document(
+                        &source_transform,
+                        mask.asset.image.width as f64,
+                        mask.asset.image.height as f64,
+                    ))
+                    .translate(-left, -top);
+                let mut out = Bitmap::new(width, height);
+                crate::raster::draw_affine(
+                    &mut out,
+                    mask.asset.image.as_ref(),
+                    &mapping,
+                    sampling,
+                    None,
+                );
+                let thumbnail = crate::raster::thumbnail_of(&out);
+                mask.asset = ImportedImage::with_thumbnail(out, thumbnail, mask.asset.name.clone());
+            }
         }
     }
+    Some(result)
 }
+
 
 /// `CropGeometry`.
 pub struct CropGeometry;
@@ -600,7 +797,7 @@ pub fn trim(document: &CanvasDocument, options: &TrimOptions) -> Option<CanvasDo
     }
     let mut options = CanvasSizeOptions::new(rect.width() as usize, rect.height() as usize);
     options.content_offset = Some(CGPoint::new(-rect.min_x(), -rect.min_y()));
-    Some(resize_canvas(document, &options))
+    resize_canvas(document, &options).ok()
 }
 
 /// `LayerTransform.mirrored` (`LayerFlip.swift`).
@@ -670,7 +867,7 @@ mod tests {
         doc.layers = vec![layer];
         doc.guides = vec![CanvasGuide::new(crate::document::GuideAxis::Vertical, 50.0)];
         let options = CanvasSizeOptions::new(120, 120);
-        let out = resize_canvas(&doc, &options);
+        let out = resize_canvas(&doc, &options).unwrap();
         assert_eq!((out.width, out.height), (120, 120));
         // Center anchor (4): offset floor(20×1/2) = 10.
         assert_eq!(out.layers[0].transform.origin, CGPoint::new(20.0, 20.0));
@@ -685,13 +882,84 @@ mod tests {
         let mut layer = ImageLayer::with_asset(ImportedImage::new(image, "L"), CGPoint::new(25.0, 25.0));
         layer.transform.size = CGSize::new(50.0, 50.0);
         doc.layers = vec![layer];
-        let out = resize_image(&doc, 200, 200, Some(144.0));
+        let out = resize_image(&doc, 200, 200, Some(144.0), LayerSampling::High).unwrap();
         assert_eq!((out.width, out.height), (200, 200));
         assert_eq!(out.resolution, 144.0);
         // The layer's own pixels scale by the same factor: 50 → 100.
         assert_eq!(out.layers[0].asset.as_ref().unwrap().image.width, 100);
         assert_eq!(out.layers[0].transform.size, CGSize::new(100.0, 100.0));
         assert_eq!(out.layers[0].transform.origin, CGPoint::new(50.0, 50.0));
+    }
+
+    #[test]
+    fn same_size_resize_only_sets_resolution() {
+        let mut doc = CanvasDocument::new(100, 100);
+        doc.resolution = 72.0;
+        doc.guides = vec![CanvasGuide::new(crate::document::GuideAxis::Vertical, 50.0)];
+        let out = resize_image(&doc, 100, 100, Some(300.0), LayerSampling::High).unwrap();
+        assert_eq!(out.resolution, 300.0);
+        assert_eq!(out.guides.len(), 1, "guides stay put");
+        assert_eq!(out.layers.len(), doc.layers.len());
+    }
+
+    #[test]
+    fn resize_keeps_uniform_and_placed_masks() {
+        let mut doc = CanvasDocument::new(100, 100);
+        let mut layer = ImageLayer::blank("L", doc.size());
+        let mut mask = crate::document::LayerMask::solid(true);
+        // A placed mask keeps its pixels; only the placement scales.
+        mask.placement = Some(LayerTransform::new(CGPoint::new(10.0, 10.0), CGSize::new(50.0, 50.0)));
+        layer.mask = Some(mask);
+        doc.layers = vec![layer];
+        let out = resize_image(&doc, 200, 200, None, LayerSampling::High).unwrap();
+        let mask = out.layers[0].mask.as_ref().unwrap();
+        assert_eq!(mask.asset.image.width, 1, "uniform mask untouched");
+        let placement = mask.placement.unwrap();
+        assert_eq!(placement.size, CGSize::new(100.0, 100.0), "placement scales");
+    }
+
+    #[test]
+    fn resize_rejects_out_of_range_values() {
+        let doc = CanvasDocument::new(100, 100);
+        assert!(resize_image(&doc, 0, 100, None, LayerSampling::High).is_none());
+        assert!(resize_image(&doc, 100, 30_001, None, LayerSampling::High).is_none());
+        assert!(resize_image(&doc, 100, 100, Some(9601.0), LayerSampling::High).is_none());
+        assert!(resize_image(&doc, 30_001, 30_001, None, LayerSampling::High).is_none());
+    }
+
+    #[test]
+    fn resize_canvas_lays_a_colored_extension_below() {
+        let mut doc = CanvasDocument::new(100, 100);
+        let mut layer = ImageLayer::blank("L", doc.size());
+        layer.transform.origin = CGPoint::new(10.0, 10.0);
+        doc.layers = vec![layer];
+        let mut options = CanvasSizeOptions::new(150, 150);
+        options.anchor = 0;
+        options.fill = Some(CanvasExtensionColor { red: 0.2, green: 0.4, blue: 0.8 });
+        let out = resize_canvas(&doc, &options).unwrap();
+        assert_eq!((out.width, out.height), (150, 150));
+        // The extension is the bottom layer, filled where the old canvas
+        // wasn't, transparent over it.
+        let extension = &out.layers[0];
+        assert_eq!(extension.name, "Canvas Extension");
+        let image = extension.asset.as_ref().unwrap().image.as_ref();
+        assert_eq!(image.pixel(140, 140)[3], 255, "new area is filled");
+        assert_eq!(image.pixel(5, 5)[3], 0, "the old area stays transparent");
+        // The content moved with the anchor.
+        assert_eq!(out.layers[1].transform.origin, CGPoint::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn resize_canvas_rejects_bad_requests() {
+        let doc = CanvasDocument::new(100, 100);
+        let mut options = CanvasSizeOptions::new(0, 100);
+        options.anchor = 0;
+        assert!(resize_canvas(&doc, &options).is_err());
+        let options = CanvasSizeOptions::new(30_001, 100);
+        assert!(resize_canvas(&doc, &options).is_err());
+        // Same size and no offset is an accepted no-op.
+        let options = CanvasSizeOptions::new(100, 100);
+        assert!(resize_canvas(&doc, &options).is_ok());
     }
 
     #[test]

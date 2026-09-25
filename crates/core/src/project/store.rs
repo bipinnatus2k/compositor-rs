@@ -297,6 +297,11 @@ enum Asset {
 fn read_png_asset(path: &Path, is_mask: bool, used: &mut u64) -> Result<Asset, ProjectError> {
     let file = fs::File::open(path).map_err(|_| ProjectError::MissingImage)?;
     let decoder = PngDecoder::new(BufReader::new(file)).map_err(|_| ProjectError::MissingImage)?;
+    // Multi-frame (APNG) files are rejected: the package format stores single
+    // images (`CGImageSourceGetCount(source) == 1`).
+    if decoder.is_apng().unwrap_or(true) {
+        return Err(ProjectError::MissingImage);
+    }
     let (width, height) = decoder.dimensions();
     let color_type = decoder.color_type();
     if matches!(
@@ -509,22 +514,47 @@ fn write_package(
     for (filename, bytes) in files {
         fs::write(staging.join("images").join(filename), bytes).map_err(stage_error)?;
     }
+    // The old package moves aside first and is only deleted once the new
+    // package is in place: a crash between the two renames leaves the old
+    // (or new, complete) package intact, never a missing destination
+    // (Foundation's `.atomic` replace).
+    let backup = parent.join(format!("{name}.backup-{}", Uuid::new_v4()));
     let replaced = match fs::symlink_metadata(dir) {
         Ok(existing) => {
-            if existing.is_dir() {
-                fs::remove_dir_all(dir)
+            let move_aside = if existing.is_dir() {
+                fs::rename(dir, &backup)
             } else {
-                fs::remove_file(dir)
+                fs::rename(dir, &backup)
+            };
+            let committed = move_aside.and_then(|()| fs::rename(&staging, dir));
+            match committed {
+                Ok(()) => {
+                    if existing.is_dir() {
+                        let _ = fs::remove_dir_all(&backup);
+                    } else {
+                        let _ = fs::remove_file(&backup);
+                    }
+                    Ok(())
+                }
+                Err(rename_error) => {
+                    // Roll the old package back into place.
+                    let _ = fs::rename(&backup, dir);
+                    let _ = fs::remove_dir_all(&staging);
+                    Err(rename_error)
+                }
             }
         }
-        Err(_) => Ok(()),
+        Err(_) => match fs::rename(&staging, dir) {
+            Ok(()) => Ok(()),
+            Err(rename_error) => {
+                let _ = fs::remove_dir_all(&staging);
+                Err(rename_error)
+            }
+        },
     };
-    match replaced.and_then(|()| fs::rename(&staging, dir)) {
+    match replaced {
         Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = fs::remove_dir_all(&staging);
-            Err(ProjectError::Encode)
-        }
+        Err(_) => Err(ProjectError::Encode),
     }
 }
 

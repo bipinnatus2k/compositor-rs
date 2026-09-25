@@ -133,12 +133,107 @@ pub struct TextDraft {
     pub style: crate::document::LayerTextStyle,
 }
 
+/// A guide being dragged (`GuideDrag`): `isNew` guides vanish when the drag
+/// ends on a ruler; existing guides move or delete.
+#[derive(Clone)]
+pub struct GuideDrag {
+    pub id: Uuid,
+    pub axis: GuideAxis,
+    pub position: f64,
+    pub is_new: bool,
+    pub original: Option<f64>,
+}
+
+/// A pending gradient (`GradientEdit`): endpoints are document pixels; the
+/// raster is rebuilt on every change and never touches the document until it
+/// commits.
+#[derive(Clone)]
+pub struct GradientDraft {
+    pub layer_id: Uuid,
+    pub is_mask: bool,
+    pub start: CGPoint,
+    pub end: CGPoint,
+}
+
 /// Pixels copied from the canvas, with where they came from so Paste can put
 /// them back in place (`PixelClipboard`).
 #[derive(Clone)]
 pub struct PixelClipboard {
     pub image: Bitmap,
     pub origin: CGPoint,
+}
+
+/// `ColorPickerTarget` — what the open color picker edits
+/// (ColorPalette.swift:162-180). The Gradient Map variant has no core
+/// filter-edit session to attach to yet, so nothing opens it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorPickerTarget {
+    Palette { background: bool },
+    /// A layer effect's own color.
+    Effect { kind: crate::effects::LayerEffectKind },
+    GradientMap { highlights: bool },
+    Text { draft_id: Option<Uuid> },
+}
+
+impl ColorPickerTarget {
+    /// `var title` (ColorPalette.swift:169-178).
+    pub fn title(&self) -> String {
+        match self {
+            ColorPickerTarget::Text { .. } => "Color Picker (Text Color)".to_string(),
+            ColorPickerTarget::Effect { kind } => {
+                format!("Color Picker ({} Color)", kind_label(*kind))
+            }
+            ColorPickerTarget::Palette { background } => format!(
+                "Color Picker ({} Color)",
+                if *background { "Background" } else { "Foreground" }
+            ),
+            ColorPickerTarget::GradientMap { highlights } => format!(
+                "Color Picker (Gradient Map {})",
+                if *highlights { "Highlights" } else { "Shadows" }
+            ),
+        }
+    }
+}
+
+fn kind_label(kind: crate::effects::LayerEffectKind) -> &'static str {
+    use crate::effects::LayerEffectKind::*;
+    match kind {
+        Stroke => "Stroke",
+        Shadow => "Drop Shadow",
+        ColorOverlay => "Color Overlay",
+        InnerShadow => "Inner Shadow",
+        OuterGlow => "Outer Glow",
+        InnerGlow => "Inner Glow",
+    }
+}
+
+/// `ColorPickerState` — the open picker's working color. Nothing is written
+/// to the palette until OK; `hsb` is the source of truth so hue survives
+/// dragging through grays and black (ColorPalette.swift:182-196).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorPickerState {
+    pub target: ColorPickerTarget,
+    pub original: PaletteColor,
+    pub hsb: PickerHSB,
+}
+
+impl ColorPickerState {
+    pub fn new(target: ColorPickerTarget, original: PaletteColor) -> Self {
+        ColorPickerState {
+            target,
+            original,
+            hsb: PickerHSB::from_rgb(original),
+        }
+    }
+
+    pub fn background(&self) -> bool {
+        self.target == ColorPickerTarget::Palette { background: true }
+    }
+
+    /// `var color` — the quantized working color.
+    pub fn color(&self) -> PaletteColor {
+        self.hsb.rgb().quantized()
+    }
 }
 
 /// `@Observable`; here the UI reads the fields directly and mutation methods
@@ -155,6 +250,14 @@ pub struct EditorSession {
     // Appearance preview
     pub blend_preview: Option<(Uuid, LayerBlendMode)>,
     pub opacity_edit_layer_id: Option<Uuid>,
+
+    // Effects panel editing (LayerEffects.swift:110-112); methods in effects_session.rs
+    pub effects_editing: Option<crate::effects::LayerEffectSelection>,
+    pub effects_editing_original: Option<crate::effects::LayerEffects>,
+    pub effect_selection: Option<crate::effects::LayerEffectSelection>,
+
+    // The open color picker (ColorPalette.swift:162-192); methods in color_picker.rs
+    pub color_picker: Option<ColorPickerState>,
 
     // Painting
     pub brush_settings: crate::tools::brush::BrushSettings,
@@ -189,6 +292,12 @@ pub struct EditorSession {
     pub text_draft: Option<TextDraft>,
     pub canvas_focus_request: u64,
 
+    // Pending gradient (`gradientEdit`)
+    pub gradient_edit: Option<GradientDraft>,
+
+    // Guide being dragged (`guideDrag`)
+    pub guide_drag: Option<GuideDrag>,
+
     // Transform
     pub transform_edit: Option<TransformEdit>,
     pub locks_transform_ratio: bool,
@@ -209,6 +318,7 @@ pub struct EditorSession {
     pub hue_saturation_layer_id: Option<Uuid>,
 
     // Guides
+    pub shows_transform_controls: bool,
     pub shows_guides: bool,
     pub shows_rulers: bool,
     pub shows_grid: bool,
@@ -245,8 +355,14 @@ impl Default for EditorSession {
             pixel_clipboard: None,
             text_draft: None,
             canvas_focus_request: 0,
+            gradient_edit: None,
+            guide_drag: None,
             history: DocumentHistory::default(),
             blend_preview: None,
+            effects_editing: None,
+            effects_editing_original: None,
+            effect_selection: None,
+            color_picker: None,
             opacity_edit_layer_id: None,
             brush_settings: crate::tools::brush::BrushSettings::default(),
             brush_mode: BrushToolMode::Paint,
@@ -282,6 +398,7 @@ impl Default for EditorSession {
             levels_layer_id: None,
             hue_saturation: None,
             hue_saturation_layer_id: None,
+            shows_transform_controls: true,
             shows_guides: true,
             shows_rulers: false,
             shows_grid: false,
@@ -355,7 +472,10 @@ impl EditorSession {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.history.can_undo()
+        // A pending gradient can still be applied or cancelled, so the menu
+        // treats it as undoable too (EditorSession.swift:567's
+        // `gradientEdit != nil` branch).
+        self.history.can_undo() || self.gradient_edit.is_some()
     }
 
     pub fn can_redo(&self) -> bool {
@@ -393,9 +513,11 @@ impl EditorSession {
     // MARK: Layers
 
     pub fn select_layer(&mut self, id: Option<Uuid>) {
-        // Switching layers commits a pending transform first (selectLayer).
+        // Switching layers commits a pending transform and applies the
+        // pending gradient first (selectLayer).
         if id != self.active_layer_id {
             self.commit_transform();
+            self.resolve_gradient();
             self.is_mask_selected = false;
         }
         self.active_layer_id = id;
@@ -418,11 +540,40 @@ impl EditorSession {
             Some(active) => active.parent_id,
             None => None,
         };
-        let insertion = self
+        let mut insertion = self
             .active_layer_id
             .and_then(|id| document.layer_index(id))
             .map(|i| i + 1)
             .unwrap_or(document.layers.len());
+        // With a folder selected the layer goes to the top of the folder:
+        // just above its last (topmost) contents.
+        if let (Some(active), Some(folder)) = (self.active_layer(), self.active_layer_id) {
+            if active.is_group {
+                let parents: std::collections::HashMap<Uuid, Option<Uuid>> = document
+                    .layers
+                    .iter()
+                    .map(|l| (l.id, l.parent_id))
+                    .collect();
+                let is_inside = |id: Uuid| -> bool {
+                    let mut parent = parents.get(&id).copied().flatten();
+                    let mut steps = 0;
+                    while let Some(current) = parent {
+                        if current == folder {
+                            return true;
+                        }
+                        parent = parents.get(&current).copied().flatten();
+                        steps += 1;
+                        if steps > 64 {
+                            break;
+                        }
+                    }
+                    false
+                };
+                if let Some(topmost) = document.layers.iter().rposition(|l| is_inside(l.id)) {
+                    insertion = insertion.max(topmost + 1);
+                }
+            }
+        }
         self.begin_edit("New Blank Layer");
         let id = layer.id;
         if let Some(doc) = self.document.as_mut() {
@@ -710,6 +861,19 @@ impl EditorSession {
         self.set_layer_blend_mode(next);
     }
 
+    /// `EditorSession.changeBrushHardness` — Shift-[ / Shift-]: hardness in
+    /// Photoshop's 25% steps (0, 25, 50, 75, 100%). Snaps to the next step up
+    /// or down, so 80% goes to 100% or 75%.
+    pub fn change_brush_hardness(&mut self, increase: bool) {
+        let quarter = self.brush_settings.hardness * 4.0;
+        let step = if increase {
+            (quarter + 0.001).floor() + 1.0
+        } else {
+            (quarter - 0.001).ceil() - 1.0
+        };
+        self.brush_settings.hardness = step.clamp(0.0, 4.0) / 4.0;
+    }
+
     pub fn set_layer_blend_mode(&mut self, mode: LayerBlendMode) {
         self.blend_preview = None;
         if !self.can_edit_appearance() {
@@ -779,6 +943,11 @@ impl EditorSession {
         if !self.tool.is_selection_tool() || self.tool == NavigationTool::Wand {
             return;
         }
+        // Selection tools need an editable document (canEditSelection), and a
+        // click never starts a draft while a selection move is in flight.
+        if !self.can_edit_layers() || self.selection_move_origin.is_some() {
+            return;
+        }
         if self.tool == NavigationTool::Marquee {
             let anchor = CGPoint::new(at.x.round(), at.y.round());
             self.lasso_draft = Some(LassoDraft {
@@ -801,6 +970,9 @@ impl EditorSession {
 
     /// Marquee drag, snapped to whole pixels.
     pub fn drag_marquee(&mut self, to: CGPoint, square: bool, from_center: bool) {
+        if !to.x.is_finite() || !to.y.is_finite() {
+            return;
+        }
         let Some(draft) = self.lasso_draft.as_mut() else {
             return;
         };
@@ -819,6 +991,9 @@ impl EditorSession {
 
     /// Adds an outline point; points closer than a quarter pixel are skipped.
     pub fn extend_lasso(&mut self, to: CGPoint) {
+        if !to.x.is_finite() || !to.y.is_finite() {
+            return;
+        }
         let Some(draft) = self.lasso_draft.as_mut() else {
             return;
         };
@@ -992,6 +1167,9 @@ impl EditorSession {
         if self.selection().is_none() {
             return;
         }
+        // Arrow-key nudges move whole pixels.
+        let dx = dx.round();
+        let dy = dy.round();
         self.begin_edit("Move Selection");
         if let Some(doc) = self.document.as_mut() {
             if let Some(selection) = doc.selection.as_mut() {
@@ -1003,6 +1181,8 @@ impl EditorSession {
 
     pub fn can_modify_selection(&self) -> bool {
         self.selection().map(|s| !s.is_empty()).unwrap_or(false)
+            && self.can_edit_layers()
+            && self.lasso_draft.is_none()
     }
 
     pub fn expand_selection(&mut self, amount: i64) {
@@ -1261,8 +1441,19 @@ impl EditorSession {
             return None;
         }
         let (source, transform) = if self.is_mask_selected {
+            let uniform = layer
+                .mask
+                .as_ref()
+                .map(|m| m.asset.image.width <= 1 && m.asset.image.height <= 1)
+                .unwrap_or(true);
             (
-                layer.mask.as_ref().map(|m| m.asset.image.as_ref().clone()),
+                // A uniform mask has no pixels to keep: the grid starts white
+                // and covers the whole layer.
+                layer
+                    .mask
+                    .as_ref()
+                    .filter(|m| !uniform || (m.asset.image.width > 1 && m.asset.image.height > 1))
+                    .map(|m| m.asset.image.as_ref().clone()),
                 layer.mask_transform(),
             )
         } else {
@@ -1870,6 +2061,31 @@ impl EditorSession {
             number += 1;
         }
         format!("Layer {number}")
+    }
+
+    // MARK: Clone Stamp (CloneStamp.swift)
+
+    /// `cloneStrokeOffset(at:)` — the whole-pixel offset a stroke starting at
+    /// `point` would copy with: aligned strokes keep the first stroke's
+    /// (`cloneOffset`); otherwise it runs from the brush to the source.
+    pub fn clone_stroke_offset(&self, at: CGPoint) -> Option<CGSize> {
+        let source = self.clone_source?;
+        Some(match self.clone_settings.aligned {
+            true => self.clone_offset.unwrap_or_else(|| {
+                CGSize::new((source.x - at.x).round(), (source.y - at.y).round())
+            }),
+            false => CGSize::new((source.x - at.x).round(), (source.y - at.y).round()),
+        })
+    }
+
+    /// A stroke starting at `point`: with aligned on, the first stroke fixes
+    /// `cloneOffset` and later strokes reuse it.
+    pub fn begin_clone_stroke(&mut self, at: CGPoint) -> Option<CGSize> {
+        let offset = self.clone_stroke_offset(at)?;
+        if self.clone_settings.aligned && self.clone_offset.is_none() {
+            self.clone_offset = Some(offset);
+        }
+        Some(offset)
     }
 
     // MARK: Multi-select and bulk layer ops (LayerGroups.swift)
@@ -2880,6 +3096,154 @@ impl EditorSession {
         snapped
     }
 
+    // MARK: Gradient (Gradient.swift)
+
+    /// `beginGradient(at:)` — dragging a new line replaces the pending one on
+    /// the same target.
+    pub fn begin_gradient(&mut self, at: CGPoint) {
+        if !self.can_edit_pixels() {
+            return;
+        }
+        let Some(id) = self.active_layer_id else {
+            return;
+        };
+        if self.document.as_ref().and_then(|d| d.layer(id)).is_none() {
+            return;
+        }
+        let is_mask = self.is_mask_selected;
+        if let Some(draft) = self.gradient_edit.as_mut() {
+            if draft.layer_id == id && draft.is_mask == is_mask {
+                draft.start = at;
+                draft.end = at;
+                return;
+            }
+        }
+        self.finish_opacity_edit();
+        self.gradient_edit = Some(GradientDraft {
+            layer_id: id,
+            is_mask,
+            start: at,
+            end: at,
+        });
+    }
+
+    pub fn move_gradient(&mut self, start: Option<CGPoint>, end: Option<CGPoint>) {
+        if let Some(draft) = self.gradient_edit.as_mut() {
+            if let Some(start) = start {
+                draft.start = start;
+            }
+            if let Some(end) = end {
+                draft.end = end;
+            }
+        }
+    }
+
+    /// `refreshGradient` — re-renders the pending gradient from the current
+    /// endpoints, settings, and palette.
+    pub fn refresh_gradient(&self) -> Option<Bitmap> {
+        let draft = self.gradient_edit.as_ref()?;
+        let has_line = ((draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y)).sqrt() >= 0.5;
+        if !has_line {
+            return None;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return None;
+        };
+        let edit = self.raster_edit_for_active(document)?;
+        let (fg, bg, transparent) = self.gradient_colors(draft.is_mask);
+        let mut colors = if self.gradient_settings.foreground_to_background {
+            [fg, bg]
+        } else {
+            [fg, transparent]
+        };
+        if self.gradient_settings.reversed {
+            colors = [colors[1], colors[0]];
+        }
+        Some(edit.fill_gradient(
+            self.gradient_settings.shape,
+            draft.start,
+            draft.end,
+            colors,
+            self.gradient_settings.opacity,
+        ))
+    }
+
+    /// `gradientColors` — the two stop colors; on a mask the palette is gray.
+    fn gradient_colors(&self, is_mask: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
+        let value = |c: f64| (c * 255.0).round() as u8;
+        let fg = self.palette_color(false);
+        let bg = self.palette_color(true);
+        if is_mask {
+            let fg_gray = [value(fg.red), value(fg.red), value(fg.red), 255];
+            let bg_gray = [value(bg.red), value(bg.red), value(bg.red), 255];
+            (fg_gray, bg_gray, [0, 0, 0, 0])
+        } else {
+            (
+                [value(fg.red), value(fg.green), value(fg.blue), 255],
+                [value(bg.red), value(bg.green), value(bg.blue), 255],
+                [value(fg.red), value(fg.green), value(fg.blue), 0],
+            )
+        }
+    }
+
+    /// `commitGradient` — the pending gradient rasterizes into its layer (or
+    /// mask) as one undo step. A click without a line just cancels.
+    pub fn apply_gradient(&mut self) -> bool {
+        let Some(draft) = self.gradient_edit.clone() else {
+            return false;
+        };
+        self.gradient_edit = None;
+        if !self.can_edit_pixels() {
+            self.gradient_edit = Some(draft);
+            return false;
+        }
+        let has_line = ((draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y)).sqrt() >= 0.5;
+        if !has_line {
+            return true;
+        }
+        let Some(document) = self.document.clone() else {
+            return false;
+        };
+        let Some(edit) = self.raster_edit_for_active(&document) else {
+            return false;
+        };
+        let (fg, bg, transparent) = self.gradient_colors(edit.is_mask);
+        let mut colors = if self.gradient_settings.foreground_to_background {
+            [fg, bg]
+        } else {
+            [fg, transparent]
+        };
+        if self.gradient_settings.reversed {
+            colors = [colors[1], colors[0]];
+        }
+        let composed = edit.fill_gradient(
+            self.gradient_settings.shape,
+            draft.start,
+            draft.end,
+            colors,
+            self.gradient_settings.opacity,
+        );
+        self.commit_pixel_edit(
+            &edit,
+            &composed,
+            if edit.is_mask { "Gradient Mask" } else { "Gradient" },
+        );
+        true
+    }
+
+    /// `cancelGradient`.
+    pub fn cancel_gradient(&mut self) {
+        self.gradient_edit = None;
+    }
+
+    /// `resolveGradient` — switching tools, layers, or targets applies the
+    /// pending gradient.
+    pub fn resolve_gradient(&mut self) {
+        if self.gradient_edit.is_some() {
+            self.apply_gradient();
+        }
+    }
+
     // MARK: Distort (Distort.swift)
 
     /// Cmd-drag on a transform handle: the corners start moving freely
@@ -3419,6 +3783,7 @@ impl EditorSession {
 
     pub fn commit_transform(&mut self) {
         self.finish_opacity_edit();
+        self.snap_guides = (Vec::new(), Vec::new());
         let Some(edit) = self.transform_edit.take() else {
             return;
         };
@@ -3463,6 +3828,17 @@ impl EditorSession {
         if let Some(mask) = layer.mask.as_mut() {
             let old = layer.transform;
             mask.placement = mask.placement_moving_layer(&old, &edit.draft);
+        }
+        // A shape layer re-renders its raster at the new bounds (redrawShape):
+        // resizing redraws, it never stretches the old pixels.
+        if let Some(shape) = layer.shape.clone() {
+            let new_w = edit.draft.size.width.round().max(1.0) as usize;
+            let new_h = edit.draft.size.height.round().max(1.0) as usize;
+            if new_w <= 10_000 && new_h <= 10_000 {
+                let name = layer.asset.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+                let raster = crate::render::render_shape_image(&shape, new_w, new_h);
+                layer.asset = Some(ImportedImage::new(raster, name));
+            }
         }
         layer.transform = edit.draft;
         self.end_edit();
@@ -3636,6 +4012,7 @@ impl EditorSession {
     }
 
     pub fn cancel_transform(&mut self) {
+        self.snap_guides = (Vec::new(), Vec::new());
         let Some(edit) = self.transform_edit.take() else {
             return;
         };
@@ -3712,28 +4089,62 @@ impl EditorSession {
         if !self.can_transform() {
             return;
         }
-        let Some(id) = self.active_layer_id else {
-            return;
-        };
-        let axis = self
-            .active_layer()
-            .map(|l| if horizontally { l.transform.center().x } else { l.transform.center().y });
-        let Some(axis) = axis else {
-            return;
-        };
-        self.finish_opacity_edit();
-        self.begin_edit(if horizontally { "Flip Horizontal" } else { "Flip Vertical" });
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(id) {
-                let flipped = mirrored_transform(&layer.transform, horizontally, axis);
-                if let Some(mask) = layer.mask.as_mut() {
-                    let old = layer.transform;
-                    mask.placement = mask.placement_moving_layer(&old, &flipped);
-                }
-                layer.transform = flipped;
+        // Several selected layers flip about the middle of the box around
+        // them (flipLayers); one layer flips about its own middle.
+        let members: Vec<Uuid> = if self.selected_layer_ids.len() > 1 {
+            let Some(document) = self.document.clone() else {
+                return;
+            };
+            self.selected_layer_ids
+                .iter()
+                .filter(|id| document.layer(**id).is_some())
+                .copied()
+                .collect()
+        } else {
+            match self.active_layer_id {
+                Some(id) => vec![id],
+                None => return,
             }
+        };
+        let Some(document) = self.document.clone() else {
+            return;
+        };
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for id in &members {
+            let Some(layer) = document.layer(*id) else {
+                continue;
+            };
+            let corners = layer.transform.corners();
+            min_x = min_x.min(corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min));
+            max_x = max_x.max(corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max));
+            min_y = min_y.min(corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min));
+            max_y = max_y.max(corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max));
         }
-        self.end_edit();
+        if !members.is_empty() && min_x.is_finite() {
+            let axis = if horizontally {
+                (min_x + max_x) / 2.0
+            } else {
+                (min_y + max_y) / 2.0
+            };
+            self.finish_opacity_edit();
+            self.begin_edit(if horizontally { "Flip Horizontal" } else { "Flip Vertical" });
+            if let Some(doc) = self.document.as_mut() {
+                for id in &members {
+                    if let Some(layer) = doc.layer_mut(*id) {
+                        let flipped = mirrored_transform(&layer.transform, horizontally, axis);
+                        if let Some(mask) = layer.mask.as_mut() {
+                            let old = layer.transform;
+                            mask.placement = mask.placement_moving_layer(&old, &flipped);
+                        }
+                        layer.transform = flipped;
+                    }
+                }
+            }
+            self.end_edit();
+        }
     }
 
     /// Flips the whole canvas.
@@ -3762,6 +4173,19 @@ impl EditorSession {
                         *placement = mirrored_transform(placement, horizontally, axis);
                     }
                 }
+            }
+            // The selection mirrors with the canvas.
+            if let Some(selection) = doc.selection.as_ref() {
+                let mirror = if horizontally {
+                    CGAffineTransform { a: -1.0, b: 0.0, c: 0.0, d: 1.0, tx: document.size().width, ty: 0.0 }
+                } else {
+                    CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: document.size().height }
+                };
+                doc.selection = Some(crate::selection::DocumentSelection {
+                    path: selection.path.transformed(&mirror),
+                    antialiased: selection.antialiased,
+                    feather: selection.feather,
+                });
             }
             doc.guides = doc
                 .guides
@@ -4024,33 +4448,71 @@ impl EditorSession {
         }
         let mut options = CanvasSizeOptions::new(rect.width() as usize, rect.height() as usize);
         options.content_offset = Some(CGPoint::new(-rect.min_x(), -rect.min_y()));
-        self.begin_edit("Crop");
         if let Some(doc) = self.document.take() {
-            self.document = Some(resize_canvas(&doc, &options));
+            if let Ok(resized) = resize_canvas(&doc, &options) {
+                self.begin_edit("Crop");
+                self.document = Some(resized);
+                self.end_edit();
+            } else {
+                self.document = Some(doc);
+            }
         }
-        self.end_edit();
+        self.crop_rect = None;
         self.crop_rect = None;
     }
 
     // MARK: Canvas / Image size, trim
 
-    pub fn resize_canvas_to(&mut self, options: &CanvasSizeOptions) {
-        self.begin_edit("Canvas Size");
-        if let Some(doc) = self.document.take() {
-            self.document = Some(resize_canvas(&doc, options));
+    pub fn resize_canvas_to(&mut self, options: &CanvasSizeOptions) -> bool {
+        // A no-op resize changes nothing, not even the selection.
+        if let Some(document) = self.document.as_ref() {
+            let offset = options.offset(document.width, document.height);
+            if options.width == document.width
+                && options.height == document.height
+                && offset.x == 0.0
+                && offset.y == 0.0
+            {
+                return false;
+            }
         }
-        self.end_edit();
+        let Some(document) = self.document.take() else {
+            return false;
+        };
+        match resize_canvas(&document, options) {
+            Ok(resized) => {
+                self.begin_edit("Canvas Size");
+                self.document = Some(resized);
+                self.end_edit();
+                true
+            }
+            Err(_) => {
+                self.document = Some(document);
+                false
+            }
+        }
     }
 
-    pub fn resize_image_to(&mut self, width: usize, height: usize, resolution: Option<f64>) {
-        if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) {
-            return;
+    pub fn resize_image_to(
+        &mut self,
+        width: usize,
+        height: usize,
+        resolution: Option<f64>,
+        sampling: crate::transform::LayerSampling,
+    ) -> bool {
+        let Some(document) = self.document.clone() else {
+            return false;
+        };
+        // The resolution-only path still applies (one undo step, selection
+        // kept); anything rejected leaves the document untouched.
+        match resize_image(&document, width, height, resolution, sampling) {
+            Some(resized) => {
+                self.begin_edit("Image Size");
+                self.document = Some(resized);
+                self.end_edit();
+                true
+            }
+            None => false,
         }
-        self.begin_edit("Image Size");
-        if let Some(doc) = self.document.take() {
-            self.document = Some(resize_image(&doc, width, height, resolution));
-        }
-        self.end_edit();
     }
 
     /// Returns false when nothing remained to trim.
@@ -4064,6 +4526,195 @@ impl EditorSession {
             }
         }
         false
+    }
+
+    /// `displayedTransform(for:)` — the transform a layer draws with right
+    /// now: the pending transform draft while it is being transformed.
+    pub fn displayed_transform(&self, layer: &ImageLayer) -> LayerTransform {
+        self.transform_edit
+            .as_ref()
+            .filter(|edit| edit.layer_id == layer.id && edit.draft.is_valid())
+            .map(|edit| edit.draft)
+            .unwrap_or(layer.transform)
+    }
+
+    /// `toggleShapeKind` — cycles the Shape tool's draw kind
+    /// (Rectangle → Ellipse → Rounded → Rectangle).
+    pub fn toggle_shape_kind(&mut self) {
+        use crate::document::ShapeKind;
+        self.shape_kind = match self.shape_kind {
+            ShapeKind::Rectangle => ShapeKind::Ellipse,
+            ShapeKind::Ellipse => ShapeKind::RoundedRectangle,
+            ShapeKind::RoundedRectangle | ShapeKind::Line => ShapeKind::Rectangle,
+        };
+    }
+
+    // MARK: Guide interaction (Guides.swift)
+
+    /// `hitGuide(at:)` — the nearest guide within `tolerance` document
+    /// pixels of the point (x for vertical guides, y for horizontal).
+    pub fn hit_guide(&self, at: CGPoint, tolerance: f64) -> Option<Uuid> {
+        if !self.shows_guides || self.locks_guides {
+            return None;
+        }
+        let document = self.document.as_ref()?;
+        let mut best: Option<(Uuid, f64)> = None;
+        for guide in &document.guides {
+            let distance = if guide.axis == GuideAxis::Vertical {
+                (at.x - guide.position).abs()
+            } else {
+                (at.y - guide.position).abs()
+            };
+            if distance <= tolerance && best.map(|(_, d)| distance < d).unwrap_or(true) {
+                best = Some((guide.id, distance));
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// `snappedGuidePosition` — snaps to other guides on the same axis, the
+    /// canvas edges and middle, and other layers' edges and centers.
+    pub fn snapped_guide_position(
+        &self,
+        position: f64,
+        axis: GuideAxis,
+        excluding: Option<Uuid>,
+    ) -> f64 {
+        if !self.snapping_enabled {
+            return position;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return position;
+        };
+        let tolerance = 10.0;
+        let length = if axis == GuideAxis::Vertical {
+            document.width as f64
+        } else {
+            document.height as f64
+        };
+        let mut targets: Vec<f64> = vec![0.0, length / 2.0, length];
+        for guide in &document.guides {
+            if guide.axis == axis && Some(guide.id) != excluding {
+                targets.push(guide.position);
+            }
+        }
+        for layer in document.render_layers() {
+            if layer.asset.is_none() {
+                continue;
+            }
+            let corners = layer.transform.corners();
+            let values: Vec<f64> = if axis == GuideAxis::Vertical {
+                corners.iter().map(|p| p.x).collect()
+            } else {
+                corners.iter().map(|p| p.y).collect()
+            };
+            let min = values.iter().cloned().fold(f64::INFINITY, f64::min).round();
+            let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max).round();
+            targets.push(min);
+            targets.push(((min + max) / 2.0).round());
+            targets.push(max);
+        }
+        let mut best = position;
+        let mut best_distance = tolerance;
+        for target in targets {
+            let distance = (target - position).abs();
+            if distance <= best_distance {
+                best = target;
+                best_distance = distance;
+            }
+        }
+        best
+    }
+
+    /// `beginGuideCreation(axis:at:)`.
+    pub fn begin_guide_creation(&mut self, axis: GuideAxis, position: f64) {
+        if !self.can_edit_layers() || self.locks_guides {
+            return;
+        }
+        self.shows_guides = true;
+        let snapped = self.snapped_guide_position(position, axis, None);
+        let id = Uuid::new_v4();
+        self.guide_drag = Some(GuideDrag {
+            id,
+            axis,
+            position: snapped,
+            is_new: true,
+            original: None,
+        });
+    }
+
+    /// `beginGuideMove(_:)`.
+    pub fn begin_guide_move(&mut self, guide_id: Uuid) {
+        if !self.can_edit_layers() || self.locks_guides {
+            return;
+        }
+        let Some(guide) = self
+            .document
+            .as_ref()
+            .and_then(|d| d.guides.iter().find(|g| g.id == guide_id))
+            .cloned()
+        else {
+            return;
+        };
+        self.guide_drag = Some(GuideDrag {
+            id: guide.id,
+            axis: guide.axis,
+            position: guide.position,
+            is_new: false,
+            original: Some(guide.position),
+        });
+    }
+
+    /// `moveGuideDrag(to:)`.
+    pub fn move_guide_drag(&mut self, position: f64) {
+        let (axis, id) = match self.guide_drag.as_ref() {
+            Some(drag) => (drag.axis, drag.id),
+            None => return,
+        };
+        let snapped = self.snapped_guide_position(position, axis, Some(id));
+        if let Some(drag) = self.guide_drag.as_mut() {
+            drag.position = snapped;
+        }
+    }
+
+    /// `finishGuideDrag(delete:)` — releasing on a ruler (`delete`) cancels a
+    /// new guide or removes the existing one.
+    pub fn finish_guide_drag(&mut self, delete: bool) {
+        let Some(drag) = self.guide_drag.clone() else {
+            return;
+        };
+        self.guide_drag = None;
+        if delete {
+            if drag.is_new {
+                return;
+            }
+            self.begin_edit("Delete Guide");
+            if let Some(doc) = self.document.as_mut() {
+                doc.guides.retain(|g| g.id != drag.id);
+            }
+            self.end_edit();
+            return;
+        }
+        if drag.is_new {
+            self.begin_edit("New Guide");
+            if let Some(doc) = self.document.as_mut() {
+                doc.guides.push(crate::document::CanvasGuide::new(drag.axis, drag.position));
+            }
+            self.end_edit();
+        } else if drag.original != Some(drag.position) {
+            self.begin_edit("Move Guide");
+            if let Some(doc) = self.document.as_mut() {
+                if let Some(guide) = doc.guides.iter_mut().find(|g| g.id == drag.id) {
+                    guide.position = drag.position;
+                }
+            }
+            self.end_edit();
+        }
+    }
+
+    /// `cancelGuideDrag`.
+    pub fn cancel_guide_drag(&mut self) {
+        self.guide_drag = None;
     }
 
     // MARK: Fills & palette
@@ -4396,6 +5047,33 @@ mod tests {
             s.active_layer().unwrap().blend_mode,
             LayerBlendMode::Luminosity
         );
+    }
+
+    #[test]
+    fn brush_hardness_snaps_to_quarter_steps() {
+        // EditorSession.changeBrushHardness: 80% steps to 100% up, 75% down.
+        let mut s = session();
+        s.brush_settings.hardness = 0.8;
+        s.change_brush_hardness(true);
+        assert_eq!(s.brush_settings.hardness, 1.0);
+        s.brush_settings.hardness = 0.8;
+        s.change_brush_hardness(false);
+        assert_eq!(s.brush_settings.hardness, 0.75);
+        // Exact steps stay put within rounding slop.
+        s.brush_settings.hardness = 0.5;
+        s.change_brush_hardness(true);
+        assert_eq!(s.brush_settings.hardness, 0.75);
+        // Both ends clamp.
+        s.brush_settings.hardness = 0.0;
+        s.change_brush_hardness(false);
+        assert_eq!(s.brush_settings.hardness, 0.0);
+        s.brush_settings.hardness = 1.0;
+        s.change_brush_hardness(true);
+        assert_eq!(s.brush_settings.hardness, 1.0);
+        // Off-grid low values round down, never up, when decreasing.
+        s.brush_settings.hardness = 0.1;
+        s.change_brush_hardness(false);
+        assert_eq!(s.brush_settings.hardness, 0.0);
     }
 
     #[test]
@@ -5193,6 +5871,455 @@ mod tests {
     }
 
     #[test]
+    fn flipping_several_layers_uses_their_shared_box() {
+        let mut s = session();
+        let first = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(10), "A"));
+        s.document.as_mut().unwrap().layers[0].transform =
+            LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
+        let second = blank_layer(&mut s, "B");
+        s.document.as_mut().unwrap().layers[1].asset =
+            Some(ImportedImage::new(red_image(10), "B"));
+        s.document.as_mut().unwrap().layers[1].transform =
+            LayerTransform::new(CGPoint::new(50.0, 0.0), CGSize::new(10.0, 10.0));
+        s.select_layers(&[first, second], Some(first));
+        s.flip_layers(true);
+        // The shared box spans 0..60; flipping about its middle swaps the
+        // two sides.
+        let first_layer = s.document.as_ref().unwrap().layer(first).unwrap();
+        assert!(
+            (first_layer.transform.center().x - 55.0).abs() < 1.0,
+            "{:?}",
+            first_layer.transform
+        );
+        assert_eq!(s.history.undo_name(), "Flip Horizontal");
+    }
+
+    #[test]
+    fn flipping_the_canvas_mirrors_the_selection() {
+        let mut s = session();
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        s.flip_canvas(true);
+        let selection = s.document.as_ref().unwrap().selection.as_ref().unwrap();
+        let bounds = selection.path.bounds().unwrap();
+        // The 10..30 range mirrors to 70..90 across the 100-wide canvas.
+        assert!((bounds.min_x() - 70.0).abs() <= 1.0, "{bounds:?}");
+    }
+
+    #[test]
+    fn snapped_move_records_the_guide_it_landed_on() {
+        // Dragging a layer so its center hits the canvas middle records the
+        // vertical center guide for the canvas to draw.
+        let mut s = session();
+        let id = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].transform =
+            LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
+        s.select_layer(Some(id));
+        s.begin_transform();
+        let mut draft = s.transform_edit.as_ref().unwrap().draft;
+        draft.origin = CGPoint::new(45.0, 0.0);
+        let moved = s.snapped_move(draft, &[id], 10.0);
+        assert!((moved.origin.x - 45.0).abs() < 1e-9, "{moved:?}");
+        assert_eq!(s.snap_guides.0, vec![50.0], "vertical center guide recorded");
+        // Committing clears the guides.
+        s.commit_transform();
+        assert_eq!(s.snap_guides, (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn nudging_the_selection_moves_whole_pixels() {
+        let mut s = session();
+        rectangular_selection(&mut s, 10.4, 10.0, 30.0, 30.0);
+        s.nudge_selection(0.6, 0.0);
+        let bounds = s.document.as_ref().unwrap().selection.as_ref().unwrap().path.bounds().unwrap();
+        // 0.6 + 0.6 rounds to whole pixels: the outline lands on an integer.
+        assert!((bounds.min_x() - bounds.min_x().round()).abs() < 1e-6, "{bounds:?}");
+    }
+
+    #[test]
+    fn clone_aligned_strokes_reuse_the_first_offset() {
+        let mut s = session();
+        s.clone_source = Some(CGPoint::new(30.0, 40.0));
+        s.clone_settings.aligned = true;
+        // The first stroke fixes the offset.
+        let first = s.begin_clone_stroke(CGPoint::new(50.0, 60.0)).unwrap();
+        assert_eq!(first, CGSize::new(-20.0, -20.0));
+        assert_eq!(s.clone_offset, Some(first));
+        // A later stroke elsewhere reuses it.
+        let second = s.begin_clone_stroke(CGPoint::new(10.0, 10.0)).unwrap();
+        assert_eq!(second, first, "aligned strokes share the offset");
+        // Unaligned strokes recompute from the brush to the source.
+        s.clone_settings.aligned = false;
+        let unaligned = s.clone_stroke_offset(CGPoint::new(10.0, 10.0)).unwrap();
+        assert_eq!(unaligned, CGSize::new(20.0, 30.0));
+    }
+
+    #[test]
+    fn clone_without_a_source_has_no_offset() {
+        let mut s = session();
+        s.clone_settings.aligned = true;
+        assert!(s.clone_stroke_offset(CGPoint::new(10.0, 10.0)).is_none());
+        assert!(s.begin_clone_stroke(CGPoint::new(10.0, 10.0)).is_none());
+    }
+
+    #[test]
+    fn gradient_drag_applies_to_the_layer() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        s.tool = NavigationTool::Gradient;
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        // The preview rebuilds from the endpoints.
+        assert!(s.refresh_gradient().is_some());
+        assert!(s.apply_gradient());
+        let image = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        // Black foreground to transparent: the start edge is inky black,
+        // the end edge fades to the clear red underneath.
+        let start = image.pixel(12, 50);
+        let end = image.pixel(88, 50);
+        // Black foreground fades out over the red layer: the start is inky,
+        // the end lets the red show through.
+        assert!(start[0] < 60 && start[3] == 255, "{start:?}");
+        assert!(end[0] > start[0] + 150, "{start:?} {end:?}");
+        assert_eq!(s.history.undo_name(), "Gradient");
+        s.undo();
+        let image = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        if std::env::var("GRAD_DBG").is_ok() {
+            eprintln!(
+                "DBG after undo (12,50)={:?} (0,0)={:?} undo_count={}",
+                image.pixel(12, 50),
+                image.pixel(0, 0),
+                s.history.undo_count()
+            );
+        }
+        assert_eq!(image.pixel(12, 50), [255, 0, 0, 255], "undo removes the gradient");
+    }
+
+    #[test]
+    fn gradient_on_a_mask_uses_gray() {
+        let mut s = session();
+        let id = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        s.add_layer_mask(true);
+        s.is_mask_selected = true;
+        s.tool = NavigationTool::Gradient;
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        assert!(s.apply_gradient());
+        let mask = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(id)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap();
+        // Black foreground on a white mask: the gray ramps up left to right.
+        let left = mask.asset.image.pixel(12, 50)[0];
+        let right = mask.asset.image.pixel(88, 50)[0];
+        assert!(left < right, "left={left} right={right}");
+        assert_eq!(s.history.undo_name(), "Gradient Mask");
+    }
+
+    #[test]
+    fn switching_layers_applies_the_pending_gradient() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        s.tool = NavigationTool::Gradient;
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        let second = blank_layer(&mut s, "B");
+        s.select_layer(Some(second));
+        assert!(
+            s.gradient_edit.is_none(),
+            "switching layers applies the pending gradient"
+        );
+        let image = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert!(image.pixel(12, 50)[0] < 150, "the gradient committed");
+    }
+
+    #[test]
+    fn guide_interaction_create_move_delete() {
+        let mut s = session();
+        s.begin_guide_creation(GuideAxis::Vertical, 50.0);
+        assert!(s.guide_drag.as_ref().unwrap().is_new);
+        s.finish_guide_drag(false);
+        let doc = s.document.as_ref().unwrap();
+        assert_eq!(doc.guides.len(), 1, "new guide lands");
+        assert_eq!(doc.guides[0].position, 50.0);
+        assert_eq!(s.history.undo_name(), "New Guide");
+
+        // Move it.
+        let guide_id = doc.guides[0].id;
+        s.begin_guide_move(guide_id);
+        s.move_guide_drag(70.0);
+        s.finish_guide_drag(false);
+        let doc = s.document.as_ref().unwrap();
+        assert_eq!(doc.guides[0].position, 70.0);
+        assert_eq!(s.history.undo_name(), "Move Guide");
+
+        // Releasing on a ruler deletes it.
+        s.begin_guide_move(guide_id);
+        s.finish_guide_drag(true);
+        assert_eq!(s.document.as_ref().unwrap().guides.len(), 0);
+        assert_eq!(s.history.undo_name(), "Delete Guide");
+    }
+
+    #[test]
+    fn guide_creation_snaps_to_layer_edges() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].transform =
+            LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
+        // 8 is within the 10px tolerance of the layer's right edge at 10.
+        s.begin_guide_creation(GuideAxis::Vertical, 8.0);
+        assert_eq!(s.guide_drag.as_ref().unwrap().position, 10.0);
+    }
+
+    #[test]
+    fn hit_guide_finds_the_nearest_within_tolerance() {
+        let mut s = session();
+        s.shows_guides = true;
+        s.add_guide(GuideAxis::Vertical, 20.0);
+        s.add_guide(GuideAxis::Vertical, 60.0);
+        assert_eq!(s.hit_guide(CGPoint::new(22.0, 10.0), 10.0), Some(s.document.as_ref().unwrap().guides[0].id));
+        assert_eq!(s.hit_guide(CGPoint::new(59.0, 10.0), 10.0), Some(s.document.as_ref().unwrap().guides[1].id));
+        assert_eq!(s.hit_guide(CGPoint::new(40.0, 10.0), 10.0), None, "no guide within tolerance");
+        assert_eq!(s.hit_guide(CGPoint::new(59.0, 10.0), 10.0), s.hit_guide(CGPoint::new(59.0, 10.0), 10.0));
+    }
+
+    #[test]
+    fn locked_guides_refuse_creation_moves_and_hits() {
+        // Guides.swift:74/92 — locked guides block hitGuide and both guide drags.
+        let mut s = session();
+        s.shows_guides = true;
+        s.add_guide(GuideAxis::Vertical, 20.0);
+        let guide_id = s.document.as_ref().unwrap().guides[0].id;
+        s.locks_guides = true;
+        assert_eq!(s.hit_guide(CGPoint::new(20.0, 10.0), 10.0), None);
+        s.begin_guide_creation(GuideAxis::Vertical, 35.0);
+        assert!(s.guide_drag.is_none(), "creation refused while locked");
+        s.begin_guide_move(guide_id);
+        assert!(s.guide_drag.is_none(), "move refused while locked");
+        // Unlocking restores everything.
+        s.locks_guides = false;
+        assert_eq!(s.hit_guide(CGPoint::new(20.0, 10.0), 10.0), Some(guide_id));
+        s.begin_guide_move(guide_id);
+        assert!(s.guide_drag.is_some());
+    }
+
+    #[test]
+    fn displayed_transform_prefers_the_pending_draft() {
+        let mut s = session();
+        let id = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(10), "L"));
+        let layer = s.document.as_ref().unwrap().layer(id).unwrap().clone();
+        assert_eq!(s.displayed_transform(&layer), layer.transform);
+        s.begin_transform();
+        if let Some(edit) = s.transform_edit.as_mut() {
+            edit.draft.origin = CGPoint::new(5.0, 5.0);
+        }
+        let layer = s.document.as_ref().unwrap().layer(id).unwrap().clone();
+        assert_eq!(
+            s.displayed_transform(&layer).origin,
+            CGPoint::new(5.0, 5.0),
+            "the draft wins while the transform is pending"
+        );
+    }
+
+    #[test]
+    fn shape_layers_rerender_on_transform_commit() {
+        // redrawShape: resizing a shape layer redraws the raster at the new
+        // bounds instead of stretching the old pixels.
+        let mut s = session();
+        let id = s.document.as_ref().unwrap().layers[0].id;
+        {
+            let doc = s.document.as_mut().unwrap();
+            let shape = crate::document::LayerShape {
+                kind: crate::document::ShapeKind::Rectangle,
+                corner_radius: 0.0,
+                line_width: 0.0,
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                filled: true,
+                start: CGPoint::ZERO,
+                end: CGPoint::new(1.0, 1.0),
+            };
+            let raster = crate::render::render_shape_image(&shape, 10, 10);
+            let mut layer = ImageLayer::with_asset(
+                ImportedImage::new(raster, "Shape"),
+                CGPoint::ZERO,
+            );
+            layer.id = id;
+            layer.shape = Some(shape);
+            doc.layers[0] = layer;
+        }
+        s.begin_transform();
+        if let Some(edit) = s.transform_edit.as_mut() {
+            edit.draft.size = CGSize::new(30.0, 30.0);
+        }
+        s.commit_transform();
+        let layer = s.document.as_ref().unwrap().layer(id).unwrap();
+        if std::env::var("SHP_DBG").is_ok() {
+            eprintln!(
+                "DBG after commit: layer_id={id} found={} transform={:?} asset={:?} shape={:?}",
+                layer.id == id,
+                (layer.transform.origin.x, layer.transform.origin.y, layer.transform.size.width),
+                layer.asset.as_ref().map(|a| a.image.width),
+                layer.shape.is_some()
+            );
+        }
+        assert_eq!(layer.transform.size, CGSize::new(30.0, 30.0));
+        eprintln!("DBG shape test: transform={:?} asset={:?} shape={:?} id={}",
+            (layer.transform.origin.x, layer.transform.size.width, layer.transform.size.height),
+            layer.asset.as_ref().map(|a| (a.image.width, a.image.height)),
+            layer.shape.is_some(), id);
+        let asset = layer.asset.as_ref().unwrap();
+        assert_eq!(asset.image.width, 30, "the raster was redrawn, not stretched");
+        assert_eq!(asset.image.pixel(2, 2), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn toggle_shape_kind_cycles_the_draw_kind() {
+        let mut s = session();
+        s.shape_kind = crate::document::ShapeKind::Rectangle;
+        s.toggle_shape_kind();
+        assert_eq!(s.shape_kind, crate::document::ShapeKind::Ellipse);
+        s.toggle_shape_kind();
+        assert_eq!(s.shape_kind, crate::document::ShapeKind::RoundedRectangle);
+        s.toggle_shape_kind();
+        assert_eq!(s.shape_kind, crate::document::ShapeKind::Rectangle);
+    }
+
+    #[test]
+    fn pending_gradient_counts_as_undoable() {
+        // A pending gradient can still be applied or cancelled, so the menu
+        // treats it as undoable (EditorSession.swift:567).
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        s.tool = NavigationTool::Gradient;
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        assert!(s.gradient_edit.is_some());
+        assert!(s.can_undo(), "pending gradient is undoable");
+        assert!(s.apply_gradient());
+        assert!(s.can_undo(), "applied gradient remains undoable");
+    }
+
+    #[test]
+    fn blank_layer_lands_at_the_top_of_a_selected_folder() {
+        // EditorSession.swift:614-632: with a folder selected the layer goes
+        // just above the folder's topmost contents, not below everything.
+        let mut s = session();
+        let folder_id = s.document.as_ref().unwrap().layers[0].id;
+        {
+            let doc = s.document.as_mut().unwrap();
+            doc.layers[0].is_group = true;
+            let mut inner = ImageLayer::blank("Inner", CGSize::new(100.0, 100.0));
+            inner.parent_id = Some(folder_id);
+            doc.layers.push(inner);
+        }
+        s.select_layer(Some(folder_id));
+        s.add_blank_layer();
+        let doc = s.document.as_ref().unwrap();
+        // Storage is bottom-to-top: the new layer lands above the folder's
+        // topmost contents (Swift: insertion = lastIndex(where: inside) + 1).
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(doc.layers[0].id, folder_id);
+        assert_eq!(doc.layers[1].name, "Inner");
+        assert_eq!(doc.layers[2].name, "Layer 2");
+        assert_eq!(doc.layers[2].parent_id, Some(folder_id));
+    }
+
+    #[test]
+    fn gaussian_blur_keeps_far_regions_untouched() {
+        // The blur works on the visible pixels' bounds: content far from the
+        // layer's bitmap edge still blurs, and empty far regions stay empty.
+        let mut img = Bitmap::new(100, 100);
+        for y in 40..60 {
+            for x in 40..60 {
+                img.set_pixel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let out = crate::filters::run_filter(&crate::filters::FilterJob {
+            kind: crate::filters::FilterKind::GaussianBlur,
+            image: &img,
+            settings: crate::filters::FilterSettings {
+                radius: 6.0,
+                ..Default::default()
+            },
+            scale: 1.0,
+            selection: None,
+            mapping: CGAffineTransform::IDENTITY,
+            seed: 0,
+            noise_origin: CGPoint::ZERO,
+            camera_raw_clipping: None,
+            visualize_point_color: -1,
+            sharpen_mask: false,
+        });
+        // Unclamped (CI semantics): the 20px block blurs into transparency,
+        // so the core thins slightly but stays strongly opaque.
+        let core = out.pixel(50, 50);
+        assert!(core[3] > 180, "core stays mostly opaque: {core:?}");
+        assert!(core[0] > 180, "{core:?}");
+        // The blur spreads into the transparent surroundings by a few pixels.
+        assert!(out.pixel(36, 50)[3] > 0, "edge softens outward: {:?}", out.pixel(36, 50));
+        assert_eq!(out.pixel(5, 5)[3], 0, "far regions stay empty");
+    }
+
+    #[test]
+    fn lasso_ignores_non_finite_points() {
+        let mut s = session();
+        s.tool = NavigationTool::Lasso;
+        s.begin_lasso(CGPoint::new(10.0, 10.0), SelectionMode::Replace);
+        s.extend_lasso(CGPoint::new(f64::NAN, 20.0));
+        let draft = s.lasso_draft.as_ref().unwrap();
+        assert_eq!(draft.points.len(), 1, "the NaN point is refused");
+        assert!(!s.can_modify_selection(), "an open lasso blocks edits");
+    }
+
+    #[test]
     fn moving_the_crop_frame_snaps_both_edges() {
         // The frame's left edge comes within tolerance of the canvas's left
         // edge (x = 0): the move snaps onto it, keeping the size.
@@ -5483,7 +6610,7 @@ mod tests {
         options.anchor = 0;
         s.resize_canvas_to(&options);
         assert_eq!(s.document.as_ref().unwrap().width, 150);
-        s.resize_image_to(75, 75, Some(144.0));
+        s.resize_image_to(75, 75, Some(144.0), crate::transform::LayerSampling::High);
         assert_eq!(s.document.as_ref().unwrap().width, 75);
         assert_eq!(s.document.as_ref().unwrap().resolution, 144.0);
         assert_eq!(s.history.undo_name(), "Image Size");

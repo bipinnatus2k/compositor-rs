@@ -163,28 +163,35 @@ impl DocumentHistory {
     }
 
     /// Bytes retained only by history, excluding images in the live document.
+    /// Layer bitmaps are RGBA (4 bytes per pixel); a mask is a DeviceGray
+    /// image whose bytesPerRow is one byte per pixel
+    /// (DocumentHistory.retainedBytes). Images compare by identity.
     pub fn retained_bytes(&self, current: Option<&CanvasDocument>) -> usize {
-        let mut seen: HashSet<(*const u8, *const u8)> = HashSet::new();
+        let mut seen: HashSet<ArcPtr> = HashSet::new();
         if let Some(document) = current {
             for layer in &document.layers {
                 for asset in layer.asset.iter().chain(layer.mask.as_ref().map(|m| &m.asset)) {
-                    seen.insert((
-                        ArcPtr::of(&asset.image),
-                        ArcPtr::of(&asset.thumbnail),
-                    ));
+                    seen.insert(arc_ptr(&asset.image));
+                    seen.insert(arc_ptr(&asset.thumbnail));
                 }
             }
         }
         let mut bytes = 0usize;
         for entry in self.past.iter().chain(self.future.iter()) {
             for snapshot in [&entry.before, &entry.after] {
-                if let Some(document) = &snapshot.document {
-                    for layer in &document.layers {
-                        for asset in layer.asset.iter().chain(layer.mask.as_ref().map(|m| &m.asset)) {
-                            for image in [&asset.image, &asset.thumbnail] {
-                                if seen.insert((ArcPtr::of(image), ArcPtr::of(image))) {
-                                    bytes += image.width * image.height * 4;
-                                }
+                let Some(document) = &snapshot.document else {
+                    continue;
+                };
+                for layer in &document.layers {
+                    for image in layer.asset.iter().flat_map(|a| [&a.image, &a.thumbnail]) {
+                        if seen.insert(arc_ptr(image)) {
+                            bytes += image.width * image.height * 4;
+                        }
+                    }
+                    if let Some(mask) = layer.mask.as_ref() {
+                        for image in [&mask.asset.image, &mask.asset.thumbnail] {
+                            if seen.insert(arc_ptr(image)) {
+                                bytes += image.width * image.height;
                             }
                         }
                     }
@@ -224,11 +231,10 @@ impl EntryClone for Entry {
 }
 
 /// Helper to take data pointers of Arc contents for identity checks.
-struct ArcPtr;
-impl ArcPtr {
-    fn of(image: &std::sync::Arc<crate::raster::Bitmap>) -> *const u8 {
-        image.data.as_ptr()
-    }
+type ArcPtr = *const u8;
+
+fn arc_ptr(image: &std::sync::Arc<crate::raster::Bitmap>) -> ArcPtr {
+    std::sync::Arc::as_ptr(image) as *const u8
 }
 
 #[cfg(test)]
@@ -261,6 +267,64 @@ mod tests {
             layer.asset = Some(crate::raster::ImportedImage::new(img, "L"));
         }
         next
+    }
+
+    #[test]
+    fn masks_retain_one_byte_per_pixel() {
+        // A mask is DeviceGray: its bytesPerRow is one byte per pixel, so a
+        // 20×30 mask (thumbnail 20×30 at most) costs a fraction of what an
+        // RGBA bitmap of the same size would (DocumentHistory.swift:103).
+        let mut history = DocumentHistory::default();
+        let plain = CanvasDocument::new(10, 10);
+        let mut masked = CanvasDocument::new(10, 10);
+        let mut layer = crate::document::ImageLayer::blank("L", CGSize::new(10.0, 10.0));
+        let mut mask_image = crate::raster::Bitmap::new(20, 30);
+        mask_image.data.fill(255);
+        let mut mask = crate::document::LayerMask {
+            asset: crate::raster::ImportedImage::new(mask_image, "M"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        };
+        mask.asset.thumbnail = std::sync::Arc::new(crate::raster::Bitmap::new(20, 30));
+        layer.mask = Some(mask);
+        masked.layers = vec![layer];
+        history.begin("Mask", &Some(plain.clone()), None);
+        history.end(&Some(masked.clone()), None);
+        // before contributes nothing (no mask); after contributes the gray
+        // image and its thumbnail at one byte per pixel.
+        let expected = 20 * 30 + 20 * 30;
+        assert!(
+            (history.retained_bytes(None) as i64 - expected as i64).abs() <= 2,
+            "retained={} expected≈{expected}",
+            history.retained_bytes(None)
+        );
+    }
+
+    #[test]
+    fn identical_pixel_data_in_a_new_image_still_records() {
+        // Swift compares images by identity: the same bytes in a new image
+        // are a change and keep the entry.
+        let mut history = DocumentHistory::default();
+        let a = doc_with_color(0);
+        let mut current = a.clone();
+        history.begin("Paint", &Some(a.clone()), None);
+        // "bump" rebuilds the bitmap into a new image even when the bytes
+        // happen to match.
+        current = bump(&current);
+        history.end(&Some(current.clone()), None);
+        assert!(history.can_undo());
+    }
+
+    #[test]
+    fn identity_clones_do_not_record() {
+        // Snapshots share Arcs: a cloned document equals the original and
+        // the entry is dropped.
+        let mut history = DocumentHistory::default();
+        let a = doc_with_color(0);
+        history.begin("Paint", &Some(a.clone()), None);
+        history.end(&Some(a.clone()), None);
+        assert!(!history.can_undo());
     }
 
     #[test]

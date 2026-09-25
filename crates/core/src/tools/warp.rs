@@ -10,6 +10,10 @@ use crate::session::BlurToolMode;
 
 /// A Smudge or Liquify stroke in progress.
 pub struct WarpStroke {
+    /// The layer asset the warp started on, for the finish-time identity
+    /// guard (`current.asset?.image === warp.layer.asset?.image`).
+    pub layer_asset: Option<std::sync::Arc<crate::raster::Bitmap>>,
+    pub layer_transform: crate::transform::LayerTransform,
     pub mode: BlurToolMode,
     pub diameter: f64,
     pub hardness: f64,
@@ -36,6 +40,11 @@ impl WarpStroke {
         let hardness = settings.hardness.clamp(0.0, 0.98);
         let strength = settings.opacity.clamp(0.01, 1.0);
         WarpStroke {
+            layer_asset: None,
+            layer_transform: crate::transform::LayerTransform::new(
+                crate::geometry::CGPoint::ZERO,
+                crate::geometry::CGSize::new(surface.width as f64, surface.height as f64),
+            ),
             mode,
             diameter,
             hardness,
@@ -252,6 +261,7 @@ pub fn finish_warp_into_layer(
     base_transform: crate::transform::LayerTransform,
     canvas: CGSize,
     edit_name: &str,
+    selection_clip: Option<crate::selection::SelectionClip>,
 ) -> Option<(crate::raster::ImportedImage, crate::transform::LayerTransform, &'static str)> {
     if points.is_empty() {
         return None;
@@ -266,7 +276,7 @@ pub fn finish_warp_into_layer(
         false,
         settings,
         canvas,
-        None,
+        selection_clip,
     );
     stroke.clone = Some((result.clone(), CGSize::ZERO));
     stroke.replaces_with_clone = true;
@@ -380,7 +390,7 @@ mod tests {
         }
         let base = LayerTransform::new(CGPoint::ZERO, CGSize::new(64.0, 64.0));
         let (image, _transform, name) =
-            finish_warp_into_layer(&warped, &points, 20.0, Some(gray_surface(64, 64, 200)), base, CGSize::new(64.0, 64.0), "Smudge").unwrap();
+            finish_warp_into_layer(&warped, &points, 20.0, Some(gray_surface(64, 64, 200)), base, CGSize::new(64.0, 64.0), "Smudge", None).unwrap();
         assert_eq!(name, "Smudge");
         // The result painted the warped pixels through the stroke path.
         assert!(image.image.pixel(32, 32)[0] < 200, "{:?}", image.image.pixel(32, 32));

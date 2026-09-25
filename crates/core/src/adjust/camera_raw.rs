@@ -3272,7 +3272,9 @@ pub fn adjust_camera_raw_calibration(
 /// Warps the image so its corners land on `corners`
 /// (Core Image's `CIPerspectiveTransform`): bilinear sampling through the
 /// inverse homography. Corners are [top left, top right, bottom right,
-/// bottom left] with y measured upward from the bottom.
+/// bottom left] with y measured upward from the bottom. Samples whose source
+/// coordinate falls off the image come out transparent (premultiplied-clear
+/// black), like Core Image — no edge smear.
 fn perspective_warp(image: &Bitmap, corners: &[(f64, f64); 4]) -> Bitmap {
     let w = image.width as f64;
     let h = image.height as f64;
@@ -3320,6 +3322,12 @@ fn perspective_warp(image: &Bitmap, corners: &[(f64, f64); 4]) -> Bitmap {
             }
             let sx = (inverse[0][0] * px + inverse[0][1] * py + inverse[0][2]) / sw;
             let sy = (inverse[1][0] * px + inverse[1][1] * py + inverse[1][2]) / sw;
+            // Core Image leaves samples that miss the source transparent
+            // instead of clamping to the edge pixels. Pixel centers live on
+            // [0, w−1] × [0, h−1]; anything else stays premultiplied-clear.
+            if sx < 0.0 || sy < 0.0 || sx > w - 1.0 || sy > h - 1.0 {
+                continue;
+            }
             let sample = bilinear_sample(image, sx, sy);
             out.set_pixel(x, y, sample);
         }
@@ -4158,6 +4166,36 @@ mod tests {
         let fitted = settings.geometry.apply(&grid);
         assert_eq!(fitted.width, grid.width);
         assert!(fitted.pixel(0, 0)[3] > 0 || fitted.pixel(11, 11)[3] > 0, "refit fills the frame");
+    }
+
+    /// §7.1-7: like `CIPerspectiveTransform`, output whose inverse mapping
+    /// lands off the image must be transparent (premultiplied-clear), not the
+    /// edge color smeared outward. A constant picture warped into a small
+    /// projective trapezoid leaves the rest of the frame clear.
+    #[test]
+    fn perspective_warp_leaves_off_image_samples_transparent() {
+        let red = solid(8, 8, [200, 100, 50, 255]);
+        // y measured upward from the bottom: the picture shrinks into a
+        // trapezoid in the lower left of the raster grid (top edge shorter
+        // than the bottom edge, so the homography is genuinely projective).
+        let corners = [
+            (1.0, 3.0), // top left
+            (3.0, 3.0), // top right
+            (3.0, 0.0), // bottom right
+            (0.0, 0.0), // bottom left
+        ];
+        let warped = perspective_warp(&red, &corners);
+        assert_eq!(warped.width, 8);
+        assert_eq!(warped.height, 8);
+        // Far from the trapezoid the frame is premultiplied-transparent black.
+        assert_eq!(warped.pixel(0, 0), [0, 0, 0, 0]);
+        // Right of the trapezoid (this used to clamp to the edge color).
+        assert_eq!(warped.pixel(6, 1), [0, 0, 0, 0]);
+        // Above it, past the top edge (raster row 0).
+        assert_eq!(warped.pixel(1, 0), [0, 0, 0, 0]);
+        // Inside the trapezoid the constant source color comes through exact.
+        assert_eq!(warped.pixel(1, 6), [200, 100, 50, 255]);
+        assert_eq!(warped.pixel(2, 6), [200, 100, 50, 255]);
     }
 
     #[test]

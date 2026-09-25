@@ -582,6 +582,11 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
     let inset = effect_margin(&effects);
     let width = image.width + inset as usize * 2;
     let height = image.height + inset as usize * 2;
+    // The 100MP result guard (`LayerEffects.swift:441`): beyond it the layer
+    // draws without its effects rather than exhausting memory.
+    if width * height > 100_000_000 {
+        return (image.clone(), 0.0);
+    }
     // The layer as it is shown: its pixels through its mask.
     let shown = match mask {
         None => image.clone(),

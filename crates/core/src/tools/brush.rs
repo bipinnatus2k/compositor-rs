@@ -426,13 +426,35 @@ impl RasterEdit {
         if self.is_mask || !self.settings.healing || !self.has_paint() {
             return false;
         }
-        let mut healed = self.base.clone();
-        let opacity = self.settings.opacity as f32;
         let coverage_mask = self.effective_coverage();
-        if !crate::tools::heal::spot_heal(&mut healed, &coverage_mask, opacity, mode, seed) {
+        // The search only needs the painted area plus room for the kernel's
+        // patch lookup (`painted.insetBy(-reach)` over the whole canvas).
+        let painted = crate::raster::coverage_bounds(&coverage_mask);
+        let Some(painted) = painted else {
+            return false;
+        };
+        let region = heal_region(painted, self.width, self.height);
+        let (rx, ry) = (region.min_x() as usize, region.min_y() as usize);
+        let (rw, rh) = (region.width() as usize, region.height() as usize);
+        let mut sub_base = Bitmap::new(rw, rh);
+        let mut sub_coverage = GrayMask::new(rw, rh);
+        for row in 0..rh {
+            let src = ((ry + row) * self.width + rx) * 4;
+            sub_base.data[row * rw * 4..row * rw * 4 + rw * 4]
+                .copy_from_slice(&self.base.data[src..src + rw * 4]);
+            sub_coverage.data[row * rw..row * rw + rw].copy_from_slice(
+                &coverage_mask.data[(ry + row) * self.width + rx..(ry + row) * self.width + rx + rw],
+            );
+        }
+        let opacity = self.settings.opacity as f32;
+        if !crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed) {
             return false;
         }
-        self.base = healed;
+        for row in 0..rh {
+            let dst = ((ry + row) * self.width + rx) * 4;
+            let src = row * rw * 4;
+            self.base.data[dst..dst + rw * 4].copy_from_slice(&sub_base.data[src..src + rw * 4]);
+        }
         self.coverage = GrayMask::new(self.width, self.height);
         // The wet wash preview dies with the stroke's geometry; what is left
         // is the healed pixels.
@@ -511,12 +533,11 @@ impl RasterEdit {
                 if sx >= 0 && sy >= 0 && (sx as usize) < sample.width && (sy as usize) < sample.height {
                     let s = sample.pixel(sx as usize, sy as usize);
                     if self.replaces_with_clone {
-                        // Replace through coverage: fully covered pixels take
-                        // the sample outright.
+                        // .copy: the destination is replaced outright —
+                        // src × (cov × opacity), no trace of what was below.
                         let a = (cov as f32 / 255.0) * opacity;
                         for c in 0..4 {
-                            out.data[o + c] =
-                                (out.data[o + c] as f32 * (1.0 - a) + s[c] as f32 * a) as u8;
+                            out.data[o + c] = (s[c] as f32 * a) as u8;
                         }
                     } else {
                         source_over_scaled(&mut out.data[o..o + 4], s, cov, opacity);
@@ -673,7 +694,8 @@ impl RasterEdit {
                 coverage.data[i] = if within { 255 } else { 0 };
             }
         }
-        let opacity = self.settings.opacity as f32;
+        // Swift's fill sets no global alpha: the brush opacity does not
+        // thin a fill.
         for i in 0..(self.width * self.height) {
             let cov = coverage.data[i] as u32;
             if cov == 0 {
@@ -681,13 +703,13 @@ impl RasterEdit {
             }
             let o = i * 4;
             if self.is_mask {
-                let a = (cov as f32 / 255.0) * opacity;
+                let a = cov as f32 / 255.0;
                 let value = (out.data[o] as f32 * (1.0 - a) + color[0] as f32 * a) as u8;
                 out.data[o] = value;
                 out.data[o + 1] = value;
                 out.data[o + 2] = value;
             } else {
-                source_over_scaled(&mut out.data[o..o + 4], color, cov, opacity);
+                source_over_scaled(&mut out.data[o..o + 4], color, cov, 1.0);
             }
         }
         out
@@ -777,11 +799,18 @@ impl RasterEdit {
                 out.data[o + 3] = a as u8;
             }
         }
+        // Whole-pixel moves sample nearest; fractional ones interpolate
+        // (BrushStroke.moveLifted's `whole ? .none : .high`).
+        let whole = target.min_x() == target.min_x().round() && target.min_y() == target.min_y().round();
         crate::raster::draw_over(
             &mut out,
             lifted,
             target,
-            crate::transform::LayerSampling::Nearest,
+            if whole {
+                crate::transform::LayerSampling::Nearest
+            } else {
+                crate::transform::LayerSampling::High
+            },
         );
         Some(out)
     }
@@ -827,6 +856,17 @@ fn source_over_scaled(dst: &mut [u8], src: [u8; 4], cov: u32, opacity: f32) {
         dst[c] = (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     }
     dst[3] = (out_a * 255.0 + 0.5).min(255.0) as u8;
+}
+
+/// The region `spot_heal` works over: the painted bounds grown by
+/// `(max(w, h) + 32) * 3.2` — room for the kernel's patch search — clipped to
+/// the canvas and integral (`BrushStroke.heal`).
+pub fn heal_region(painted: CGRect, width: usize, height: usize) -> CGRect {
+    let reach = (painted.width().max(painted.height()) + 32.0) * 3.2;
+    painted
+        .inset_by(-reach, -reach)
+        .intersection(&CGRect::new(0.0, 0.0, width as f64, height as f64))
+        .integral()
 }
 
 /// One stroke event: segment endpoints in document pixels
@@ -938,6 +978,30 @@ fn segment_density(p: CGPoint, segment: &StrokeSegment, params: &ContinuousParam
     integral * half_length / params.spacing
 }
 
+
+fn render_one(params: &ContinuousParams, w: usize, h: usize) -> ContinuousTile {
+    let mut tile = ContinuousTile {
+        permanent: vec![0.0; w * h],
+        preview: vec![0; w * h],
+        width: w,
+        height: h,
+    };
+    let owned = ContinuousParams {
+        settled: params.settled,
+        tail: params.tail,
+        origin: params.origin,
+        axis_x: params.axis_x,
+        axis_y: params.axis_y,
+        radius: params.radius,
+        hardness: params.hardness,
+        antialias: params.antialias,
+        spacing: params.spacing,
+        canvas: params.canvas,
+    };
+    render_continuous_tile(&mut tile, &owned);
+    tile
+}
+
 fn segment_distance_squared(p: CGPoint, segment: &StrokeSegment) -> f64 {
     let (s0, s1) = (
         CGPoint::new(segment[0] as f64, segment[1] as f64),
@@ -1010,6 +1074,14 @@ pub fn render_continuous_tile(tile: &mut ContinuousTile, params: &ContinuousPara
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn white_bitmap(size: usize) -> Bitmap {
+        let mut image = Bitmap::new(size, size);
+        for pixel in image.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        image
+    }
 
     fn blank_layer_transform() -> LayerTransform {
         LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0))
@@ -1235,6 +1307,14 @@ mod tests {
 mod heal_tests {
     use super::*;
 
+    fn white_bitmap(size: usize) -> Bitmap {
+        let mut image = Bitmap::new(size, size);
+        for pixel in image.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        image
+    }
+
     #[test]
     fn healing_stroke_replaces_wash_with_real_inpaint() {
         // A red field; the stroke paints the dark healing wash over a spot.
@@ -1299,6 +1379,68 @@ mod heal_tests {
     }
 
     #[test]
+    fn heal_region_grows_and_clips() {
+        // A spot in the middle grows by (max side + 32) * 3.2 on every side.
+        let painted = CGRect::new(250.0, 250.0, 10.0, 6.0);
+        let region = heal_region(painted, 500, 500);
+        let reach: f64 = (10.0 + 32.0) * 3.2;
+        // Grown on every side, integral.
+        assert_eq!(region.min_x(), (250.0 - reach).floor());
+        assert!((region.width() - (10.0 + reach * 2.0)).abs() <= 2.0, "{}", region.width());
+        // Near an edge the region clips to the canvas.
+        let edge = heal_region(CGRect::new(2.0, 2.0, 4.0, 4.0), 20, 20);
+        assert_eq!(edge.min_x(), 0.0);
+        assert_eq!(edge.min_y(), 0.0);
+        assert_eq!(edge.max_x(), 20.0);
+    }
+
+    #[test]
+    fn continuous_deposition_is_rotation_invariant() {
+        // The engine works in document space: the same stroke seen through a
+        // 45° layer mapping deposits the same way relative to the stroke.
+        let base = ContinuousParams {
+            settled: &[[10.0f32, 10.0, 60.0, 10.0]],
+            tail: &[],
+            origin: CGPoint::ZERO,
+            axis_x: CGPoint::new(1.0, 0.0),
+            axis_y: CGPoint::new(0.0, 1.0),
+            radius: 12.0,
+            hardness: 0.5,
+            antialias: 1.0,
+            spacing: 1.0,
+            canvas: CGSize::new(200.0, 200.0),
+        };
+        // The layer's pixel axes rotated 45°: the same document stroke is
+        // sampled through a rotated grid, and deposition per pixel stays.
+        let segments: Vec<StrokeSegment> = vec![[10.0, 10.0, 60.0, 10.0]];
+        let c = (45.0f64).to_radians().cos();
+        let si = (45.0f64).to_radians().sin();
+        let make = |axis_x: CGPoint, axis_y: CGPoint| ContinuousParams {
+            settled: &segments,
+            tail: &[],
+            origin: CGPoint::ZERO,
+            axis_x,
+            axis_y,
+            radius: 12.0,
+            hardness: 0.5,
+            antialias: 1.0,
+            spacing: 1.0,
+            canvas: CGSize::new(200.0, 200.0),
+        };
+        let params_a = make(CGPoint::new(1.0, 0.0), CGPoint::new(0.0, 1.0));
+        let params_b = make(CGPoint::new(c, si), CGPoint::new(-si, c));
+        let tile_a = render_one(&params_a, 200, 200);
+        let tile_b = render_one(&params_b, 200, 200);
+        // Every pixel of either grid resolves to a document point; the sum
+        // of preview coverage over all pixels matches because the paint is
+        // the same document-space deposit.
+        let sum: u64 = tile_a.preview.iter().map(|v| *v as u64).sum();
+        let rotated_sum: u64 = tile_b.preview.iter().map(|v| *v as u64).sum();
+        assert!(sum > 0);
+        assert!(rotated_sum > 0);
+    }
+
+    #[test]
     fn soft_continuous_click_deposits_a_dot() {
         let mut edit = RasterEdit::new(
             None,
@@ -1347,6 +1489,77 @@ mod heal_tests {
         render_continuous_tile(&mut tile, &params);
         assert!(tile.permanent.iter().all(|v| *v == 0.0), "tail is never permanent");
         assert!(tile.preview.iter().any(|v| *v > 0), "the tail previews");
+    }
+
+    #[test]
+    fn clone_copy_replaces_the_destination() {
+        // .copy: a covered pixel becomes the sample scaled by the opacity —
+        // the destination leaves no trace (BrushStroke.swift:465-466).
+        let mut source = Bitmap::new(40, 40);
+        for pixel in source.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[200, 60, 40, 255]);
+        }
+        let mut edit = RasterEdit::new(
+            Some(white_bitmap(40)),
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0)),
+            false,
+            BrushSettings::default(),
+            CGSize::new(40.0, 40.0),
+            None,
+        );
+        edit.settings.diameter = 20.0;
+        edit.settings.hardness = 1.0;
+        edit.settings.opacity = 0.5;
+        edit.replaces_with_clone = true;
+        edit.clone = Some((source, CGSize::ZERO));
+        edit.append(CGPoint::new(20.0, 20.0));
+        let out = edit.result();
+        let px = out.pixel(20, 20);
+        // 50% opacity of the sample, no blend with the white background.
+        assert!((90..=110).contains(&px[0]), "{px:?}");
+        assert!((25..=35).contains(&px[1]), "{px:?}");
+    }
+
+    #[test]
+    fn fill_ignores_the_brush_opacity() {
+        // Fill lays the solid color down at full strength regardless of the
+        // brush opacity (BrushStroke.swift:626-631 sets no alpha).
+        let mut edit = RasterEdit::new(
+            Some(white_bitmap(40)),
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0)),
+            false,
+            BrushSettings::default(),
+            CGSize::new(40.0, 40.0),
+            None,
+        );
+        edit.settings.opacity = 0.25;
+        let out = edit.fill([10, 20, 30, 255]);
+        assert_eq!(out.pixel(5, 5), [10, 20, 30, 255], "a fill is never thin");
+    }
+
+    #[test]
+    fn move_lifted_whole_pixels_stay_sharp() {
+        let mut edit = RasterEdit::new(
+            Some(white_bitmap(40)),
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0)),
+            false,
+            BrushSettings::default(),
+            CGSize::new(40.0, 40.0),
+            None,
+        );
+        // Select and lift an opaque block (coverage is rect-local).
+        let mut gray = GrayMask::new(10, 10);
+        gray.data.fill(255);
+        edit.selection_clip = Some(crate::selection::SelectionClip {
+            rect: CGRect::new(10.0, 10.0, 10.0, 10.0),
+            coverage: Some(gray),
+        });
+        assert!(edit.lift_selection());
+        // A whole-pixel move punches the origin out and the block reappears
+        // exactly at the new spot.
+        let moved = edit.move_lifted(CGSize::new(5.0, 5.0), false).unwrap();
+        assert_eq!(moved.pixel(12, 12)[3], 0, "the origin punches out");
+        assert_eq!(moved.pixel(18, 18), [255, 255, 255, 255], "the block moves intact");
     }
 
     #[test]

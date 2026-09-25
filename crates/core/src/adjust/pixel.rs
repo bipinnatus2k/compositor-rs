@@ -3,7 +3,7 @@
 //! a selection, whole-image invert, and guided-filter matte refinement.
 
 use crate::geometry::{CGAffineTransform, CGRect};
-use crate::raster::{halve, resample, Bitmap, GrayMask, LayerSampling};
+use crate::raster::{resample, Bitmap, GrayMask, LayerSampling};
 use crate::selection::SelectionClip;
 
 /// Selection coverage rasterized on the image's pixel grid.
@@ -31,24 +31,36 @@ pub fn coverage(
     for (i, corner) in corners.iter().enumerate() {
         let _ = (i, corner);
     }
-    // Sample the selection coverage at each pixel center.
+    // Sample the selection's own antialiased coverage at each pixel center
+    // (bilinear, so rotated/scaled layers keep sub-pixel soft edges).
     let cov = selection.coverage.as_ref().unwrap();
-    let doc_to_sel = |x: f64, y: f64| -> (f64, f64) {
-        (
-            x - selection.rect.min_x(),
-            y - selection.rect.min_y(),
-        )
-    };
     for y in 0..height {
         for x in 0..width {
             let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&inverse);
-            let (sx, sy) = doc_to_sel(doc.x.floor(), doc.y.floor());
-            if sx >= 0.0 && sy >= 0.0 && sx < cov.width as f64 && sy < cov.height as f64 {
-                mask.data[y * width + x] = cov.value(sx as usize, sy as usize);
+            let sx = doc.x - selection.rect.min_x();
+            let sy = doc.y - selection.rect.min_y();
+            if sx < 0.0 || sy < 0.0 || sx >= cov.width as f64 || sy >= cov.height as f64 {
+                continue;
             }
+            mask.data[y * width + x] = sample_coverage(cov, sx, sy);
         }
     }
     mask
+}
+
+/// Bilinear sample of a coverage mask at a fractional position.
+fn sample_coverage(cov: &GrayMask, x: f64, y: f64) -> u8 {
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let fx = (x - x0 as f64) as f32;
+    let fy = (y - y0 as f64) as f32;
+    let x1 = (x0 + 1).min(cov.width - 1);
+    let y1 = (y0 + 1).min(cov.height - 1);
+    let top = cov.data[y0 * cov.width + x0] as f32 * (1.0 - fx)
+        + cov.data[y0 * cov.width + x1] as f32 * fx;
+    let bottom = cov.data[y1 * cov.width + x0] as f32 * (1.0 - fx)
+        + cov.data[y1 * cov.width + x1] as f32 * fx;
+    (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
 }
 
 use crate::geometry::CGPoint;
@@ -66,16 +78,19 @@ pub fn blend(
     let mask = coverage(selection, adjusted.width, adjusted.height, pixel_to_document);
     let mut result = adjusted.clone();
     for (i, chunk) in result.data.chunks_exact_mut(4).enumerate() {
-        let a = mask.data[i] as u32;
-        if a == 255 {
+        let a = mask.data[i] as f32 / 255.0;
+        if a >= 1.0 {
             continue;
         }
-        if a == 0 {
+        if a <= 0.0 {
             chunk.copy_from_slice(&original.data[i * 4..i * 4 + 4]);
             continue;
         }
+        // CIBlendWithMask blends in float: no integer rounding at soft edges.
         for (c, cell) in chunk.iter_mut().enumerate() {
-            *cell = ((adjusted.data[i * 4 + c] as u32 * a + original.data[i * 4 + c] as u32 * (255 - a) + 127) / 255) as u8;
+            let adj = adjusted.data[i * 4 + c] as f32;
+            let orig = original.data[i * 4 + c] as f32;
+            *cell = (adj * a + orig * (1.0 - a) + 0.5) as u8;
         }
     }
     result
@@ -229,7 +244,11 @@ pub fn gray_to_levels(mask: &GrayMask) -> Vec<f32> {
 }
 
 /// `GuidedMatte.refine`: refine `mask` against `guide` on a copy no larger
-/// than `limit` on its longest side, then draw back up.
+/// than `limit` on its longest side, then draw back up. Both directions go
+/// through the core raster's sharp halving + high-quality resample
+/// (`LayerSampling::High`) in place of CGContext `.high` interpolation — an
+/// intentional, visually equivalent (not bit-identical) replacement
+/// (rust-vs-swift-diff-report §7.1-6).
 pub fn guided_refine(mask: &GrayMask, guide: &GrayMask, radius: f64, limit: f64) -> GrayMask {
     let full_w = mask.width;
     let full_h = mask.height;
@@ -267,12 +286,11 @@ fn resample_bitmap_gray(mask: &GrayMask, w: usize, h: usize) -> GrayMask {
         wrapped.data[i * 4 + 2] = v;
         wrapped.data[i * 4 + 3] = 255;
     }
-    // Sharp halving for big downscales keeps edges crisp, as `.high` does.
-    let mut cur = wrapped;
-    while (cur.width / 2).max(1) >= w.max(2) && (cur.height / 2).max(1) >= h.max(2) && cur.width > 2 && cur.height > 2 {
-        cur = halve(&cur);
-    }
-    let out = resample(&cur, w, h, LayerSampling::High);
+    // Swift scales in one CGContext `.high` step (multi-tap resampling); the
+    // core raster reaches the same look with sharp halving before a final
+    // high-quality resample. Deliberately the same halve+resample the rest of
+    // the raster uses — visually equivalent, not bit-identical (§7.1-6).
+    let out = resample(&wrapped, w, h, LayerSampling::High);
     let mut result = GrayMask::new(w, h);
     for i in 0..result.data.len() {
         result.data[i] = out.data[i * 4];
@@ -297,8 +315,10 @@ mod tests {
         let identity = CGAffineTransform::IDENTITY;
         let mask = coverage(&clip, 10, 10, &identity);
         assert_eq!(mask.value(4, 4), 255);
-        assert_eq!(mask.value(1, 1), 0);
-        assert_eq!(mask.value(7, 7), 0);
+        // Bilinear sub-pixel sampling spreads the AA edge by up to half a
+        // pixel into the neighbors of the boundary.
+        assert!(mask.value(1, 1) <= 64, "{}", mask.value(1, 1));
+        assert!(mask.value(7, 7) <= 64, "{}", mask.value(7, 7));
     }
 
     #[test]
@@ -314,7 +334,7 @@ mod tests {
         }
         let out = blend(&adjusted, &original, &clip, &CGAffineTransform::IDENTITY);
         assert_eq!(out.pixel(4, 4)[0], 255); // selected → adjusted
-        assert_eq!(out.pixel(1, 1)[0], 0); // outside → original
+        assert!(out.pixel(1, 1)[0] <= 64, "outside stays original: {:?}", out.pixel(1, 1));
     }
 
     #[test]
@@ -413,5 +433,60 @@ mod tests {
         for i in 0..refined.data.len() {
             assert!((refined.data[i] as i32 - 128).abs() <= 2, "{}", refined.data[i]);
         }
+    }
+
+    /// Regression for §7.1-6: refining through the 2× downscale path (small
+    /// working copy, then drawn back up) lands on the same colors as refining
+    /// the same content at its native size. Both sides filter at the working
+    /// resolution with the same effective radius, so only the resampling
+    /// roundtrip separates them.
+    #[test]
+    fn guided_refine_downscaled_matches_full_size_colors() {
+        const SMALL: usize = 64;
+        const BIG: usize = 128;
+        let mut small_mask = GrayMask::new(SMALL, SMALL);
+        let mut small_guide = GrayMask::new(SMALL, SMALL);
+        let mut big_mask = GrayMask::new(BIG, BIG);
+        let mut big_guide = GrayMask::new(BIG, BIG);
+        for y in 0..BIG {
+            for x in 0..BIG {
+                // The mask tracks the guide's hard edge loosely, so the
+                // filter has real correlation to pull onto the guide edge.
+                let guide = if x >= BIG / 2 { 255u8 } else { 0 };
+                let mask = if x >= BIG / 2 { 192u8 } else { 96 };
+                if y < SMALL && x < SMALL {
+                    small_mask.data[y * SMALL + x] = if x >= SMALL / 2 { 192 } else { 96 };
+                    small_guide.data[y * SMALL + x] = if x >= SMALL / 2 { 255 } else { 0 };
+                }
+                big_mask.data[y * BIG + x] = mask;
+                big_guide.data[y * BIG + x] = guide;
+            }
+        }
+        // Native size: factor 1, radius 2 at the working resolution.
+        let direct = guided_refine(&small_mask, &small_guide, 2.0, SMALL as f64);
+        // 2× downscale: factor 0.5, filtered at 64² with radius 4 × 0.5 = 2,
+        // then drawn back up to 128².
+        let downscaled = guided_refine(&big_mask, &big_guide, 4.0, SMALL as f64);
+        assert_eq!(downscaled.width, BIG);
+        // Bring the drawn-back-up result to the working resolution the same
+        // way the refine step shrinks its inputs.
+        let mut wrapped = Bitmap::new(BIG, BIG);
+        for i in 0..downscaled.data.len() {
+            let v = downscaled.data[i];
+            wrapped.data[i * 4] = v;
+            wrapped.data[i * 4 + 1] = v;
+            wrapped.data[i * 4 + 2] = v;
+            wrapped.data[i * 4 + 3] = 255;
+        }
+        let back = resample(&wrapped, SMALL, SMALL, LayerSampling::High);
+        let (mut total, mut worst) = (0.0f64, 0i32);
+        for i in 0..direct.data.len() {
+            let d = (direct.data[i] as i32 - back.data[i * 4] as i32).abs();
+            total += d as f64;
+            worst = worst.max(d);
+        }
+        let mean = total / direct.data.len() as f64;
+        assert!(mean < 2.0, "mean |diff| {mean}");
+        assert!(worst <= 32, "worst |diff| {worst}");
     }
 }

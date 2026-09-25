@@ -12,6 +12,48 @@ use crate::selection::SelectionPath;
 use crate::raster::{draw_affine, pixel_to_document, Bitmap};
 use crate::transform::{LayerSampling, LayerTransform};
 use std::collections::HashMap;
+use std::cell::RefCell;
+
+thread_local! {
+    /// `EffectsPreviewCache`: per-render effects results, keyed by layer,
+    /// image identity and effect settings. Cleared when it grows past a few
+    /// entries — a render pass touches few layers.
+    static EFFECTS_CACHE: RefCell<Vec<(uuid::Uuid, usize, crate::effects::LayerEffects, (Bitmap, f64))>> =
+        RefCell::new(Vec::new());
+}
+
+/// `LayerEffectsRenderer.cached` — renders (or reuses) the effects around a
+/// layer's pixels. `image_key` identifies the pixels (the asset's Arc).
+pub fn render_effects_cached(
+    layer_id: uuid::Uuid,
+    image: &Bitmap,
+    image_key: usize,
+    mask: Option<&crate::raster::GrayMask>,
+    effects: &crate::effects::LayerEffects,
+) -> (Bitmap, f64) {
+    let hit = EFFECTS_CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(id, key, cached, _)| *id == layer_id && *key == image_key && *cached == *effects)
+            .map(|entry| entry.3.clone())
+    });
+    if let Some(result) = hit {
+        return result;
+    }
+    let (grown, inset) = crate::effects::render_effects(image, mask, effects);
+    EFFECTS_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= 8 {
+            cache.clear();
+        }
+        cache.push((layer_id, image_key, effects.clone(), (grown.clone(), inset)));
+    });
+    (grown, inset)
+}
+
+pub fn clear_effects_cache() {
+    EFFECTS_CACHE.with(|c| c.borrow_mut().clear());
+}
 
 /// A layer's own pixels placed on the document (no blend/opacity), the way
 /// `LayerRenderer.draw` draws into a context.
@@ -30,6 +72,18 @@ pub fn mask_clip_image(
     width: usize,
     height: usize,
 ) -> Option<Bitmap> {
+    mask_clip_image_limited(mask, over, width, height, None)
+}
+
+/// `LayerMask.clipImage(placement:over:width:height:limit:)` — `limit` caps
+/// the longest side of the resampled grid while a transform is interactive.
+pub fn mask_clip_image_limited(
+    mask: &LayerMask,
+    over: &LayerTransform,
+    width: usize,
+    height: usize,
+    limit: Option<usize>,
+) -> Option<Bitmap> {
     if !mask.is_enabled {
         return None;
     }
@@ -39,11 +93,23 @@ pub fn mask_clip_image(
         Some(placement) => placement,
         None => return Some(mask_gray_as_bitmap(&mask.asset.image)),
     };
+    let _ = limit;
     if placement.same_placement(over) || width == 0 || height == 0 {
         return Some(mask_gray_as_bitmap(&mask.asset.image));
     }
     let background = LayerMask::background_of(&mask.asset.thumbnail);
-    // The mask grid stretched over the placement, resampled into the layer grid.
+    // The mask grid stretched over the placement, resampled into the layer
+    // grid; `limit` caps the longest side while a transform is interactive.
+    let (width, height) = match limit {
+        Some(cap) if width.max(height) > cap => {
+            let factor = cap as f64 / width.max(height) as f64;
+            (
+                ((width as f64 * factor).round() as usize).max(1),
+                ((height as f64 * factor).round() as usize).max(1),
+            )
+        }
+        _ => (width, height),
+    };
     let mut out = Bitmap::new(width, height);
     let fill = (background * 255.0) as u8;
     for chunk in out.data.chunks_exact_mut(4) {
@@ -89,6 +155,7 @@ pub fn draw_live_composite(document: &CanvasDocument) -> Bitmap {
 
 /// Composites the document onto an existing canvas-sized bitmap.
 pub fn composite_onto(canvas: &mut Bitmap, document: &CanvasDocument) {
+    clear_effects_cache();
     let order = document.render_layers();
     let by_id: HashMap<uuid::Uuid, &crate::document::ImageLayer> =
         document.layers.iter().map(|l| (l.id, l)).collect();
@@ -272,12 +339,19 @@ fn draw_layer_full(
 
     // Effects grow the drawn image; the mask is baked into the effect render
     // and drawn with `mask: nil`, so it must not clip the result again.
+    // Results come from the per-render cache (EffectsPreviewCache).
     if let Some(effects) = &layer.effects {
         if !effects.is_empty() && effects.is_valid() {
             let mask_grid = own_mask
                 .as_ref()
                 .map(|m| gray_of(m, pixels.width, pixels.height));
-            let (grown, inset) = crate::effects::render_effects(&pixels, mask_grid.as_ref(), effects);
+            let image_key = layer
+                .asset
+                .as_ref()
+                .map(|a| std::sync::Arc::as_ptr(&a.image) as usize)
+                .unwrap_or(0);
+            let (grown, inset) =
+                render_effects_cached(layer.id, &pixels, image_key, mask_grid.as_ref(), effects);
             pixels = grown;
             own_mask = None;
             if inset > 0.0 {
@@ -992,6 +1066,70 @@ mod tests {
 
     #[test]
     fn shape_rectangle_fills_with_color() {
+    #[test]
+    fn effects_cache_hits_for_identical_input() {
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut layer = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0);
+        let mut overlay = crate::effects::ColorOverlayEffect::default();
+        overlay.enabled = Some(true);
+        layer.effects = Some(crate::effects::LayerEffects {
+            color_overlay: Some(overlay),
+            ..Default::default()
+        });
+        doc.layers = vec![layer];
+        // Two passes over the same document: the cache must return the same
+        // result for the second (that is its whole purpose).
+        let first = draw_live_composite(&doc);
+        let second = draw_live_composite(&doc);
+        assert_eq!(first.pixel(5, 5), second.pixel(5, 5));
+    }
+
+    #[test]
+    fn mask_clip_limit_caps_the_longest_side() {
+        let mut doc = CanvasDocument::new(40, 40);
+        let mut layer = ImageLayer::blank("L", doc.size());
+        layer.transform = LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0));
+        let mut mask_image = Bitmap::new(40, 40);
+        for pixel in mask_image.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::with_thumbnail(
+                mask_image,
+                Bitmap::new(4, 4),
+                "Mask",
+            ),
+            is_enabled: true,
+            placement: Some(LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0))),
+            is_linked: true,
+        });
+        doc.layers = vec![layer];
+        let layer = &doc.layers[0];
+        let full = mask_clip_image(layer.mask.as_ref().unwrap(), &layer.transform, 40, 40)
+            .expect("full mask");
+        assert_eq!((full.width, full.height), (40, 40));
+        let limited = mask_clip_image_limited(layer.mask.as_ref().unwrap(), &layer.transform, 40, 40, Some(10))
+            .expect("limited mask");
+        assert_eq!((limited.width, limited.height), (10, 10), "limit caps the grid");
+    }
+
+    #[test]
+    fn effects_guard_degrades_huge_results() {
+        // A layer that would rasterize effects over 100 megapixels draws
+        // without them instead (LayerEffects.swift:441).
+        let image = Bitmap::new(10_000, 10_000);
+        let mut effects = crate::effects::LayerEffects::default();
+        let mut shadow = crate::effects::ShadowEffect {
+            enabled: Some(true),
+            ..crate::effects::ShadowEffect::default()
+        };
+        shadow.distance = 5.0;
+        effects.shadow = Some(shadow);
+        let (out, inset) = crate::effects::render_effects(&image, None, &effects);
+        assert_eq!(inset, 0.0, "guard degrades to no effects");
+        assert_eq!((out.width, out.height), (10_000, 10_000));
+    }
+
         let shape = LayerShape {
             kind: ShapeKind::Rectangle,
             corner_radius: 0.0,
