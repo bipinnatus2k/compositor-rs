@@ -27,6 +27,17 @@ actions!(compositor, [
     // Layer
     NewLayer, DuplicateLayer, DeleteLayer, MergeDown, NewGroup, AddMask,
     FlipLayerHorizontal, FlipLayerVertical,
+    GroupSelectedLayers, MoveOutOfFolder, RenameLayer, ToggleLayerVisibility,
+    // Select / Edit extras
+    ClearSelectionPixels,
+    LoadLayerSelection, LoadMaskSelection,
+    // Image adjustments that run through the filter sheet
+    FilterBlackWhite, FilterColorBalance, FilterExposure, FilterGradientMap, FilterGrain,
+    RemoveBackground, ClearGuides,
+    // New Adjustment Layer submenu (AdjustmentKind)
+    AddAdjustmentHsv, AddAdjustmentLevels, AddAdjustmentCurves, AddAdjustmentExposure,
+    AddAdjustmentGradientMap, AddAdjustmentGrain, AddAdjustmentAddNoise, AddAdjustmentGaussianBlur,
+    AddAdjustmentMotionBlur, AddAdjustmentInvert, AddAdjustmentBlackWhite, AddAdjustmentColorBalance,
     // Select
     SelectAllAction, DeselectAction, InvertSelection,
     FeatherSheet, ExpandSheet, ContractSheet,
@@ -119,7 +130,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-n", NewLayer, None),
         KeyBinding::new("ctrl-j", DuplicateLayer, None),
         KeyBinding::new("ctrl-e", MergeDown, None),
-        KeyBinding::new("ctrl-g", NewGroup, None),
+        // Group Selected Layers (Cmd-G); New Group stays available via the panel.
+        KeyBinding::new("ctrl-g", GroupSelectedLayers, None),
         KeyBinding::new("delete", DeleteLayer, None),
         KeyBinding::new("backspace", DeleteLayer, None),
         // Select

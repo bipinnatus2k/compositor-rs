@@ -787,7 +787,9 @@ impl AppState {
     fn begin_move(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
         if self.session.transform_edit.is_none() {
             if self.session.can_transform() {
-                self.session.begin_transform();
+                // The drag begins a transient transform (persistent false,
+                // EditorCanvas.swift:2129).
+                self.session.begin_transform_persistent(false);
             } else {
                 return;
             }

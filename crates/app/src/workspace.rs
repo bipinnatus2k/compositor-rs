@@ -3,6 +3,7 @@
 
 use gpui_kit::{div, px, rgb, Context, IntoElement, InteractiveElement, ParentElement, Render, Styled, Window};
 
+use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::document::NavigationTool;
 use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
@@ -60,6 +61,9 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_fill_background))
             .on_action(cx.listener(Self::on_free_transform))
             .on_action(cx.listener(Self::on_shortcuts))
+            .on_action(cx.listener(Self::on_clear_selection_pixels))
+            .on_action(cx.listener(Self::on_load_layer_selection))
+            .on_action(cx.listener(Self::on_load_mask_selection))
             // Image
             .on_action(cx.listener(Self::on_image_size))
             .on_action(cx.listener(Self::on_canvas_size))
@@ -69,6 +73,12 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_flip_canvas_v))
             .on_action(cx.listener(Self::on_levels))
             .on_action(cx.listener(Self::on_hue_saturation))
+            .on_action(cx.listener(Self::on_curves))
+            .on_action(cx.listener(Self::on_filter_black_white))
+            .on_action(cx.listener(Self::on_filter_color_balance))
+            .on_action(cx.listener(Self::on_filter_exposure))
+            .on_action(cx.listener(Self::on_filter_gradient_map))
+            .on_action(cx.listener(Self::on_filter_grain))
             // Layer
             .on_action(cx.listener(Self::on_new_layer))
             .on_action(cx.listener(Self::on_duplicate_layer))
@@ -78,6 +88,22 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_add_mask))
             .on_action(cx.listener(Self::on_flip_layer_h))
             .on_action(cx.listener(Self::on_flip_layer_v))
+            .on_action(cx.listener(Self::on_group_selected_layers))
+            .on_action(cx.listener(Self::on_move_out_of_folder))
+            .on_action(cx.listener(Self::on_rename_layer))
+            .on_action(cx.listener(Self::on_toggle_layer_visibility))
+            .on_action(cx.listener(Self::on_add_adjustment_hsv))
+            .on_action(cx.listener(Self::on_add_adjustment_levels))
+            .on_action(cx.listener(Self::on_add_adjustment_curves))
+            .on_action(cx.listener(Self::on_add_adjustment_exposure))
+            .on_action(cx.listener(Self::on_add_adjustment_gradient_map))
+            .on_action(cx.listener(Self::on_add_adjustment_grain))
+            .on_action(cx.listener(Self::on_add_adjustment_add_noise))
+            .on_action(cx.listener(Self::on_add_adjustment_gaussian_blur))
+            .on_action(cx.listener(Self::on_add_adjustment_motion_blur))
+            .on_action(cx.listener(Self::on_add_adjustment_invert))
+            .on_action(cx.listener(Self::on_add_adjustment_black_white))
+            .on_action(cx.listener(Self::on_add_adjustment_color_balance))
             // Select
             .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_deselect))
@@ -91,6 +117,7 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_filter_noise))
             .on_action(cx.listener(Self::on_filter_lens))
             .on_action(cx.listener(Self::on_filter_camera_raw))
+            .on_action(cx.listener(Self::on_remove_background))
             // View
             .on_action(cx.listener(Self::on_toggle_rulers))
             .on_action(cx.listener(Self::on_toggle_grid))
@@ -106,6 +133,7 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_fit))
             .on_action(cx.listener(Self::on_zoom_100))
+            .on_action(cx.listener(Self::on_clear_guides))
             // Window / Help
             .on_action(cx.listener(Self::on_reset_panels))
             .on_action(cx.listener(Self::on_about))
@@ -277,12 +305,29 @@ impl AppState {
     // MARK: Edit
 
     fn on_undo(&mut self, _: &keys::Undo, _w: &mut Window, cx: &mut Context<Self>) {
+        // A restored document of a different size refits the viewport
+        // (EditorSession.undo → viewport.fit).
+        let before = self.session.document.as_ref().map(|d| (d.id, d.width, d.height));
         self.session.undo();
+        self.refit_if_document_changed(before);
         self.touch(cx);
     }
     fn on_redo(&mut self, _: &keys::Redo, _w: &mut Window, cx: &mut Context<Self>) {
+        let before = self.session.document.as_ref().map(|d| (d.id, d.width, d.height));
         self.session.redo();
+        self.refit_if_document_changed(before);
         self.touch(cx);
+    }
+    /// Refits the viewport when undo/redo swapped in a different document.
+    fn refit_if_document_changed(&mut self, before: Option<(uuid::Uuid, usize, usize)>) {
+        let after = self.session.document.as_ref().map(|d| (d.id, d.width, d.height));
+        if before.is_some() && before != after {
+            let vw = f32::from(self.viewport.size.width);
+            let vh = f32::from(self.viewport.size.height);
+            if vw > 10.0 && vh > 10.0 {
+                self.zoom_fit((vw, vh));
+            }
+        }
     }
     fn on_fill_foreground(&mut self, _: &keys::FillForeground, _w: &mut Window, cx: &mut Context<Self>) {
         let color = color_bytes(self.session.palette_color(false));
@@ -293,7 +338,12 @@ impl AppState {
         self.fill_active(color, "Fill Background", cx);
     }
     fn on_free_transform(&mut self, _: &keys::FreeTransform, _w: &mut Window, cx: &mut Context<Self>) {
-        self.session.begin_transform();
+        // transformCommand: the selection floats when there is one (FloatingSelection.swift:22).
+        if self.session.can_transform_selection() {
+            self.session.begin_selection_transform();
+        } else {
+            self.session.begin_transform();
+        }
         self.touch(cx);
     }
     fn on_shortcuts(&mut self, _: &keys::ShowShortcuts, _w: &mut Window, cx: &mut Context<Self>) {
@@ -334,6 +384,24 @@ impl AppState {
     fn on_hue_saturation(&mut self, _: &keys::HueSaturationSheet, w: &mut Window, cx: &mut Context<Self>) {
         self.open_sheet(SheetKind::HueSaturation, w, cx);
     }
+    fn on_curves(&mut self, _: &keys::CurvesSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::Curves), w, cx);
+    }
+    fn on_filter_black_white(&mut self, _: &keys::FilterBlackWhite, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::BlackWhite), w, cx);
+    }
+    fn on_filter_color_balance(&mut self, _: &keys::FilterColorBalance, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::ColorBalance), w, cx);
+    }
+    fn on_filter_exposure(&mut self, _: &keys::FilterExposure, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::Exposure), w, cx);
+    }
+    fn on_filter_gradient_map(&mut self, _: &keys::FilterGradientMap, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::GradientMap), w, cx);
+    }
+    fn on_filter_grain(&mut self, _: &keys::FilterGrain, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_sheet(SheetKind::Filter(FilterKind::Grain), w, cx);
+    }
 
     // MARK: Layer
 
@@ -342,12 +410,25 @@ impl AppState {
         self.touch(cx);
     }
     fn on_duplicate_layer(&mut self, _: &keys::DuplicateLayer, _w: &mut Window, cx: &mut Context<Self>) {
-        self.session.duplicate_active_layer();
+        // layerViaCopy duplicates when nothing is selected (SelectionClipboard.swift:138).
+        self.session.layer_via_copy();
         self.touch(cx);
     }
     fn on_delete_layer(&mut self, _: &keys::DeleteLayer, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.session.delete_active_layer();
+            // deleteLayerOrMask: the mask target deletes the mask; otherwise
+            // the whole selection goes through one undo (SelectionEdits.swift:71).
+            let mask_delete = t.session.is_mask_selected
+                && t.session
+                    .active_layer()
+                    .map(|layer| layer.mask.is_some())
+                    .unwrap_or(false)
+                && t.session.selected_layer_ids.len() <= 1;
+            if mask_delete {
+                t.session.delete_layer_mask();
+            } else {
+                t.session.delete_selected_layers();
+            }
             t.touch(cx);
         });
     }
@@ -369,6 +450,65 @@ impl AppState {
     fn on_flip_layer_v(&mut self, _: &keys::FlipLayerVertical, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.flip_layers(false);
         self.touch(cx);
+    }
+    fn on_group_selected_layers(&mut self, _: &keys::GroupSelectedLayers, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.group_selected_layers();
+        self.touch(cx);
+    }
+    fn on_move_out_of_folder(&mut self, _: &keys::MoveOutOfFolder, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.move_active_layer_out_of_group();
+        self.touch(cx);
+    }
+    fn on_rename_layer(&mut self, _: &keys::RenameLayer, w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.session.active_layer_id {
+            self.begin_rename(id, w, cx);
+        }
+    }
+    fn on_toggle_layer_visibility(&mut self, _: &keys::ToggleLayerVisibility, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.session.active_layer_id {
+            self.session.toggle_layer_visibility(id);
+            self.touch(cx);
+        }
+    }
+    fn add_adjustment(&mut self, kind: AdjustmentKind, cx: &mut Context<Self>) {
+        self.session.add_adjustment(kind);
+        self.touch(cx);
+    }
+    fn on_add_adjustment_hsv(&mut self, _: &keys::AddAdjustmentHsv, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Hsv, cx);
+    }
+    fn on_add_adjustment_levels(&mut self, _: &keys::AddAdjustmentLevels, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Levels, cx);
+    }
+    fn on_add_adjustment_curves(&mut self, _: &keys::AddAdjustmentCurves, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Curves, cx);
+    }
+    fn on_add_adjustment_exposure(&mut self, _: &keys::AddAdjustmentExposure, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Exposure, cx);
+    }
+    fn on_add_adjustment_gradient_map(&mut self, _: &keys::AddAdjustmentGradientMap, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::GradientMap, cx);
+    }
+    fn on_add_adjustment_grain(&mut self, _: &keys::AddAdjustmentGrain, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Grain, cx);
+    }
+    fn on_add_adjustment_add_noise(&mut self, _: &keys::AddAdjustmentAddNoise, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::AddNoise, cx);
+    }
+    fn on_add_adjustment_gaussian_blur(&mut self, _: &keys::AddAdjustmentGaussianBlur, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::GaussianBlur, cx);
+    }
+    fn on_add_adjustment_motion_blur(&mut self, _: &keys::AddAdjustmentMotionBlur, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::MotionBlur, cx);
+    }
+    fn on_add_adjustment_invert(&mut self, _: &keys::AddAdjustmentInvert, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::Invert, cx);
+    }
+    fn on_add_adjustment_black_white(&mut self, _: &keys::AddAdjustmentBlackWhite, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::BlackWhite, cx);
+    }
+    fn on_add_adjustment_color_balance(&mut self, _: &keys::AddAdjustmentColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
+        self.add_adjustment(AdjustmentKind::ColorBalance, cx);
     }
 
     // MARK: Select
@@ -580,6 +720,70 @@ impl AppState {
     }
     fn on_content_aware_fill(&mut self, _: &keys::ContentAwareFill, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| t.run_content_aware_fill(cx));
+    }
+    fn on_clear_selection_pixels(&mut self, _: &keys::ClearSelectionPixels, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.clear_selected_pixels();
+            t.touch(cx);
+        });
+    }
+    fn on_load_layer_selection(&mut self, _: &keys::LoadLayerSelection, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.session.active_layer_id {
+            self.session
+                .load_layer_selection(id, compositor_core::selection::SelectionMode::Replace);
+            self.touch(cx);
+        }
+    }
+    fn on_load_mask_selection(&mut self, _: &keys::LoadMaskSelection, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.session.active_layer_id {
+            self.session
+                .load_mask_selection(id, compositor_core::selection::SelectionMode::Replace);
+            self.touch(cx);
+        }
+    }
+    fn on_remove_background(&mut self, _: &keys::RemoveBackground, _w: &mut Window, cx: &mut Context<Self>) {
+        // Runs on the layer directly: no dialog, one undo (FilterKind menu).
+        let Some(base) = self
+            .session
+            .active_layer()
+            .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()))
+        else {
+            return;
+        };
+        let job = compositor_core::filters::FilterJob {
+            kind: FilterKind::RemoveBackground,
+            image: &base,
+            settings: compositor_core::filters::FilterSettings::default(),
+            scale: 1.0,
+            selection: self.selection_clip(),
+            mapping: compositor_core::geometry::CGAffineTransform::IDENTITY,
+            seed: 7,
+            noise_origin: compositor_core::geometry::CGPoint::ZERO,
+            camera_raw_clipping: None,
+            visualize_point_color: -1,
+            sharpen_mask: false,
+        };
+        let result = compositor_core::filters::run_filter(&job);
+        if let Some(id) = self.session.active_layer_id {
+            self.session.history.begin(
+                "Remove Background",
+                &self.session.document,
+                self.session.active_layer_id,
+            );
+            if let Some(doc) = self.session.document.as_mut() {
+                if let Some(layer) = doc.layer_mut(id) {
+                    layer.asset = Some(compositor_core::raster::ImportedImage::new(result, layer.name.clone()));
+                }
+            }
+            self.session
+                .history
+                .end(&self.session.document, self.session.active_layer_id);
+        }
+        self.touch(cx);
+    }
+    fn on_clear_guides(&mut self, _: &keys::ClearGuides, _w: &mut Window, cx: &mut Context<Self>) {
+        self.session.clear_guides();
+        self.touch(cx);
     }
     fn on_toggle_levels_preview(&mut self, _: &keys::ToggleLevelsPreview, _w: &mut Window, cx: &mut Context<Self>) {
         self.toggle_levels_preview(cx);
