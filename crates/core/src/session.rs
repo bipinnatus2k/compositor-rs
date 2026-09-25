@@ -208,6 +208,52 @@ fn kind_label(kind: crate::effects::LayerEffectKind) -> &'static str {
     }
 }
 
+/// `mergePlan`'s result: the layers that merge (bottom to top), everything the
+/// merge removes, the result's name, parent, where it lands, and the undo name.
+struct MergePlan {
+    ids: Vec<Uuid>,
+    removed: std::collections::HashSet<Uuid>,
+    name: String,
+    parent: Option<Uuid>,
+    anchor: Uuid,
+    action: &'static str,
+}
+
+/// `LayerHierarchy.validate` over live layers (LayerGroups.swift:28-44):
+/// unique ids, groups carry no pixels, parents exist and are groups, and no
+/// nesting or cycle beyond 64 ancestor levels.
+fn hierarchy_is_valid(layers: &[ImageLayer]) -> bool {
+    let mut by_id: std::collections::HashMap<Uuid, &ImageLayer> = std::collections::HashMap::new();
+    for layer in layers {
+        if by_id.insert(layer.id, layer).is_some() {
+            return false;
+        }
+        if layer.is_group && layer.asset.is_some() {
+            return false;
+        }
+    }
+    for layer in layers {
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::from([layer.id]);
+        let mut parent = layer.parent_id;
+        while let Some(id) = parent {
+            if seen.len() > 64 || !seen.insert(id) {
+                return false;
+            }
+            let Some(node) = by_id.get(&id) else {
+                return false;
+            };
+            if !node.is_group {
+                return false;
+            }
+            parent = node.parent_id;
+        }
+        if layer.is_group && seen.len() > 64 {
+            return false;
+        }
+    }
+    true
+}
+
 /// `ColorPickerState` — the open picker's working color. Nothing is written
 /// to the palette until OK; `hsb` is the source of truth so hue survives
 /// dragging through grays and black (ColorPalette.swift:182-196).
@@ -490,22 +536,37 @@ impl EditorSession {
 
     pub fn undo(&mut self) {
         if let Some(snapshot) = self.history.undo() {
-            self.document = snapshot.document;
-            self.active_layer_id = snapshot.active_layer_id;
-            if let Some(id) = self.active_layer_id {
-                self.selected_layer_ids = vec![id];
-            }
+            self.restore(snapshot);
         }
     }
 
     pub fn redo(&mut self) {
         if let Some(snapshot) = self.history.redo() {
-            self.document = snapshot.document;
-            self.active_layer_id = snapshot.active_layer_id;
-            if let Some(id) = self.active_layer_id {
-                self.selected_layer_ids = vec![id];
-            }
+            self.restore(snapshot);
         }
+    }
+
+    /// `restore(_:)` (EditorSession.swift:578-586): a pending crop and a
+    /// pending gradient die with the undo, the snapshot swaps in, and the mask
+    /// stays the edit target only when the active layer did not change and the
+    /// restored layer still has a mask.
+    fn restore(&mut self, snapshot: crate::history::Snapshot) {
+        self.cancel_crop();
+        self.cancel_gradient();
+        // The mask target survives only an undo that keeps editing the same
+        // layer (`keepMaskTarget`).
+        let keep_mask_target =
+            self.is_mask_selected && self.active_layer_id == snapshot.active_layer_id;
+        self.document = snapshot.document;
+        self.active_layer_id = snapshot.active_layer_id;
+        if let Some(id) = self.active_layer_id {
+            self.selected_layer_ids = vec![id];
+        }
+        self.is_mask_selected =
+            keep_mask_target && self.active_layer().map(|l| l.mask.is_some()).unwrap_or(false);
+        // Swift then refits the viewport when the canvas itself changed
+        // (`viewport.fit(documentSize:)`); the core session has no viewport,
+        // so that stays with the app.
     }
 
     pub fn is_modified(&self) -> bool {
@@ -851,6 +912,22 @@ impl EditorSession {
             }
         }
         layer.blend_mode
+    }
+
+    /// `previewBlendMode` (LayerAppearance.swift:78-82) — the appearance
+    /// panel's hover preview: temporary, only for the active layer while it
+    /// can be edited; any other layer, or a None mode, clears it. Nothing is
+    /// written to the document and no undo step is taken. Swift also pokes
+    /// `refreshCanvasPreview` here; that closure is app-side.
+    pub fn set_preview_blend_mode(&mut self, mode: Option<LayerBlendMode>, id: Option<Uuid>) {
+        self.blend_preview = match (mode, id) {
+            (Some(mode), Some(id))
+                if Some(id) == self.active_layer_id && self.can_edit_appearance() =>
+            {
+                Some((id, mode))
+            }
+            _ => None,
+        };
     }
 
     /// Shift-+ / Shift-− steps the blend mode through the menu order.
@@ -1203,6 +1280,74 @@ impl EditorSession {
         self.end_edit();
     }
 
+    /// Cmd-click on a mask thumbnail: the mask's black (hidden) areas become
+    /// the selection (MaskTracing.swift:76-85). Shift adds; Option subtracts.
+    pub fn load_mask_selection(&mut self, layer_id: Uuid, mode: SelectionMode) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        if !self.can_edit_layers() {
+            return;
+        }
+        let Some(layer) = document.layer(layer_id) else {
+            return;
+        };
+        let Some(mask) = &layer.mask else {
+            return;
+        };
+        let image = mask.asset.image.as_ref();
+        let gray = crate::raster::GrayMask::from_raw(
+            image.width,
+            image.height,
+            image.data.chunks_exact(4).map(|px| px[0]).collect(),
+        );
+        let Some(traced) = crate::tools::mask_tracing::dark_pixels(&gray) else {
+            self.brush_error = Some("Nothing selected".to_string());
+            return;
+        };
+        let to_document = crate::raster::pixel_to_document(
+            &layer.mask_transform(),
+            image.width as f64,
+            image.height as f64,
+        );
+        let outline = traced.transformed(&to_document);
+        self.apply_selection(outline, mode, "Load Mask Selection");
+    }
+
+    /// Cmd-click on a layer thumbnail: the layer's visible (≥ 50% opaque)
+    /// pixels become the selection, ignoring its mask, as in Photoshop
+    /// (MaskTracing.swift:87-95). Shift adds; Option subtracts.
+    pub fn load_layer_selection(&mut self, layer_id: Uuid, mode: SelectionMode) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        if !self.can_edit_layers() {
+            return;
+        }
+        let Some(layer) = document.layer(layer_id) else {
+            return;
+        };
+        if layer.is_group {
+            return;
+        }
+        let Some(asset) = &layer.asset else {
+            self.brush_error = Some("Nothing selected".to_string());
+            return;
+        };
+        let image = asset.image.as_ref();
+        let Some(traced) = crate::tools::mask_tracing::opaque_pixels(image) else {
+            self.brush_error = Some("Nothing selected".to_string());
+            return;
+        };
+        let to_document = crate::raster::pixel_to_document(
+            &layer.transform,
+            image.width as f64,
+            image.height as f64,
+        );
+        let outline = traced.transformed(&to_document);
+        self.apply_selection(outline, mode, "Load Layer Selection");
+    }
+
     pub fn select_all(&mut self) {
         let Some(document) = self.document.clone() else {
             return;
@@ -1500,6 +1645,166 @@ impl EditorSession {
             self.is_mask_selected = false;
             self.end_edit();
         }
+    }
+
+    /// `selectLayerTarget` (LayerMask.swift:222-228) — a click on a layer's or
+    /// folder's pixel/mask thumbnail. The effect selection always leaves first,
+    /// then the pending gradient resolves, the layer selects, and the mask
+    /// becomes the target only when the layer has one. The busy states the
+    /// Swift guard also checks (`isProjectBusy`, `isImporting`,
+    /// `brushStroke != nil`) are app-side and not modeled here.
+    pub fn select_layer_target(&mut self, id: Uuid, mask: bool) {
+        self.effect_selection = None;
+        self.resolve_gradient();
+        self.select_layer(Some(id));
+        self.is_mask_selected =
+            mask && self.active_layer().map(|l| l.mask.is_some()).unwrap_or(false);
+    }
+
+    /// `canCopyMask` (LayerMask.swift:290-298) — whether an Option-drag can
+    /// drop a copy of `source`'s mask on `target`: two different layers, the
+    /// source wearing a mask, and the target not a folder.
+    pub fn can_copy_mask(&self, source: Uuid, target: Uuid) -> bool {
+        if !self.can_edit_layers() || source == target {
+            return false;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return false;
+        };
+        if document
+            .layer(source)
+            .and_then(|l| l.mask.as_ref())
+            .is_none()
+        {
+            return false;
+        }
+        match document.layer(target) {
+            Some(layer) => !layer.is_group,
+            None => false,
+        }
+    }
+
+    /// `copyMask` (LayerMask.swift:300-311) — Option-dragging a mask thumbnail
+    /// onto another layer: a copy of the mask, sitting where it sits on the
+    /// document, replacing any mask the layer had. The target selects with the
+    /// mask as its target, in one undo step named for the copy.
+    pub fn copy_mask(&mut self, source: Uuid, target: Uuid) {
+        if !self.can_copy_mask(source, target) {
+            return;
+        }
+        let Some(document) = self.document.clone() else {
+            return;
+        };
+        let Some(from) = document.layer(source).cloned() else {
+            return;
+        };
+        let Some(mut mask) = from.mask.clone() else {
+            return;
+        };
+        if document.layer_index(target).is_none() {
+            return;
+        }
+        self.commit_transform();
+        self.finish_opacity_edit();
+        mask.placement = Some(from.mask_transform());
+        let had_mask = self
+            .document
+            .as_ref()
+            .and_then(|d| d.layer(target))
+            .map(|l| l.mask.is_some())
+            .unwrap_or(false);
+        self.begin_edit(if had_mask {
+            "Replace Layer Mask"
+        } else {
+            "Copy Layer Mask"
+        });
+        if let Some(doc) = self.document.as_mut() {
+            if let Some(layer) = doc.layer_mut(target) {
+                layer.mask = Some(mask);
+            }
+        }
+        self.select_layer(Some(target));
+        self.is_mask_selected = true;
+        self.end_edit();
+    }
+
+    /// `toggleMaskLink` (LayerMask.swift:312-322) — the link between a layer
+    /// and its mask: linked they move together; unlinked each transforms on
+    /// its own, as in Photoshop.
+    pub fn toggle_mask_link(&mut self, id: Uuid) {
+        if !self.can_edit_layers() {
+            return;
+        }
+        let linked = self
+            .document
+            .as_ref()
+            .and_then(|d| d.layer(id))
+            .and_then(|l| l.mask.as_ref())
+            .map(|m| m.is_linked);
+        let Some(linked) = linked else {
+            return;
+        };
+        self.commit_transform();
+        self.finish_opacity_edit();
+        self.begin_edit(if linked {
+            "Unlink Layer Mask"
+        } else {
+            "Link Layer Mask"
+        });
+        if let Some(doc) = self.document.as_mut() {
+            if let Some(layer) = doc.layer_mut(id) {
+                if let Some(mask) = layer.mask.as_mut() {
+                    mask.is_linked = !linked;
+                }
+            }
+        }
+        self.end_edit();
+    }
+
+    /// `displayedMaskPlacement` (LayerMask.swift:324-338) — where `layer`'s
+    /// mask shows right now: None while it covers the layer's (displayed)
+    /// pixel grid — a pending mask transform's draft, or where a pending layer
+    /// transform leaves it (carried along when linked). The Content-Aware
+    /// Fill branch is filter-edit state the core does not model yet.
+    pub fn displayed_mask_placement(&self, layer: &ImageLayer) -> Option<LayerTransform> {
+        let mask = layer.mask.as_ref()?;
+        let Some(edit) = self.transform_edit.as_ref() else {
+            return mask.placement;
+        };
+        if let Some(group) = edit.group.as_ref() {
+            let Some(original) = group.original(layer.id) else {
+                return mask.placement;
+            };
+            // A distortion carries a mask covering a linked layer with it; any
+            // other mask stays put.
+            if edit.corners.is_some() {
+                return if mask.is_linked && mask.placement.is_none() {
+                    None
+                } else {
+                    Some(mask.placement.unwrap_or(layer.transform))
+                };
+            }
+            let moved = original.following(&group.box_, &edit.draft);
+            return mask.placement_moving_layer(&layer.transform, &moved);
+        }
+        if edit.layer_id != layer.id || edit.floating.is_some() {
+            return mask.placement;
+        }
+        if edit.mask {
+            return if edit.draft.same_placement(&layer.transform) {
+                None
+            } else {
+                Some(edit.draft)
+            };
+        }
+        if edit.corners.is_some() {
+            return if mask.is_linked && mask.placement.is_none() {
+                None
+            } else {
+                Some(mask.placement.unwrap_or(layer.transform))
+            };
+        }
+        mask.placement_moving_layer(&layer.transform, &edit.draft)
     }
 
     // MARK: Selection edits (SelectionEdits.swift)
@@ -3861,6 +4166,8 @@ impl EditorSession {
     pub fn commit_transform(&mut self) {
         self.finish_opacity_edit();
         self.snap_guides = (Vec::new(), Vec::new());
+        // A blend preview never survives a commit (EditorSession.swift:425).
+        self.blend_preview = None;
         let Some(edit) = self.transform_edit.take() else {
             return;
         };
@@ -4098,7 +4405,18 @@ impl EditorSession {
         }
     }
 
+    /// `beginTransform()` — the common case: a user-opened transform that
+    /// stays open for its handles (`persistent: true`).
     pub fn begin_transform(&mut self) {
+        self.begin_transform_persistent(true);
+    }
+
+    /// `beginTransform(persistent:)` (EditorSession.swift:375-391). Swift's
+    /// transient transforms pass `persistent: false` — a nudge or an
+    /// Option-drag duplicate opens, moves, and commits in one go, so no
+    /// handles are shown for it. The commit and cancel paths treat both the
+    /// same; only the render side reads the flag.
+    pub fn begin_transform_persistent(&mut self, persistent: bool) {
         self.cancel_crop();
         if self.transform_edit.is_some() {
             return;
@@ -4121,7 +4439,7 @@ impl EditorSession {
         self.transform_edit = Some(TransformEdit {
             layer_id: layer.id,
             draft,
-            persistent: true,
+            persistent,
             floating: None,
             corners: None,
             mask: mask_alone,
@@ -4147,7 +4465,8 @@ impl EditorSession {
     pub fn nudge_layer(&mut self, dx: f64, dy: f64) {
         let already = self.transform_edit.is_some();
         if !already {
-            self.begin_transform();
+            // A nudge is a transient transform (nudgeLayer, EditorSession.swift:505).
+            self.begin_transform_persistent(false);
         }
         if let Some(edit) = self.transform_edit.as_mut() {
             let mut value = edit.draft;
@@ -4277,62 +4596,127 @@ impl EditorSession {
 
     /// ⌘E: merges as the canvas shows them — blend modes, opacity, masks,
     /// clipping and adjustments baked in — into one pixel layer.
+    /// `mergePlan` (LayerMerge.swift:8-30) — what ⌘E merges, in stacking
+    /// order, and where the result goes; None when there is nothing to merge.
+    /// One layer merges with the layer beneath it in the same folder; several
+    /// selected layers merge together (with anything their folders hold); a
+    /// folder merges its contents, and the folder goes.
+    fn merge_plan(&self) -> Option<MergePlan> {
+        if !self.can_edit_layers() {
+            return None;
+        }
+        let document = self.document.as_ref()?;
+        let active = self.active_layer()?;
+        if self.selected_layer_ids.len() > 1 {
+            let mut picked: std::collections::HashSet<Uuid> =
+                self.selected_layer_ids.iter().copied().collect();
+            for id in &self.selected_layer_ids {
+                picked.extend(document.descendant_ids(*id));
+            }
+            let ordered: Vec<Uuid> = document
+                .layers
+                .iter()
+                .filter(|l| picked.contains(&l.id))
+                .map(|l| l.id)
+                .collect();
+            let top = document
+                .layers
+                .iter()
+                .rev()
+                .find(|l| self.selected_layer_ids.contains(&l.id))?;
+            // The merge must include something with pixels of its own.
+            if !ordered.iter().any(|id| {
+                document
+                    .layer(*id)
+                    .map(|l| !l.is_group)
+                    .unwrap_or(false)
+            }) {
+                return None;
+            }
+            return Some(MergePlan {
+                ids: ordered,
+                removed: picked,
+                name: top.name.clone(),
+                parent: top.parent_id,
+                anchor: top.id,
+                action: "Merge Layers",
+            });
+        }
+        if active.is_group {
+            let inside = document.descendant_ids(active.id);
+            // A folder merges its contents; an empty folder has nothing to merge.
+            if !document
+                .layers
+                .iter()
+                .any(|l| inside.contains(&l.id) && !l.is_group)
+            {
+                return None;
+            }
+            let ids: Vec<Uuid> = document
+                .layers
+                .iter()
+                .filter(|l| inside.contains(&l.id) || l.id == active.id)
+                .map(|l| l.id)
+                .collect();
+            return Some(MergePlan {
+                removed: ids.iter().copied().collect(),
+                ids,
+                name: active.name.clone(),
+                parent: active.parent_id,
+                anchor: active.id,
+                action: "Merge Group",
+            });
+        }
+        let index = document.layer_index(active.id)?;
+        // One layer merges with the nearest layer beneath it in the same
+        // folder; a folder below refuses the merge (Swift never skips it).
+        let below = document.layers[..index]
+            .iter()
+            .rev()
+            .find(|l| l.parent_id == active.parent_id)?;
+        if below.is_group {
+            return None;
+        }
+        Some(MergePlan {
+            ids: vec![below.id, active.id],
+            removed: [below.id, active.id].into_iter().collect(),
+            name: below.name.clone(),
+            parent: active.parent_id,
+            anchor: active.id,
+            action: "Merge Down",
+        })
+    }
+
+    /// `canMergeLayers` — whether ⌘E has anything to merge right now.
+    pub fn can_merge_layers(&self) -> bool {
+        self.merge_plan().is_some()
+    }
+
+    /// `mergeTitle` — the menu item's name for the pending merge.
+    pub fn merge_title(&self) -> &'static str {
+        self.merge_plan()
+            .map(|plan| plan.action)
+            .unwrap_or("Merge Down")
+    }
+
+    /// ⌘E: the layers composited as the canvas shows them — blend modes,
+    /// opacity, masks, clipping and adjustments baked in — into one pixel
+    /// layer, trimmed to what is there, in their place, as one undo step
+    /// (LayerMerge.swift:65-108). A plan that would leave an unloadable
+    /// hierarchy (as when a folder and its own contents are both selected)
+    /// backs out silently, like Swift's `LayerHierarchy.validate` fallback.
     pub fn merge_layers(&mut self) {
         self.commit_transform();
+        let Some(plan) = self.merge_plan() else {
+            return;
+        };
         let Some(document) = self.document.clone() else {
             return;
         };
-        let Some(active) = self.active_layer().cloned() else {
-            return;
-        };
-        let (ids, action, name): (Vec<Uuid>, &'static str, String) =
-            if self.selected_layer_ids.len() > 1 {
-                let mut picked: Vec<Uuid> = Vec::new();
-                for id in &self.selected_layer_ids {
-                    picked.extend(document.descendant_ids(*id));
-                }
-                let ordered: Vec<Uuid> = document
-                    .layers
-                    .iter()
-                    .filter(|l| picked.contains(&l.id))
-                    .map(|l| l.id)
-                    .collect();
-                let name = document
-                    .layers
-                    .iter()
-                    .rev()
-                    .find(|l| self.selected_layer_ids.contains(&l.id))
-                    .map(|l| l.name.clone())
-                    .unwrap_or_default();
-                (ordered, "Merge Layers", name)
-            } else if active.is_group {
-                let inside = document.descendant_ids(active.id);
-                let mut ids: Vec<Uuid> = document
-                    .layers
-                    .iter()
-                    .filter(|l| inside.contains(&l.id))
-                    .map(|l| l.id)
-                    .collect();
-                ids.push(active.id);
-                let name = active.name.clone();
-                (ids, "Merge Group", name)
-            } else {
-                let Some(index) = document.layer_index(active.id) else {
-                    return;
-                };
-                let below = document.layers[..index]
-                    .iter()
-                    .rev()
-                    .find(|l| l.parent_id == active.parent_id && !l.is_group)
-                    .cloned();
-                let Some(below) = below else {
-                    return;
-                };
-                (vec![below.id, active.id], "Merge Down", below.name.clone())
-            };
-        let kept: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
+        let kept: std::collections::HashSet<Uuid> = plan.ids.iter().copied().collect();
 
-        // Composite the subset onto a canvas.
+        // Composite the subset onto a canvas; only the merged layers, cut
+        // loose from anything outside the merge.
         let mut subset_doc = document.clone();
         subset_doc.layers = document
             .layers
@@ -4358,36 +4742,41 @@ impl EditorSession {
             CGSize::new(document.width as f64, document.height as f64),
         );
         let (trimmed_image, trimmed_transform) = crate::filters::trimmed(&full, canvas_transform);
-        let anchor = *ids.last().unwrap_or(&active.id);
-        let parent = document.layer(anchor).and_then(|l| l.parent_id);
         let mut merged = ImageLayer::with_asset(
-            ImportedImage::new(trimmed_image, name.clone()),
+            ImportedImage::new(trimmed_image, plan.name.clone()),
             trimmed_transform.origin,
         );
         merged.transform = trimmed_transform;
-        merged.parent_id = parent;
+        merged.parent_id = plan.parent;
 
         let mut next: Vec<ImageLayer> = document
             .layers
             .iter()
-            .filter(|l| !kept.contains(&l.id))
+            .filter(|l| !plan.removed.contains(&l.id))
             .cloned()
             .collect();
+        // Layers clipped to anything that was merged now clip to the result.
         for layer in next.iter_mut() {
             if let Some(source) = layer.mask_source_id {
-                if kept.contains(&source) {
+                if plan.removed.contains(&source) {
                     layer.mask_source_id = Some(merged.id);
                 }
             }
         }
-        let slot = document.layer_index(anchor).unwrap_or(document.layers.len());
+        let slot = document
+            .layer_index(plan.anchor)
+            .unwrap_or(document.layers.len());
         let insertion =
-            slot - document.layers[..slot].iter().filter(|l| kept.contains(&l.id)).count();
+            slot - document.layers[..slot].iter().filter(|l| plan.removed.contains(&l.id)).count();
         let insertion = insertion.min(next.len());
         let merged_id = merged.id;
         next.insert(insertion, merged);
 
-        self.begin_edit(action);
+        if !hierarchy_is_valid(&next) {
+            return;
+        }
+        self.finish_opacity_edit();
+        self.begin_edit(plan.action);
         if let Some(doc) = self.document.as_mut() {
             doc.layers = next;
             self.active_layer_id = Some(merged_id);
@@ -5295,6 +5684,67 @@ mod tests {
         assert!(sel.path.contains(CGPoint::new(50.0, 50.0)));
     }
 
+    /// Cmd-click on a layer thumbnail: the ≥ 50% opaque pixels become the
+    /// selection, ignoring the mask (MaskTracing.swift:87).
+    #[test]
+    fn load_layer_selection_traces_opaque_pixels() {
+        let mut s = session();
+        let mut image = Bitmap::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                let alpha = if x < 50 { 255 } else { 0 };
+                image.set_pixel(x, y, [255, 0, 0, alpha]);
+            }
+        }
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(image, "L"));
+        s.load_layer_selection(s.active_layer_id.unwrap(), SelectionMode::Replace);
+        let sel = s.selection().expect("opaque half traced");
+        assert!(sel.path.contains(CGPoint::new(25.0, 50.0)));
+        assert!(!sel.path.contains(CGPoint::new(75.0, 50.0)));
+    }
+
+    /// Cmd-click on a mask thumbnail: the mask's black (hidden) areas become
+    /// the selection (MaskTracing.swift:76).
+    #[test]
+    fn load_mask_selection_traces_dark_pixels() {
+        let mut s = session();
+        let layer_id = s.active_layer_id.unwrap();
+        let mut gray = Bitmap::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                // Black on the left (hidden → selected), white on the right.
+                let v = if x < 50 { 0 } else { 255 };
+                gray.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        let layer = s.document.as_mut().unwrap().layer_mut(layer_id).unwrap();
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::new(gray, "mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        s.load_mask_selection(layer_id, SelectionMode::Replace);
+        let sel = s.selection().expect("dark half traced");
+        assert!(sel.path.contains(CGPoint::new(25.0, 50.0)));
+        assert!(!sel.path.contains(CGPoint::new(75.0, 50.0)));
+    }
+
+    /// An all-revealing mask has no dark pixels: the load is refused with a
+    /// status instead of clearing the selection (the Swift beep).
+    #[test]
+    fn load_mask_selection_without_dark_pixels_keeps_the_selection() {
+        let mut s = session();
+        let layer_id = s.active_layer_id.unwrap();
+        let layer = s.document.as_mut().unwrap().layer_mut(layer_id).unwrap();
+        layer.mask = Some(crate::document::LayerMask::solid(true));
+        s.select_all();
+        let before = s.selection().unwrap().path.clone();
+        s.load_mask_selection(layer_id, SelectionMode::Replace);
+        assert!(s.brush_error.is_some());
+        assert_eq!(s.selection().unwrap().path, before);
+    }
+
     #[test]
     fn magic_wand_selects_uniform_region() {
         let mut s = session();
@@ -5321,6 +5771,278 @@ mod tests {
         assert!(!s.active_layer().unwrap().mask.as_ref().unwrap().is_enabled);
         s.delete_layer_mask();
         assert!(s.active_layer().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn undo_keeps_the_mask_target_on_the_same_layer() {
+        // EditorSession.restore: an undo that keeps editing the same layer
+        // keeps the mask as the target, backwards and forwards.
+        let mut s = session();
+        s.add_layer_mask(true);
+        let id = s.active_layer_id.unwrap();
+        assert!(s.is_mask_selected);
+        s.rename_layer(id, "Renamed");
+        s.undo();
+        assert!(s.is_mask_selected, "same layer, still its mask");
+        assert!(s.active_layer().unwrap().mask.is_some());
+        s.redo();
+        assert!(s.is_mask_selected);
+    }
+
+    #[test]
+    fn undo_drops_the_mask_target_when_the_layer_changes() {
+        let mut s = session();
+        s.add_blank_layer();
+        let layer2 = s.active_layer_id.unwrap();
+        // Outside any undo step: Layer 2's mask becomes the target.
+        if let Some(doc) = s.document.as_mut() {
+            doc.layer_mut(layer2).unwrap().mask = Some(LayerMask::solid(true));
+        }
+        s.is_mask_selected = true;
+        s.undo();
+        // The undo lands back on Layer 1 — another layer, without a mask.
+        assert_ne!(s.active_layer_id, Some(layer2));
+        assert!(!s.is_mask_selected);
+        assert!(s.active_layer().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn undo_drops_a_mask_target_the_restored_layer_does_not_have() {
+        let mut s = session();
+        s.add_layer_mask(true);
+        assert!(s.is_mask_selected);
+        s.undo();
+        assert!(!s.is_mask_selected, "the restored layer has no mask yet");
+        assert!(s.active_layer().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn undo_and_redo_cancel_the_crop_and_gradient_drafts() {
+        let mut s = session();
+        let id = s.active_layer_id.unwrap();
+        s.rename_layer(id, "Renamed");
+        s.crop_rect = Some(CGRect::new(0.0, 0.0, 40.0, 40.0));
+        s.gradient_edit = Some(GradientDraft {
+            layer_id: id,
+            is_mask: false,
+            start: CGPoint::ZERO,
+            end: CGPoint::new(10.0, 10.0),
+        });
+        s.undo();
+        assert_eq!(s.crop_rect, None, "the crop draft dies with the undo");
+        assert!(s.gradient_edit.is_none(), "so does the pending gradient");
+        s.crop_rect = Some(CGRect::new(0.0, 0.0, 40.0, 40.0));
+        s.redo();
+        assert_eq!(s.crop_rect, None);
+        assert!(s.gradient_edit.is_none());
+    }
+
+    #[test]
+    fn select_layer_target_switches_pixels_and_mask() {
+        let mut s = session();
+        s.add_layer_mask(true);
+        let id = s.active_layer_id.unwrap();
+        s.is_mask_selected = false;
+        s.select_layer_target(id, true);
+        assert!(s.is_mask_selected);
+        s.select_layer_target(id, false);
+        assert!(!s.is_mask_selected);
+        // A target without a mask never selects one.
+        s.add_blank_layer();
+        let other = s.active_layer_id.unwrap();
+        s.select_layer(Some(id));
+        s.select_layer_target(other, true);
+        assert!(!s.is_mask_selected);
+        assert_eq!(s.active_layer_id, Some(other));
+    }
+
+    #[test]
+    fn select_layer_target_leaves_the_effects_panel() {
+        let mut s = session();
+        let id = s.active_layer_id.unwrap();
+        s.effect_selection = Some(crate::effects::LayerEffectSelection {
+            layer_id: id,
+            kind: crate::effects::LayerEffectKind::Stroke,
+        });
+        s.select_layer_target(id, false);
+        assert_eq!(s.effect_selection, None);
+    }
+
+    #[test]
+    fn copy_mask_moves_a_mask_between_layers() {
+        let mut s = session();
+        s.add_blank_layer();
+        let source = s.active_layer_id.unwrap();
+        s.add_layer_mask(true);
+        // The source's mask sits apart, unlinked; the copy carries the spot.
+        if let Some(doc) = s.document.as_mut() {
+            let mask = doc.layer_mut(source).unwrap().mask.as_mut().unwrap();
+            mask.is_linked = false;
+            mask.placement = Some(LayerTransform::new(
+                CGPoint::new(10.0, 20.0),
+                CGSize::new(100.0, 100.0),
+            ));
+        }
+        let target = s.document.as_ref().unwrap().layers[0].id;
+        assert!(s.can_copy_mask(source, target));
+        s.copy_mask(source, target);
+        assert_eq!(s.history.undo_name(), "Copy Layer Mask");
+        assert_eq!(s.active_layer_id, Some(target));
+        assert!(s.is_mask_selected);
+        let copied = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(target)
+            .unwrap()
+            .mask
+            .clone()
+            .unwrap();
+        assert_eq!(copied.placement.map(|p| p.origin), Some(CGPoint::new(10.0, 20.0)));
+        assert!(!copied.is_linked);
+        // Dropping it again replaces what the layer had. The copy has to
+        // actually change the document to be recorded (identical masks fold
+        // away, by image identity, exactly as in Swift), so nudge it first.
+        if let Some(doc) = s.document.as_mut() {
+            let mask = doc.layer_mut(target).unwrap().mask.as_mut().unwrap();
+            mask.placement = Some(LayerTransform::new(
+                CGPoint::new(50.0, 50.0),
+                CGSize::new(100.0, 100.0),
+            ));
+        }
+        s.copy_mask(source, target);
+        assert_eq!(s.history.undo_name(), "Replace Layer Mask");
+        assert!(!s.can_copy_mask(source, source), "a layer cannot copy from itself");
+    }
+
+    #[test]
+    fn copy_mask_refuses_folders_and_missing_masks() {
+        let mut s = session();
+        s.add_layer_mask(true);
+        let source = s.active_layer_id.unwrap();
+        s.add_group();
+        let folder = s.active_layer_id.unwrap();
+        assert!(!s.can_copy_mask(source, folder), "a folder takes no mask");
+        let count = s.history.undo_count();
+        s.copy_mask(source, folder);
+        assert_eq!(s.history.undo_count(), count, "nothing merged, nothing recorded");
+        assert!(!s.can_copy_mask(folder, source), "the folder has no mask to give");
+    }
+
+    #[test]
+    fn toggle_mask_link_names_the_edit() {
+        let mut s = session();
+        s.add_layer_mask(true);
+        let id = s.active_layer_id.unwrap();
+        assert!(s.active_layer().unwrap().mask.as_ref().unwrap().is_linked);
+        s.toggle_mask_link(id);
+        assert_eq!(s.history.undo_name(), "Unlink Layer Mask");
+        assert!(!s.active_layer().unwrap().mask.as_ref().unwrap().is_linked);
+        s.toggle_mask_link(id);
+        assert_eq!(s.history.undo_name(), "Link Layer Mask");
+        assert!(s.active_layer().unwrap().mask.as_ref().unwrap().is_linked);
+        // A layer without a mask is a no-op.
+        s.add_blank_layer();
+        let other = s.active_layer_id.unwrap();
+        let count = s.history.undo_count();
+        s.toggle_mask_link(other);
+        assert_eq!(s.history.undo_count(), count);
+    }
+
+    #[test]
+    fn displayed_mask_placement_follows_the_pending_transform() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(Bitmap::new(50, 50), "L"));
+        s.add_layer_mask(true);
+        let id = s.active_layer_id.unwrap();
+        // A real-sized mask: a uniform 1 × 1 one never takes a placement.
+        if let Some(doc) = s.document.as_mut() {
+            let layer = doc.layer_mut(id).unwrap();
+            let mut mask = layer.mask.take().unwrap();
+            mask.asset = ImportedImage::new(Bitmap::new(50, 50), "Layer Mask");
+            layer.mask = Some(mask);
+        }
+        let layer = |s: &EditorSession| s.document.as_ref().unwrap().layer(id).unwrap().clone();
+
+        // With nothing pending, the mask just covers the layer.
+        assert_eq!(s.displayed_mask_placement(&layer(&s)), None);
+
+        // Linked: wherever the layer is headed, the mask keeps covering it.
+        s.begin_transform();
+        if let Some(edit) = s.transform_edit.as_mut() {
+            edit.draft.origin = CGPoint::new(30.0, 0.0);
+        }
+        assert_eq!(s.displayed_mask_placement(&layer(&s)), None, "linked stays covering");
+        s.cancel_transform();
+
+        // Unlinked: the mask stays where it was while the layer drags, and the
+        // commit gives it that spot. The pixels are the target again first,
+        // like the Swift test's `selectLayerTarget(layer.id, mask: false)`.
+        s.toggle_mask_link(id);
+        s.select_layer_target(id, false);
+        s.begin_transform();
+        if let Some(edit) = s.transform_edit.as_mut() {
+            edit.draft.origin = CGPoint::new(30.0, 0.0);
+        }
+        let shown = s.displayed_mask_placement(&layer(&s)).unwrap();
+        assert_eq!(shown.origin, CGPoint::ZERO, "the mask stays while the layer drags");
+        s.commit_transform();
+        assert_eq!(
+            layer(&s).mask.as_ref().unwrap().placement.map(|p| p.origin),
+            Some(CGPoint::ZERO)
+        );
+
+        // A pending mask transform shows its draft.
+        s.is_mask_selected = true;
+        s.begin_transform();
+        assert!(s.transform_edit.as_ref().unwrap().mask);
+        if let Some(edit) = s.transform_edit.as_mut() {
+            edit.draft.origin = CGPoint::new(15.0, 0.0);
+        }
+        assert_eq!(
+            s.displayed_mask_placement(&layer(&s)).map(|p| p.origin),
+            Some(CGPoint::new(15.0, 0.0))
+        );
+        s.commit_transform();
+        assert_eq!(
+            layer(&s).mask.as_ref().unwrap().placement.map(|p| p.origin),
+            Some(CGPoint::new(15.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn displayed_mask_placement_under_a_distortion() {
+        // A distortion carries a linked covering mask with the layer (it keeps
+        // covering, so None); any other mask stays put.
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(Bitmap::new(50, 50), "L"));
+        s.add_layer_mask(true);
+        let id = s.active_layer_id.unwrap();
+        let draft = LayerTransform::new(CGPoint::new(5.0, 5.0), CGSize::new(60.0, 60.0));
+        s.transform_edit = Some(TransformEdit {
+            layer_id: id,
+            draft,
+            persistent: true,
+            floating: None,
+            corners: Some(crate::tools::distort::corners_of(&draft)),
+            mask: false,
+            group: None,
+        });
+        let layer = s.document.as_ref().unwrap().layer(id).unwrap().clone();
+        assert_eq!(s.displayed_mask_placement(&layer), None, "linked keeps covering");
+        let unlinked_layer = {
+            let mut l = layer.clone();
+            let mask = l.mask.as_mut().unwrap();
+            mask.is_linked = false;
+            l
+        };
+        assert_eq!(
+            s.displayed_mask_placement(&unlinked_layer),
+            Some(layer.transform),
+            "an unlinked covering mask stays at the layer's transform"
+        );
     }
 
     #[test]
@@ -6717,6 +7439,183 @@ mod tests {
         assert_eq!(doc.layers[0].id, s.active_layer_id.unwrap());
         let out = doc.layers[0].asset.as_ref().unwrap().image.clone();
         assert_eq!(out.pixel(10, 10), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn merge_down_refuses_a_folder_below() {
+        // The layer beneath in the same folder is a folder: nothing to merge
+        // into (mergePlan refuses, it never skips it).
+        let mut s = session();
+        let mut folder = ImageLayer::blank("Folder", CGSize::new(100.0, 100.0));
+        folder.is_group = true;
+        let mut child = ImageLayer::blank("Inner", CGSize::new(100.0, 100.0));
+        child.parent_id = Some(folder.id);
+        let top = ImageLayer::blank("Layer 2", CGSize::new(100.0, 100.0));
+        let top_id = top.id;
+        s.document.as_mut().unwrap().layers = vec![folder, child, top];
+        s.select_layer(Some(top_id));
+        assert!(!s.can_merge_layers());
+        assert_eq!(s.merge_title(), "Merge Down");
+        let count = s.history.undo_count();
+        s.merge_layers();
+        assert_eq!(s.document.as_ref().unwrap().layers.len(), 3);
+        assert_eq!(s.history.undo_count(), count);
+    }
+
+    #[test]
+    fn merging_an_empty_folder_does_nothing() {
+        let mut s = session();
+        let mut folder = ImageLayer::blank("Folder", CGSize::new(100.0, 100.0));
+        folder.is_group = true;
+        let folder_id = folder.id;
+        s.document.as_mut().unwrap().layers = vec![folder];
+        s.select_layer(Some(folder_id));
+        assert!(!s.can_merge_layers());
+        let count = s.history.undo_count();
+        s.merge_layers();
+        assert_eq!(s.history.undo_count(), count);
+    }
+
+    #[test]
+    fn merging_only_folders_does_nothing() {
+        // A multi-selection merges only when something with pixels is in it.
+        let mut s = session();
+        let mut first = ImageLayer::blank("Folder 1", CGSize::new(100.0, 100.0));
+        first.is_group = true;
+        let mut second = ImageLayer::blank("Folder 2", CGSize::new(100.0, 100.0));
+        second.is_group = true;
+        let (first_id, second_id) = (first.id, second.id);
+        s.document.as_mut().unwrap().layers = vec![first, second];
+        s.active_layer_id = Some(first_id);
+        s.selected_layer_ids = vec![first_id, second_id];
+        assert!(!s.can_merge_layers());
+        let count = s.history.undo_count();
+        s.merge_layers();
+        assert_eq!(s.history.undo_count(), count);
+        assert_eq!(s.document.as_ref().unwrap().layers.len(), 2);
+    }
+
+    #[test]
+    fn merging_a_folder_with_its_own_contents_backs_out() {
+        // The result would parent to the very folder the merge removes, so the
+        // hierarchy check refuses and nothing changes (LayerMerge.swift:66).
+        let mut s = session();
+        let mut folder = ImageLayer::blank("Folder", CGSize::new(100.0, 100.0));
+        folder.is_group = true;
+        let mut child = ImageLayer::blank("Inner", CGSize::new(100.0, 100.0));
+        child.parent_id = Some(folder.id);
+        child.asset = Some(ImportedImage::new(red_image(50), "Inner"));
+        let (folder_id, child_id) = (folder.id, child.id);
+        s.document.as_mut().unwrap().layers = vec![folder, child];
+        s.active_layer_id = Some(child_id);
+        s.selected_layer_ids = vec![folder_id, child_id];
+        assert!(s.can_merge_layers(), "the plan itself is fine");
+        let count = s.history.undo_count();
+        s.merge_layers();
+        assert_eq!(s.history.undo_count(), count, "validate fails, no merge");
+        assert_eq!(s.document.as_ref().unwrap().layers.len(), 2);
+    }
+
+    #[test]
+    fn merging_a_selection_names_the_result_for_the_topmost() {
+        let mut s = session();
+        s.add_blank_layer();
+        {
+            let doc = s.document.as_mut().unwrap();
+            doc.layers[0].asset = Some(ImportedImage::new(red_image(50), "bottom"));
+            doc.layers[1].asset = Some(ImportedImage::new(red_image(50), "top"));
+        }
+        let ids: Vec<Uuid> = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        s.selected_layer_ids = ids;
+        assert_eq!(s.merge_title(), "Merge Layers");
+        s.merge_layers();
+        assert_eq!(s.history.undo_name(), "Merge Layers");
+        let doc = s.document.as_ref().unwrap();
+        assert_eq!(doc.layers.len(), 1);
+        // The topmost selected layer names the result and owns its slot.
+        assert_eq!(doc.layers[0].name, "Layer 2");
+        assert_eq!(Some(doc.layers[0].id), s.active_layer_id);
+    }
+
+    #[test]
+    fn merge_waits_for_the_crop_draft() {
+        let mut s = session();
+        s.add_blank_layer();
+        s.crop_rect = Some(CGRect::new(0.0, 0.0, 50.0, 50.0));
+        assert!(!s.can_merge_layers());
+        let count = s.history.undo_count();
+        s.merge_layers();
+        assert_eq!(s.history.undo_count(), count);
+        s.cancel_crop();
+        assert!(s.can_merge_layers());
+        assert_eq!(s.merge_title(), "Merge Down");
+    }
+
+    #[test]
+    fn preview_blend_mode_is_temporary() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(Bitmap::new(10, 10), "L"));
+        s.mark_saved();
+        let id = s.active_layer_id.unwrap();
+        let count = s.history.undo_count();
+        s.set_preview_blend_mode(Some(LayerBlendMode::Multiply), Some(id));
+        assert_eq!(s.blend_preview, Some((id, LayerBlendMode::Multiply)));
+        assert_eq!(
+            s.displayed_blend_mode(s.active_layer().unwrap()),
+            LayerBlendMode::Multiply
+        );
+        assert_eq!(s.active_layer().unwrap().blend_mode, LayerBlendMode::Normal);
+        assert_eq!(s.history.undo_count(), count, "a preview is no edit");
+        assert!(!s.is_modified(), "and never touches the saved state");
+        // Clearing, or a foreign layer id, drops it.
+        s.set_preview_blend_mode(None, None);
+        assert_eq!(s.blend_preview, None);
+        s.set_preview_blend_mode(Some(LayerBlendMode::Multiply), Some(Uuid::new_v4()));
+        assert_eq!(s.blend_preview, None);
+        // Committing the mode drops it too.
+        s.set_preview_blend_mode(Some(LayerBlendMode::Multiply), Some(id));
+        s.set_layer_blend_mode(LayerBlendMode::Multiply);
+        assert_eq!(s.blend_preview, None);
+        assert_eq!(s.history.undo_name(), "Layer Blend Mode");
+        // A committed transform drops it as well.
+        s.set_preview_blend_mode(Some(LayerBlendMode::Multiply), Some(id));
+        s.begin_transform();
+        s.commit_transform();
+        assert_eq!(s.blend_preview, None);
+        // Folders have no appearance to preview.
+        s.add_group();
+        let folder = s.active_layer_id.unwrap();
+        s.set_preview_blend_mode(Some(LayerBlendMode::Screen), Some(folder));
+        assert_eq!(s.blend_preview, None);
+    }
+
+    #[test]
+    fn nudges_open_a_transient_transform() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(Bitmap::new(50, 50), "L"));
+        s.begin_transform_persistent(false);
+        assert!(!s.transform_edit.as_ref().unwrap().persistent);
+        s.cancel_transform();
+        s.begin_transform();
+        assert!(s.transform_edit.as_ref().unwrap().persistent);
+        s.cancel_transform();
+        // The nudge itself opens, moves, and commits in one step.
+        s.nudge_layer(3.0, 0.0);
+        assert!(s.transform_edit.is_none());
+        assert_eq!(
+            s.active_layer().unwrap().transform.origin,
+            CGPoint::new(3.0, 0.0)
+        );
+        assert_eq!(s.history.undo_name(), "Transform Layer");
     }
 
     #[test]

@@ -284,6 +284,22 @@ impl LayerAdjustment {
             && self.hue.abs() <= 360.0
             && self.saturation.abs() <= 100.0
             && self.lightness.abs() <= 100.0
+            // The per-range subdivision settings (`resolvedHSV`): each range's
+            // sliders obey the same bounds as the master ones, and every band
+            // handle must be a real number (LayerAdjustment.swift:129-136).
+            && self.resolved_hsv().adjustments.values().all(|a| {
+                a.hue.is_finite()
+                    && a.hue.abs() <= 360.0
+                    && a.saturation.is_finite()
+                    && a.saturation.abs() <= 100.0
+                    && a.lightness.is_finite()
+                    && a.lightness.abs() <= 100.0
+            })
+            && self
+                .resolved_hsv()
+                .bands
+                .values()
+                .all(|b| b.handles().iter().all(|h| h.is_finite()))
             && self.levels.ranges.len() == 4
             && self.levels.ranges.iter().all(|r| *r == r.normalized())
             && self.curves.is_valid()
@@ -375,6 +391,57 @@ mod tests {
         let hsv = a.resolved_hsv();
         assert_eq!(hsv.hue(), 30.0);
         assert_eq!(hsv.saturation(), 10.0);
+    }
+
+    #[test]
+    fn hsv_range_adjustments_are_validated() {
+        // Each range's subdivision sliders obey the same bounds as the master
+        // ones (LayerAdjustment.swift:129-133).
+        let mut a = LayerAdjustment::new(AdjustmentKind::Hsv);
+        assert!(a.is_valid());
+        let mut settings = a.resolved_hsv();
+        settings.adjustments.insert(
+            crate::adjust::ColorRange::Reds,
+            crate::adjust::RangeAdjustment { hue: 400.0, saturation: 0.0, lightness: 0.0 },
+        );
+        a.hsv_settings = Some(settings);
+        assert!(!a.is_valid(), "a range hue past ±360 is invalid");
+        let mut settings = a.resolved_hsv();
+        settings.adjustments.insert(
+            crate::adjust::ColorRange::Reds,
+            crate::adjust::RangeAdjustment { hue: 0.0, saturation: 200.0, lightness: -150.0 },
+        );
+        a.hsv_settings = Some(settings);
+        assert!(!a.is_valid(), "range saturation/lightness past ±100 are invalid");
+        // Back inside the bounds the settings are fine again.
+        let mut settings = a.resolved_hsv();
+        settings.adjustments.insert(
+            crate::adjust::ColorRange::Reds,
+            crate::adjust::RangeAdjustment { hue: 180.0, saturation: 100.0, lightness: -100.0 },
+        );
+        a.hsv_settings = Some(settings);
+        assert!(a.is_valid());
+        // A non-finite value is invalid whatever its size.
+        let mut settings = a.resolved_hsv();
+        settings.adjustments.insert(
+            crate::adjust::ColorRange::Blues,
+            crate::adjust::RangeAdjustment { hue: f64::NAN, saturation: 0.0, lightness: 0.0 },
+        );
+        a.hsv_settings = Some(settings);
+        assert!(!a.is_valid());
+    }
+
+    #[test]
+    fn hsv_band_handles_must_be_finite() {
+        let mut a = LayerAdjustment::new(AdjustmentKind::Hsv);
+        let mut settings = a.resolved_hsv();
+        let band = crate::adjust::HueBand {
+            falloff_start: f64::NAN,
+            ..crate::adjust::ColorRange::Reds.default_band()
+        };
+        settings.bands.insert(crate::adjust::ColorRange::Reds, band);
+        a.hsv_settings = Some(settings);
+        assert!(!a.is_valid(), "a NaN band handle is invalid");
     }
 
     #[test]
