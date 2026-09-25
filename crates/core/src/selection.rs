@@ -316,8 +316,44 @@ fn line_to_points(line: &LineString<f64>) -> Vec<CGPoint> {    let mut pts: Vec<
 }
 
 fn polygons_from_rings(rings: &[Vec<CGPoint>]) -> MultiPolygon<f64> {
-    // Group rings into polygons: a ring inside another is its hole.
-    let mut polys: Vec<GeoPolygon<f64>> = Vec::new();
+    // Group rings into a containment forest: each ring's parent is the
+    // *smallest-area* ring that contains it — never merely the first
+    // enclosing outline seen, which mispairs three-level nesting (an island
+    // inside a hole became a second hole and inverted the selection). Even
+    // nesting depth is a polygon's exterior, odd depth its hole, and islands
+    // inside holes are polygons of their own — the same arbitrary nesting
+    // CGPath's winding fill handles natively.
+    let valid: Vec<&Vec<CGPoint>> = rings.iter().filter(|ring| ring.len() >= 3).collect();
+    let count = valid.len();
+    let areas: Vec<f64> = valid.iter().map(|ring| signed_area(ring).abs()).collect();
+    let bounds: Vec<RingBounds> = valid.iter().map(|ring| ring_bounds(ring)).collect();
+    let mut parent: Vec<Option<usize>> = vec![None; count];
+    for (j, ring) in valid.iter().enumerate() {
+        let mut best: Option<usize> = None;
+        for (i, container) in valid.iter().enumerate() {
+            if i == j || areas[i] <= areas[j] || !bounds[i].contains_rect(&bounds[j]) {
+                // A container strictly encloses its child, so its area — and
+                // its bounding box — must be the larger one.
+                continue;
+            }
+            if ring_contains(container, ring) {
+                best = Some(match best {
+                    Some(k) if areas[k] <= areas[i] => k,
+                    _ => i,
+                });
+            }
+        }
+        parent[j] = best;
+    }
+    let depth = |start: usize| -> usize {
+        let mut steps = 0;
+        let mut j = start;
+        while let Some(ancestor) = parent[j] {
+            steps += 1;
+            j = ancestor;
+        }
+        steps
+    };
     let to_line = |ring: &Vec<CGPoint>| -> LineString<f64> {
         let mut coords: Vec<Coord<f64>> = ring.iter().map(|p| Coord { x: p.x, y: p.y }).collect();
         if let (Some(first), Some(last)) = (coords.first().copied(), coords.last().copied()) {
@@ -327,27 +363,62 @@ fn polygons_from_rings(rings: &[Vec<CGPoint>]) -> MultiPolygon<f64> {
         }
         LineString::from(coords)
     };
-    for ring in rings {
-        if ring.len() < 3 {
-            continue;
+    let mut polys: Vec<GeoPolygon<f64>> = Vec::new();
+    for (j, ring) in valid.iter().enumerate() {
+        if depth(j) % 2 != 0 {
+            continue; // A hole; it is already its parent's interior.
         }
-        let line = to_line(ring);
-        let bounds = ring_bounds(ring);
-        // Find an enclosing polygon already collected.
-        let mut parent: Option<usize> = None;
-        for (index, poly) in polys.iter().enumerate() {
-            let outer = ring_bounds_poly(poly);
-            if outer.contains_rect(&bounds) {
-                parent = Some(index);
-                break;
-            }
-        }
-        match parent {
-            Some(index) => polys[index].interiors_push(line),
-            None => polys.push(GeoPolygon::new(line, vec![])),
-        }
+        let interiors: Vec<LineString<f64>> = (0..count)
+            .filter(|k| parent[*k] == Some(j))
+            .map(|k| to_line(valid[k]))
+            .collect();
+        polys.push(GeoPolygon::new(to_line(ring), interiors));
     }
     MultiPolygon::new(polys)
+}
+
+/// Whether `ring` lies within `container`: every vertex inside or on the
+/// container's boundary, and at least one strictly inside. Outlines produced
+/// by tracing or the boolean engine never cross, so rings are disjoint or
+/// nested and a vertex test settles containment; requiring every vertex
+/// inside keeps a ring that merely shares a corner (diagonal pixels trace
+/// rings that touch at one vertex) from counting as contained.
+fn ring_contains(container: &[CGPoint], ring: &[CGPoint]) -> bool {
+    let mut strictly_inside = false;
+    for p in ring {
+        if ring_winding(container, p.x, p.y) != 0 {
+            strictly_inside = true;
+        } else if !point_on_ring(container, *p) {
+            return false;
+        }
+    }
+    strictly_inside
+}
+
+/// Whether `p` lies on one of the ring's edges (to floating tolerance).
+fn point_on_ring(ring: &[CGPoint], p: CGPoint) -> bool {
+    let n = ring.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        if point_on_segment(ring[j], ring[i], p) {
+            return true;
+        }
+        j = i;
+    }
+    false
+}
+
+fn point_on_segment(a: CGPoint, b: CGPoint, p: CGPoint) -> bool {
+    let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    if cross.abs() > 1e-9 {
+        return false;
+    }
+    let along = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
+    if along < -1e-9 {
+        return false;
+    }
+    let length2 = (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y);
+    along <= length2 + 1e-9
 }
 
 struct RingBounds {
@@ -380,15 +451,6 @@ fn ring_bounds(ring: &[CGPoint]) -> RingBounds {
         max_x,
         max_y,
     }
-}
-
-fn ring_bounds_poly(poly: &GeoPolygon<f64>) -> RingBounds {
-    let pts: Vec<CGPoint> = poly
-        .exterior()
-        .coords()
-        .map(|c| CGPoint::new(c.x, c.y))
-        .collect();
-    ring_bounds(&pts)
 }
 
 /// A document-space selection outline, clipped to the canvas. `None` on the
@@ -759,24 +821,32 @@ fn sort_dedup(values: &mut Vec<f64>) {
 fn winding_contains(rings: &[Vec<CGPoint>], px: f64, py: f64) -> bool {
     let mut winding = 0i32;
     for ring in rings {
-        let n = ring.len();
-        if n < 3 {
-            continue;
-        }
-        let mut j = n - 1;
-        for i in 0..n {
-            let a = ring[j];
-            let b = ring[i];
-            if (a.y > py) != (b.y > py) {
-                let x_at = (a.x - b.x) * (py - b.y) / (a.y - b.y) + b.x;
-                if px < x_at {
-                    winding += if a.y < b.y { 1 } else { -1 };
-                }
-            }
-            j = i;
-        }
+        winding += ring_winding(ring, px, py);
     }
     winding != 0
+}
+
+/// One ring's winding-number contribution at a point: +1 per crossing of an
+/// edge pointing down, -1 for up.
+fn ring_winding(ring: &[CGPoint], px: f64, py: f64) -> i32 {
+    let n = ring.len();
+    if n < 3 {
+        return 0;
+    }
+    let mut winding = 0i32;
+    let mut j = n - 1;
+    for i in 0..n {
+        let a = ring[j];
+        let b = ring[i];
+        if (a.y > py) != (b.y > py) {
+            let x_at = (a.x - b.x) * (py - b.y) / (a.y - b.y) + b.x;
+            if px < x_at {
+                winding += if a.y < b.y { 1 } else { -1 };
+            }
+        }
+        j = i;
+    }
+    winding
 }
 
 /// `DragBox.rect(from:to:square:fromCenter:)` — the box a drag from `anchor` to
@@ -1097,6 +1167,129 @@ mod tests {
             ],
         };
         assert!(!path.contains(CGPoint::new(50.0, 50.0)));
+    }
+
+    /// A rectangular ring, `reverse` flipping it to the opposite winding.
+    fn square_ring(x0: f64, y0: f64, x1: f64, y1: f64, reverse: bool) -> Vec<CGPoint> {
+        let mut ring = vec![
+            CGPoint::new(x0, y0),
+            CGPoint::new(x1, y0),
+            CGPoint::new(x1, y1),
+            CGPoint::new(x0, y1),
+        ];
+        if reverse {
+            ring.reverse();
+        }
+        ring
+    }
+
+    #[test]
+    fn three_level_nesting_keeps_the_island_inside_the_hole() {
+        // Outer CCW, middle CW (a hole), inner CCW: an island inside the
+        // hole. The old grouping took the first enclosing bounding box, so
+        // the island became a second hole of the outer and inverted the
+        // selection; the smallest-container rule pairs it on its own.
+        let path = SelectionPath {
+            rings: vec![
+                square_ring(0.0, 0.0, 40.0, 40.0, false),
+                square_ring(10.0, 10.0, 30.0, 30.0, true),
+                square_ring(16.0, 16.0, 24.0, 24.0, false),
+            ],
+        };
+        let multi = path.to_geo();
+        assert_eq!(multi.iter().count(), 2, "the island is a polygon of its own");
+        let polygons: Vec<_> = multi.iter().collect();
+        assert_eq!(polygons[0].interiors().len(), 1, "only the middle ring is the outer's hole");
+        assert_eq!(polygons[1].interiors().len(), 0);
+        // Round-tripped back through the rings, the winding fill shows outer
+        // and island solid with the middle ring empty.
+        let mask = rasterize(&SelectionPath::from_geo(&multi), 40, 40, false);
+        assert_eq!(mask.value(5, 5), 255);
+        assert_eq!(mask.value(12, 12), 0, "the middle ring is a hole");
+        assert_eq!(mask.value(20, 20), 255, "the island survives");
+        assert_eq!(mask.value(27, 27), 0);
+    }
+
+    #[test]
+    fn sibling_holes_share_one_parent() {
+        let path = SelectionPath {
+            rings: vec![
+                square_ring(0.0, 0.0, 40.0, 40.0, false),
+                square_ring(4.0, 4.0, 12.0, 12.0, true),
+                square_ring(28.0, 28.0, 36.0, 36.0, true),
+            ],
+        };
+        let multi = path.to_geo();
+        assert_eq!(multi.iter().count(), 1);
+        let polygon = multi.iter().next().unwrap();
+        assert_eq!(polygon.interiors().len(), 2);
+        let mask = rasterize(&SelectionPath::from_geo(&multi), 40, 40, false);
+        assert_eq!(mask.value(8, 8), 0);
+        assert_eq!(mask.value(32, 32), 0);
+        assert_eq!(mask.value(20, 20), 255);
+    }
+
+    #[test]
+    fn hole_inside_island_nests_to_full_depth() {
+        // Four levels: outer, hole, island in the hole, hole in the island.
+        // Each ring must pair with the smallest container, not the first.
+        let path = SelectionPath {
+            rings: vec![
+                square_ring(0.0, 0.0, 50.0, 50.0, false),
+                square_ring(5.0, 5.0, 45.0, 45.0, true),
+                square_ring(10.0, 10.0, 40.0, 40.0, false),
+                square_ring(20.0, 20.0, 30.0, 30.0, true),
+            ],
+        };
+        let multi = path.to_geo();
+        let polygons: Vec<_> = multi.iter().collect();
+        assert_eq!(polygons.len(), 2);
+        assert_eq!(polygons[0].interiors().len(), 1);
+        assert_eq!(polygons[1].interiors().len(), 1);
+        let mask = rasterize(&SelectionPath::from_geo(&multi), 50, 50, false);
+        assert_eq!(mask.value(2, 25), 255);
+        assert_eq!(mask.value(7, 25), 0);
+        assert_eq!(mask.value(15, 25), 255, "the island is solid again");
+        assert_eq!(mask.value(25, 25), 0, "the island's own hole is empty");
+    }
+
+    #[test]
+    fn island_in_hole_survives_subsequent_booleans() {
+        // The real workflow that broke: a donut gains an island in its hole,
+        // and a later edit regroups the combined path's rings. With the old
+        // first-enclosing-bounds pick the island turned into a second hole
+        // and the edit erased it.
+        let donut = rect_path(0.0, 0.0, 40.0, 40.0).subtract(&rect_path(10.0, 10.0, 30.0, 30.0));
+        let island = rect_path(15.0, 15.0, 5.0, 5.0);
+        let combined = donut.union(&island);
+        let clipped = combined.subtract(&rect_path(0.0, 0.0, 40.0, 4.0));
+        let mask = rasterize(&clipped, 40, 40, false);
+        assert_eq!(mask.value(2, 2), 0, "the subtracted strip is gone");
+        assert_eq!(mask.value(2, 7), 255, "the rest of the rim stays");
+        assert_eq!(mask.value(17, 17), 255, "the island survives the re-grouping");
+        assert_eq!(mask.value(12, 12), 0);
+    }
+
+    #[test]
+    fn rings_touching_at_a_corner_stay_disjoint() {
+        // Two diagonal one-pixel squares trace rings sharing one vertex;
+        // neither contains the other, so both are exteriors.
+        let path = SelectionPath {
+            rings: vec![
+                square_ring(0.0, 0.0, 1.0, 1.0, false),
+                square_ring(1.0, 1.0, 2.0, 2.0, false),
+            ],
+        };
+        let multi = path.to_geo();
+        assert_eq!(multi.iter().count(), 2);
+        for polygon in multi.iter() {
+            assert_eq!(polygon.interiors().len(), 0);
+        }
+        let mask = rasterize(&SelectionPath::from_geo(&multi), 2, 2, false);
+        assert_eq!(mask.value(0, 0), 255);
+        assert_eq!(mask.value(1, 1), 255);
+        assert_eq!(mask.value(1, 0), 0);
+        assert_eq!(mask.value(0, 1), 0);
     }
 
     #[test]

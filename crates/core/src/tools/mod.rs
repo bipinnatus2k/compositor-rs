@@ -8,6 +8,8 @@ pub mod clone_stamp;
 pub mod distort;
 pub mod content_fill;
 pub mod heal;
+pub mod mask_tracing;
+pub mod object_selection;
 pub mod subject_removal;
 pub mod text;
 pub mod warp;
