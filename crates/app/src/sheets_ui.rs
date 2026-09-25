@@ -12,6 +12,8 @@ use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::Sizable;
 
 use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
+use compositor_core::document::PaletteColor;
+use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::FilterKind;
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::Bitmap;
@@ -29,6 +31,7 @@ fn sheet_title(kind: SheetKind) -> &'static str {
         SheetKind::CanvasSize => "Canvas Size",
         SheetKind::Levels => "Levels",
         SheetKind::HueSaturation => "Hue/Saturation",
+        SheetKind::Effects => "Layer Effects",
         SheetKind::Filter(FilterKind::GaussianBlur) => "Gaussian Blur",
         SheetKind::Filter(FilterKind::MotionBlur) => "Motion Blur",
         SheetKind::Filter(FilterKind::AddNoise) => "Add Noise",
@@ -431,6 +434,73 @@ impl AppState {
                         .into_any_element(),
                     ));
             }
+            SheetKind::Effects => {
+                let sheet = self.sheet.as_ref().unwrap();
+                // The edited kind rides in `channel`; see build_sheet.
+                let kind = LayerEffectKind::ALL
+                    .get(sheet.channel)
+                    .copied()
+                    .unwrap_or(LayerEffectKind::Stroke);
+                let inside = sheet.checkbox_a;
+                let sliders = sheet.sliders.clone();
+                let color = self.session.editing_effects().color(kind);
+                body = body.child(text_label(kind.label(), false).text_size(px(13.0)).mb_1());
+                match kind {
+                    // Position is the segmented Outside/Inside picker in
+                    // EffectsSheet.swift; here it is a dropdown, stored in
+                    // `checkbox_a` (false = Outside).
+                    LayerEffectKind::Stroke => {
+                        body = body
+                            .child(sheet_row(
+                                "Position",
+                                dropdown(
+                                    &app,
+                                    "effect-position",
+                                    if inside { "Inside" } else { "Outside" },
+                                    px(110.0),
+                                    vec![
+                                        MenuEntry::new("Outside", |state, _, cx| {
+                                            set_stroke_inside(state, false, cx)
+                                        }),
+                                        MenuEntry::new("Inside", |state, _, cx| {
+                                            set_stroke_inside(state, true, cx)
+                                        }),
+                                    ],
+                                ),
+                            ))
+                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
+                            .child(labeled_slider_sheet(&sliders, 0, "Size (px)"))
+                            .child(labeled_slider_sheet(&sliders, 1, "Opacity (%)"));
+                    }
+                    LayerEffectKind::Shadow => {
+                        body = body
+                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
+                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"))
+                            .child(labeled_slider_sheet(&sliders, 1, "Angle (°)"))
+                            .child(labeled_slider_sheet(&sliders, 2, "Distance (px)"))
+                            .child(labeled_slider_sheet(&sliders, 3, "Blur (px)"));
+                    }
+                    LayerEffectKind::ColorOverlay => {
+                        body = body
+                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
+                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"));
+                    }
+                    LayerEffectKind::InnerShadow => {
+                        body = body
+                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
+                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"))
+                            .child(labeled_slider_sheet(&sliders, 1, "Angle (°)"))
+                            .child(labeled_slider_sheet(&sliders, 2, "Distance (px)"))
+                            .child(labeled_slider_sheet(&sliders, 3, "Blur (px)"));
+                    }
+                    LayerEffectKind::OuterGlow | LayerEffectKind::InnerGlow => {
+                        body = body
+                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
+                            .child(labeled_slider_sheet(&sliders, 0, "Size (px)"))
+                            .child(labeled_slider_sheet(&sliders, 1, "Opacity (%)"));
+                    }
+                }
+            }
             SheetKind::Filter(filter) => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let sliders = sheet.sliders.clone();
@@ -706,6 +776,12 @@ impl AppState {
     }
 
     pub fn cancel_sheet(&mut self, cx: &mut Context<Self>) {
+        // The Effects sheet's Cancel finishes editing without committing:
+        // the edited effect returns to its opening state (Swift's
+        // finishEffectsEditing(commit: false)).
+        if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Effects) {
+            self.session.finish_effects_editing(false);
+        }
         self.close_sheet(cx);
     }
 
@@ -782,6 +858,11 @@ impl AppState {
             }
             SheetKind::Levels => self.commit_preview("Levels", cx),
             SheetKind::HueSaturation => self.commit_preview("Hue/Saturation", cx),
+            SheetKind::Effects => {
+                // Every change was already a committed undo step; OK just
+                // ends the editing session and keeps the effects.
+                self.session.finish_effects_editing(true);
+            }
             SheetKind::Filter(filter) => self.commit_preview(filter.label(), cx),
             SheetKind::Amount(_) => {
                 let amount = {
@@ -1117,6 +1198,45 @@ fn set_channel(state: &mut AppState, channel: usize, cx: &mut Context<AppState>)
         sheet.channel = channel;
     }
     state.notify_only(cx);
+}
+
+/// Stroke position (EffectsSheet's segmented Outside/Inside picker): the
+/// change goes through the session like every slider, so the canvas and the
+/// undo trail follow.
+fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppState>) {
+    state.session.change_effects(|effects| {
+        if let Some(stroke) = effects.stroke.as_mut() {
+            stroke.inside = inside;
+        }
+    });
+    if let Some(sheet) = state.sheet.as_mut() {
+        sheet.checkbox_a = inside;
+    }
+    state.touch(cx);
+}
+
+/// The effect's color chip (EffectsSheet.swift's swatch); clicking opens the
+/// app's color picker on it.
+fn effect_swatch(
+    color: Option<PaletteColor>,
+    kind: LayerEffectKind,
+    cx: &mut Context<AppState>,
+) -> gpui_kit::AnyElement {
+    let color = color.unwrap_or_default();
+    let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let rgb = (channel(color.red) << 16) | (channel(color.green) << 8) | channel(color.blue);
+    gpui_kit::div()
+        .id(SharedString::from(format!("effect-swatch-{}", kind.label())))
+        .w(px(36.0))
+        .h(px(18.0))
+        .rounded_xs()
+        .border_1()
+        .border_color(gpui_kit::rgb(0x111111))
+        .bg(gpui_kit::rgb(rgb))
+        .on_click(cx.listener(move |state, _, _, cx| {
+            state.open_effect_color_picker(kind, cx);
+        }))
+        .into_any_element()
 }
 
 fn make_side_handler(

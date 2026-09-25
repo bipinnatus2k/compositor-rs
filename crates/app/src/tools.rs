@@ -121,22 +121,31 @@ impl AppState {
             rail = rail.child(tool_button(tool, letter, name, selected, cx));
         }
 
-        // Foreground / background swatches (click swaps).
+        // Foreground / background swatches: clicking either opens the color
+        // picker on it (ColorPalette.swift:60; the X key still swaps).
         let foreground = self.session.palette_color(false);
         let background = self.session.palette_color(true);
         rail = rail.child(
             gpui_kit::div()
                 .mt_2()
-                .id("palette-swap")
+                .id("palette")
                 .w(px(28.0))
                 .h(px(28.0))
                 .relative()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.session.swap_palette_colors();
-                    this.touch(cx);
-                }))
-                .child(swatch(6.0, 6.0, background))
-                .child(swatch(0.0, 0.0, foreground)),
+                .child(
+                    swatch(6.0, 6.0, background)
+                        .id("swatch-background")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_color_picker_ui(true, window, cx);
+                        })),
+                )
+                .child(
+                    swatch(0.0, 0.0, foreground)
+                        .id("swatch-foreground")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_color_picker_ui(false, window, cx);
+                        })),
+                ),
         );
 
         rail.into_any_element()

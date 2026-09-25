@@ -10,6 +10,7 @@ use gpui_kit::component::Sizable;
 
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
+use compositor_core::effects::LayerEffectKind;
 
 use crate::state::AppState;
 use crate::ui::{dropdown, text_label, MenuEntry};
@@ -155,6 +156,16 @@ impl AppState {
                         this.add_group(cx);
                     },
                 )))
+                // The effects menu (LayersPanel.swift's sparkles): one entry
+                // per effect kind; choosing one adds it to the active layer
+                // and opens its editor sheet.
+                .child(dropdown(
+                    &app,
+                    "layer-fx",
+                    "Fx",
+                    px(52.0),
+                    self.effects_menu_entries(),
+                ))
                 .child(footer_button("layer-dup", "Dup", "Duplicate Layer", cx.listener(
                     |this, _, _, cx| {
                         this.session.duplicate_active_layer();
@@ -183,6 +194,22 @@ impl AppState {
 
         let _ = (&app, can_edit);
         panel.into_any_element()
+    }
+
+    /// The layer-effect kinds (LayersPanel.swift's sparkles menu), disabled
+    /// unless the active layer can take effects.
+    fn effects_menu_entries(&self) -> Vec<MenuEntry> {
+        let enabled = self.session.can_edit_effects();
+        LayerEffectKind::ALL
+            .iter()
+            .map(|kind| {
+                let kind = *kind;
+                MenuEntry::new(format!("{}…", kind.label()), move |state, window, cx| {
+                    state.add_effect(kind, window, cx);
+                })
+                .disabled(!enabled)
+            })
+            .collect()
     }
 
     /// The 24 blend modes, grouped with separators like the original menu.

@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    canvas, div, px, point, rgb, rgba, size, Bounds, Context, Corners, IntoElement,
-    InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathBuilder, Pixels, Point, RenderImage, ScrollWheelEvent, ScrollDelta, Window,
+    canvas, div, px, point, rgb, rgba, size, Bounds, Context, Corners, DispatchPhase,
+    IntoElement, InteractiveElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, RenderImage,
+    ScrollWheelEvent, ScrollDelta, Window,
 };
 use gpui_kit::Styled;
 
@@ -87,6 +88,7 @@ impl AppState {
                     move |bounds, _prepaint, window, _cx| {
                         paint_scene(&scene, bounds, window);
                         install_drag_events(&app_move, &app_up, window);
+                        install_key_events(&app_move, window);
                     },
                 )
                 .absolute()
@@ -879,12 +881,14 @@ impl AppState {
 
     /// Escape: cancel the active edit, or close the sheet.
     pub fn cancel_active(&mut self, cx: &mut Context<Self>) {
-        if self.sheet.take().is_some() {
-            self.preview = None;
-            self.preview_base = None;
-            self.preview_base_transform = None;
-            self.gradient_cursor = None;
-            self.touch(cx);
+        if self.session.color_picker.is_some() {
+            self.close_color_picker_ui(false, cx);
+            return;
+        }
+        if self.sheet.is_some() {
+            // Route through cancel_sheet so sheet-specific cancel semantics
+            // run (the Effects sheet restores the edited effect).
+            self.cancel_sheet(cx);
             return;
         }
         if self.session.lasso_draft.take().is_some() {
@@ -1425,6 +1429,32 @@ fn install_drag_events(
     window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
         app_up
             .update(cx, |state, cx| state.canvas_mouse_up(event, window, cx))
+            .ok();
+    });
+}
+
+/// Registers the window-level key listeners for the canvas keys the action
+/// system can't express: Space's hold-to-pan (needs keyUp), the opacity
+/// digits, Option-arrow text spacing and ⌘Return finishing text
+/// (`EditorCanvas.keyDown`/`keyUp`). Listeners run each frame, so they must
+/// be re-registered during paint like the drag events above.
+fn install_key_events(app: &gpui_kit::WeakEntity<AppState>, window: &mut Window) {
+    let app_down = app.clone();
+    window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        app_down
+            .update(cx, |state, cx| state.canvas_key_down(event, window, cx))
+            .ok();
+    });
+    let app_up = app.clone();
+    window.on_key_event(move |event: &KeyUpEvent, phase, window, cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        app_up
+            .update(cx, |state, cx| state.canvas_key_up(event, window, cx))
             .ok();
     });
 }

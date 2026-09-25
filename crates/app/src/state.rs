@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::{
-    px, App, AppContext, Bounds, Context, Entity, FocusHandle, Pixels, Point, RenderImage,
-    Subscription, Window,
+    px, App, AppContext, Bounds, Context, DispatchPhase, Entity, FocusHandle, KeyDownEvent,
+    KeyUpEvent, Pixels, Point, RenderImage, Subscription, Window,
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::WindowExt;
@@ -81,6 +81,7 @@ pub enum SheetKind {
     CanvasSize,
     Levels,
     HueSaturation,
+    Effects,
     Filter(FilterKind),
     Amount(SelectionAmountOperation),
     ExportPng,
@@ -165,6 +166,13 @@ pub struct AppState {
     /// The active layer's opacity (Layers panel header).
     pub opacity_slider: Entity<SliderState>,
     pub subscriptions: Vec<Subscription>,
+    /// The tool saved while Space temporarily turns the canvas into the Hand
+    /// tool (`spaceHeld` in EditorCanvas.swift).
+    pub space_saved_tool: Option<compositor_core::document::NavigationTool>,
+    /// The open color picker's widgets (`color_picker_ui`).
+    pub picker_ui: Option<crate::color_picker_ui::PickerUi>,
+    /// Monotonic epoch for the opacity-digit pair window (0.6 s).
+    key_epoch: std::time::Instant,
 }
 
 /// Creates a slider with the given range and initial value.
@@ -225,9 +233,186 @@ impl AppState {
             gradient_slider,
             opacity_slider,
             subscriptions: Vec::new(),
+            space_saved_tool: None,
+            picker_ui: None,
+            key_epoch: std::time::Instant::now(),
         };
         state.subscribe_sliders(cx);
         state
+    }
+
+    /// Monotonic seconds since the app started (`systemUptime`).
+    pub fn uptime(&self) -> f64 {
+        self.key_epoch.elapsed().as_secs_f64()
+    }
+
+    /// Space keyDown: the canvas pans until the key comes back up
+    /// (EditorCanvas.swift:1825).
+    pub fn space_down(&mut self, cx: &mut Context<Self>) {
+        if self.space_saved_tool.is_some()
+            || self.session.document.is_none()
+            || self.session.text_draft.is_some()
+        {
+            return;
+        }
+        self.space_saved_tool = Some(self.session.tool);
+        self.session.tool = compositor_core::document::NavigationTool::Hand;
+        self.touch(cx);
+    }
+
+    /// Space keyUp: the saved tool comes back (EditorCanvas.swift:1866).
+    pub fn space_up(&mut self, cx: &mut Context<Self>) {
+        if let Some(tool) = self.space_saved_tool.take() {
+            self.session.tool = tool;
+            self.touch(cx);
+        }
+    }
+
+    /// Number keys set the active tool's opacity (Photoshop-style).
+    pub fn opacity_digit(&mut self, digit: i32, window: &mut Window, cx: &mut Context<Self>) {
+        self.session.type_opacity_digit(digit, self.uptime());
+        // Keep the panel sliders truthful (Swift's bindings follow the same
+        // settings).
+        use compositor_core::document::NavigationTool;
+        let sync: Option<(Entity<SliderState>, f32)> = match self.session.tool {
+            NavigationTool::Brush
+            | NavigationTool::SpotHealing
+            | NavigationTool::CloneStamp
+            | NavigationTool::Blur => Some((
+                self.brush_sliders[2].clone(),
+                (self.session.brush_settings.opacity * 100.0) as f32,
+            )),
+            NavigationTool::Gradient => Some((
+                self.gradient_slider.clone(),
+                (self.session.gradient_settings.opacity * 100.0) as f32,
+            )),
+            NavigationTool::Move => Some((
+                self.opacity_slider.clone(),
+                (self.session.active_layer().map(|l| l.opacity).unwrap_or(1.0) * 100.0) as f32,
+            )),
+            _ => None,
+        };
+        if let Some((slider, value)) = sync {
+            slider.update(cx, |state, cx| {
+                state.set_value(
+                    gpui_kit::component::slider::SliderValue::Single(value),
+                    window,
+                    cx,
+                )
+            });
+        }
+        self.touch(cx);
+    }
+
+    /// Option-arrows step the edited text's tracking (InlineTextEditor.swift:18-19).
+    pub fn adjust_text_tracking(&mut self, delta: f64, cx: &mut Context<Self>) {
+        if self.session.text_draft.is_none() {
+            return;
+        }
+        self.session.change_text_style(|style| style.tracking += delta);
+        self.touch(cx);
+    }
+
+    /// Option-arrows step the edited text's leading, counting from whatever
+    /// Auto works out to; up closes the lines up (InlineTextEditor.swift:20-22).
+    pub fn adjust_text_leading(&mut self, down: bool, step: f64, cx: &mut Context<Self>) {
+        if self.session.text_draft.is_none() {
+            return;
+        }
+        self.session.change_text_style(|style| {
+            style.leading = if down {
+                style.line_height() + step
+            } else {
+                (style.line_height() - step).max(1.0)
+            };
+        });
+        self.touch(cx);
+    }
+
+    /// ⌘Return finishes the text being edited (InlineTextEditor.swift:25-27).
+    pub fn finish_text_edit(&mut self, cx: &mut Context<Self>) {
+        if self.session.text_draft.is_some() {
+            self.session.finish_text();
+            self.touch(cx);
+        }
+    }
+
+    /// The raw canvas keys: Space hold-to-pan, opacity digits, Option-arrow
+    /// text spacing and ⌘Return (`EditorCanvas.keyDown`). Runs on the bubble
+    /// phase; keys that mean something here don't reach the action system.
+    pub fn canvas_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.canvas_keys_active(window, cx) {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let modifiers = &event.keystroke.modifiers;
+        let bare = !(modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift);
+        // ⌘Return finishes the text draft (⌘ maps to Ctrl on Windows).
+        if modifiers.control && !modifiers.alt && key == "enter" {
+            self.finish_text_edit(cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Space holds the Hand tool; a text draft keeps typing into the box.
+        if key == "space" && bare && self.session.text_draft.is_none() {
+            self.space_down(cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Option with the arrows sets the text's spacing: left and right the
+        // tracking, up and down the leading; Shift makes each step ten.
+        if modifiers.alt && !modifiers.control && !modifiers.platform {
+            let step = if modifiers.shift { 10.0 } else { 1.0 };
+            match key {
+                "left" => {
+                    self.adjust_text_tracking(-step, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "right" => {
+                    self.adjust_text_tracking(step, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "up" => {
+                    self.adjust_text_leading(false, step, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "down" => {
+                    self.adjust_text_leading(true, step, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Number keys set opacity when the tool uses it (usesOpacityKeys).
+        if bare {
+            if let Ok(digit) = key.parse::<i32>() {
+                if (0..=9).contains(&digit) {
+                    self.opacity_digit(digit, window, cx);
+                    cx.stop_propagation();
+                }
+            }
+        }
+    }
+
+    /// The raw canvas key releases: Space gives the saved tool back.
+    pub fn canvas_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "space" {
+            self.space_up(cx);
+        }
     }
 
     /// Keeps the session's tool settings in sync with the sliders.

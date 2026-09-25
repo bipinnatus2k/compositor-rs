@@ -10,6 +10,7 @@ use compositor_core::adjust::{
     hue_saturation_apply, levels_apply_settings, ColorRange, LevelsChannel, LevelsSettings,
     RangeAdjustment,
 };
+use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::{FilterKind, FilterSettings};
 
 use crate::state::{AppState, SheetKind, SheetState};
@@ -32,6 +33,12 @@ pub enum SliderRole {
     Distortion,
     CameraRaw(usize),
     JpegQuality,
+    /// One Effects-sheet slider, by its position in the sheet's slider list.
+    /// The edited `LayerEffectKind` rides in `SheetState.channel`, and the
+    /// write-back reads every slider of the sheet at once, so the index only
+    /// tags the slider as an effects one (EffectsSheet.swift's per-kind
+    /// `changeEffects` closures).
+    Effect(usize),
 }
 
 impl AppState {
@@ -162,6 +169,68 @@ impl AppState {
                     self.make_slider(-100.0, 100.0, 0.0, SliderRole::Saturation, cx),
                     self.make_slider(-100.0, 100.0, 0.0, SliderRole::Lightness, cx),
                 ];
+                sheet
+            }
+            SheetKind::Effects => {
+                // No preview capture: every slider change is committed to the
+                // layer's effects right away (one undo step per change, as
+                // Swift's changeEffects does), and the canvas renders effects
+                // through core render.
+                let editing = self.session.editing_effects();
+                let kind = self
+                    .session
+                    .effects_editing
+                    .map(|editing| editing.kind)
+                    .unwrap_or(LayerEffectKind::Stroke);
+                let mut sheet = SheetState { ..base };
+                // `channel` stores which LayerEffectKind this sheet edits (an
+                // index into `LayerEffectKind::ALL`); Levels only reads the
+                // field while a Levels sheet is open, so it is free here.
+                sheet.channel = LayerEffectKind::ALL
+                    .iter()
+                    .position(|candidate| *candidate == kind)
+                    .unwrap_or(0);
+                // Stroke's Outside/Inside position rides in `checkbox_a`.
+                sheet.checkbox_a = editing.stroke.map(|stroke| stroke.inside).unwrap_or(false);
+                // Slider thumb ranges are the EffectsSheet's visible ranges.
+                // Swift's wider typed-input ranges (`inputRange`) have no
+                // text field in this UI, and the core `isValid` guard still
+                // bounds every stored value.
+                let mut slider = |min: f64, max: f64, value: f64, index: usize| {
+                    self.make_slider(min as f32, max as f32, value as f32, SliderRole::Effect(index), cx)
+                };
+                sheet.sliders = match kind {
+                    LayerEffectKind::Stroke => vec![
+                        slider(0.0, 20.0, editing.stroke.map(|s| s.size).unwrap_or(4.0), 0),
+                        slider(0.0, 100.0, editing.stroke.map(|s| s.opacity * 100.0).unwrap_or(100.0), 1),
+                    ],
+                    LayerEffectKind::Shadow => vec![
+                        slider(0.0, 100.0, editing.shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
+                        slider(-180.0, 180.0, editing.shadow.map(|s| s.angle).unwrap_or(90.0), 1),
+                        slider(0.0, 100.0, editing.shadow.map(|s| s.distance).unwrap_or(20.0), 2),
+                        slider(0.0, 100.0, editing.shadow.map(|s| s.blur).unwrap_or(20.0), 3),
+                    ],
+                    LayerEffectKind::ColorOverlay => vec![slider(
+                        0.0,
+                        100.0,
+                        editing.color_overlay.map(|s| s.opacity * 100.0).unwrap_or(100.0),
+                        0,
+                    )],
+                    LayerEffectKind::InnerShadow => vec![
+                        slider(0.0, 100.0, editing.inner_shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
+                        slider(-180.0, 180.0, editing.inner_shadow.map(|s| s.angle).unwrap_or(90.0), 1),
+                        slider(0.0, 50.0, editing.inner_shadow.map(|s| s.distance).unwrap_or(10.0), 2),
+                        slider(0.0, 100.0, editing.inner_shadow.map(|s| s.blur).unwrap_or(10.0), 3),
+                    ],
+                    LayerEffectKind::OuterGlow => vec![
+                        slider(0.0, 100.0, editing.outer_glow.map(|s| s.size).unwrap_or(20.0), 0),
+                        slider(0.0, 100.0, editing.outer_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
+                    ],
+                    LayerEffectKind::InnerGlow => vec![
+                        slider(0.0, 100.0, editing.inner_glow.map(|s| s.size).unwrap_or(10.0), 0),
+                        slider(0.0, 100.0, editing.inner_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
+                    ],
+                };
                 sheet
             }
             SheetKind::Filter(filter) => {
@@ -324,6 +393,9 @@ impl AppState {
                 let settings = self.filter_settings_from_sheet(cx);
                 self.apply_filter_preview(FilterKind::CameraRaw, settings);
             }
+            SliderRole::Effect(_) => {
+                self.apply_effects_sliders(cx);
+            }
             SliderRole::Radius
             | SliderRole::Angle
             | SliderRole::Distance
@@ -474,5 +546,93 @@ impl AppState {
         self.apply_filter_preview(kind, settings);
         self.revision += 1;
         cx.notify();
+    }
+
+    // MARK: Effects sheet
+
+    /// The layers-panel effects menu: adds the effect (which selects and
+    /// starts editing it) and opens the Effects sheet for it. No sheet when
+    /// the add was refused (no editable pixel layer active).
+    pub fn add_effect(
+        &mut self,
+        kind: LayerEffectKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.session.add_effect(kind);
+        if self.session.effects_editing.map(|editing| editing.kind) == Some(kind) {
+            self.open_sheet(SheetKind::Effects, window, cx);
+        }
+        self.touch(cx);
+    }
+
+    /// The Effects sheet's color swatch: opens the color picker on the
+    /// effect's color (EffectsSheet.swift's `openEffectColorPicker`; guards
+    /// and state live on the core session in `color_picker.rs`). Nothing is
+    /// written into the layer until the picker closes.
+    pub fn open_effect_color_picker(&mut self, kind: LayerEffectKind, cx: &mut Context<Self>) {
+        self.session.open_effect_color_picker(kind);
+        self.touch(cx);
+    }
+
+    /// Pushes the Effects sheet's sliders into the bound layer's effect — a
+    /// real undo step per change through `changeEffects`, which is what makes
+    /// the canvas preview live.
+    pub fn apply_effects_sliders(&mut self, cx: &mut Context<Self>) {
+        let (kind, values) = {
+            let cx_app: &gpui_kit::App = cx;
+            let Some(sheet) = self.sheet.as_ref() else { return };
+            let kind = LayerEffectKind::ALL
+                .get(sheet.channel)
+                .copied()
+                .unwrap_or(LayerEffectKind::Stroke);
+            let values: Vec<f64> = (0..sheet.sliders.len())
+                .map(|index| self.sheet_value(cx_app, index) as f64)
+                .collect();
+            (kind, values)
+        };
+        let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
+        self.session.change_effects(move |effects| match kind {
+            LayerEffectKind::Stroke => {
+                if let Some(stroke) = effects.stroke.as_mut() {
+                    stroke.size = value(0);
+                    stroke.opacity = value(1) / 100.0;
+                }
+            }
+            LayerEffectKind::Shadow => {
+                if let Some(shadow) = effects.shadow.as_mut() {
+                    shadow.opacity = value(0) / 100.0;
+                    shadow.angle = value(1);
+                    shadow.distance = value(2);
+                    shadow.blur = value(3);
+                }
+            }
+            LayerEffectKind::ColorOverlay => {
+                if let Some(overlay) = effects.color_overlay.as_mut() {
+                    overlay.opacity = value(0) / 100.0;
+                }
+            }
+            LayerEffectKind::InnerShadow => {
+                if let Some(inner) = effects.inner_shadow.as_mut() {
+                    inner.opacity = value(0) / 100.0;
+                    inner.angle = value(1);
+                    inner.distance = value(2);
+                    inner.blur = value(3);
+                }
+            }
+            LayerEffectKind::OuterGlow => {
+                if let Some(glow) = effects.outer_glow.as_mut() {
+                    glow.size = value(0);
+                    glow.opacity = value(1) / 100.0;
+                }
+            }
+            LayerEffectKind::InnerGlow => {
+                if let Some(glow) = effects.inner_glow.as_mut() {
+                    glow.size = value(0);
+                    glow.opacity = value(1) / 100.0;
+                }
+            }
+        });
+        self.touch(cx);
     }
 }

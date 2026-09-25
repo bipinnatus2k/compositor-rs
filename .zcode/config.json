@@ -1,0 +1,21 @@
+{
+  "mcp": {
+    "servers": {
+      "idea": {
+        "type": "http",
+        "url": "http://127.0.0.1:64342/stream",
+        "headers": {
+          "IJ_MCP_SERVER_PROJECT_PATH": "D:/Project/rust/compositor-rs"
+        }
+      },
+      "my-mcp-server": {
+        "type": "stdio",
+        "command": "C:\\Users\\Admin\\.rust-mcp-stack\\bin\\rust-mcp-filesystem.exe",
+        "args": [
+          "D:\\Project\\rust\\compositor-rs",
+          "~\\.cargo"
+        ]
+      }
+    }
+  }
+}

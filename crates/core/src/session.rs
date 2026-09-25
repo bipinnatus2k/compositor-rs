@@ -23,6 +23,7 @@ use crate::selection::{
 };
 use crate::tools::brush::RasterEdit;
 use crate::transform::{LayerSampling, LayerTransform, TransformEdit};
+use crate::document::PickerHSB;
 use uuid::Uuid;
 
 /// The Blur tool's modes (`BlurToolMode`).
@@ -259,6 +260,10 @@ pub struct EditorSession {
     // The open color picker (ColorPalette.swift:162-192); methods in color_picker.rs
     pub color_picker: Option<ColorPickerState>,
 
+    /// Photoshop-style opacity keys: the first digit waits 0.6 s for a second
+    /// one (EditorSession+Brush.swift:186). `(digit, uptime)`.
+    pub pending_opacity_digit: Option<(i32, f64)>,
+
     // Painting
     pub brush_settings: crate::tools::brush::BrushSettings,
     pub brush_mode: BrushToolMode,
@@ -363,6 +368,7 @@ impl Default for EditorSession {
             effects_editing_original: None,
             effect_selection: None,
             color_picker: None,
+            pending_opacity_digit: None,
             opacity_edit_layer_id: None,
             brush_settings: crate::tools::brush::BrushSettings::default(),
             brush_mode: BrushToolMode::Paint,
@@ -924,6 +930,77 @@ impl EditorSession {
         }
         if standalone {
             self.end_edit();
+        }
+    }
+
+    /// `setSelectedLayersOpacity` (LayerAppearance.swift:108-119) — sets every
+    /// selected layer's opacity as one undo step. A selected folder takes the
+    /// value too, dimming its contents on top of their own opacity.
+    pub fn set_selected_layers_opacity(&mut self, opacity: f64) {
+        if !opacity.is_finite() || !self.can_edit_layers() {
+            return;
+        }
+        let value = opacity.clamp(0.0, 1.0);
+        let selected = self.selected_layer_ids.clone();
+        let indices: Vec<usize> = self
+            .document
+            .as_ref()
+            .map(|document| {
+                document
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, layer)| selected.contains(&layer.id) && layer.opacity != value)
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if indices.is_empty() {
+            return;
+        }
+        self.finish_opacity_edit();
+        self.begin_edit("Layer Opacity");
+        if let Some(document) = self.document.as_mut() {
+            for index in indices {
+                document.layers[index].opacity = value;
+            }
+        }
+        self.end_edit();
+    }
+
+    /// `usesOpacityKeys` (EditorSession+Brush.swift:188) — tools where number
+    /// keys set opacity: the brush family or gradient's own opacity, or with
+    /// Move the opacity of the selected layers.
+    pub fn uses_opacity_keys(&self) -> bool {
+        self.tool.is_brush_tool()
+            || self.tool == NavigationTool::Gradient
+            || self.tool == NavigationTool::Move
+    }
+
+    /// `typeOpacityDigit` (EditorSession+Brush.swift:191-208) — Photoshop-style
+    /// opacity keys: 1 = 10% … 9 = 90%, 0 = 100%. Two digits typed within 0.6 s
+    /// set an exact value (4 then 5 = 45%, 0 then 5 = 5%). `uptime` is a
+    /// monotonic clock in seconds.
+    pub fn type_opacity_digit(&mut self, digit: i32, uptime: f64) {
+        if !self.uses_opacity_keys() || !(0..=9).contains(&digit) {
+            return;
+        }
+        let mut percent = if digit == 0 { 100 } else { digit * 10 };
+        match self.pending_opacity_digit {
+            Some((first, at)) if uptime - at < 0.6 => {
+                percent = (first * 10 + digit).max(1);
+                self.pending_opacity_digit = None;
+            }
+            _ => self.pending_opacity_digit = Some((digit, uptime)),
+        }
+        let value = percent as f64 / 100.0;
+        match self.tool {
+            NavigationTool::Brush
+            | NavigationTool::SpotHealing
+            | NavigationTool::CloneStamp
+            | NavigationTool::Blur => self.brush_settings.opacity = value,
+            NavigationTool::Gradient => self.gradient_settings.opacity = value,
+            _ => self.set_selected_layers_opacity(value),
         }
     }
 
@@ -5074,6 +5151,66 @@ mod tests {
         s.brush_settings.hardness = 0.1;
         s.change_brush_hardness(false);
         assert_eq!(s.brush_settings.hardness, 0.0);
+    }
+
+    #[test]
+    fn opacity_digits_set_the_active_tool_opacity() {
+        // EditorSession+Brush.swift:191-208 — 1…9 = 10%…90%, 0 = 100%.
+        let mut s = session();
+        s.tool = NavigationTool::Brush;
+        s.type_opacity_digit(4, 10.0);
+        assert_eq!(s.brush_settings.opacity, 0.4);
+        s.type_opacity_digit(0, 11.0);
+        assert_eq!(s.brush_settings.opacity, 1.0);
+        // Two digits within 0.6 s: 4 then 5 = 45%, and 0 then 5 = 5% (min 1%).
+        s.type_opacity_digit(4, 20.0);
+        s.type_opacity_digit(5, 20.3);
+        assert_eq!(s.brush_settings.opacity, 0.45);
+        s.type_opacity_digit(0, 30.0);
+        s.type_opacity_digit(5, 30.4);
+        assert_eq!(s.brush_settings.opacity, 0.05);
+        // A second digit past the window starts a new pair.
+        s.type_opacity_digit(7, 40.0);
+        s.type_opacity_digit(2, 40.9);
+        assert_eq!(s.brush_settings.opacity, 0.2, "7 stands alone, 2 restarts");
+        // The gradient tool steps its own opacity.
+        s.tool = NavigationTool::Gradient;
+        s.type_opacity_digit(3, 50.0);
+        assert_eq!(s.gradient_settings.opacity, 0.3);
+        // Any other tool family is untouched; wrong digits no-op.
+        s.tool = NavigationTool::Marquee;
+        let before = s.brush_settings.opacity;
+        s.type_opacity_digit(5, 60.0);
+        assert_eq!(s.brush_settings.opacity, before);
+        s.tool = NavigationTool::Brush;
+        s.type_opacity_digit(11, 61.0);
+        s.type_opacity_digit(-1, 61.0);
+        assert_eq!(s.brush_settings.opacity, before);
+    }
+
+    #[test]
+    fn move_tool_digits_set_every_selected_layers_opacity() {
+        // LayerAppearance.swift:108-119 — one undo step for all selected.
+        let mut s = session();
+        s.add_blank_layer();
+        s.tool = NavigationTool::Move;
+        let first = s.document.as_ref().unwrap().layers[0].id;
+        let second = s.document.as_ref().unwrap().layers[1].id;
+        s.selected_layer_ids = vec![first, second];
+        let before = s.history.undo_count();
+        s.type_opacity_digit(5, 10.0);
+        assert_eq!(s.active_layer().unwrap().opacity, 0.5);
+        let doc = s.document.as_ref().unwrap();
+        assert_eq!(
+            doc.layers
+                .iter()
+                .filter(|l| l.id == first || l.id == second)
+                .map(|l| l.opacity)
+                .collect::<Vec<_>>(),
+            vec![0.5, 0.5]
+        );
+        assert_eq!(s.history.undo_count(), before + 1);
+        assert_eq!(s.history.undo_name(), "Layer Opacity");
     }
 
     #[test]

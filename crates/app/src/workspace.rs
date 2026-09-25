@@ -160,6 +160,7 @@ impl Render for AppState {
             )
             .child(self.render_status_bar(cx))
             .children(self.render_sheet_overlay(cx))
+            .children(crate::color_picker_ui::render_color_picker(self, cx))
     }
 }
 
