@@ -7,7 +7,7 @@
 
 use crate::blend::composite_pixel;
 use crate::document::{CanvasDocument, ImageLayer, LayerMask, LayerShape, ShapeKind};
-use crate::geometry::{CGPoint, CGRect};
+use crate::geometry::{CGPoint, CGRect, CGSize};
 use crate::selection::SelectionPath;
 use crate::raster::{draw_affine, pixel_to_document, Bitmap};
 use crate::transform::{LayerSampling, LayerTransform};
@@ -745,9 +745,33 @@ pub fn sample_composite_color(document: &CanvasDocument, point: CGPoint) -> Opti
     ))
 }
 
-/// The layer as the Layers panel shows it: pixels with the adjustment and
-/// effects applied, cropped to content (for thumbnails).
-pub fn layer_thumbnail(layer: &ImageLayer) -> Option<Bitmap> {
+/// The thumbnail slot width in points the panel shows (`CanvasThumbnail.box`).
+pub const THUMBNAIL_BOX: f64 = 30.0;
+/// Pixels per point, so thumbnails stay sharp (`CanvasThumbnail.backingScale`).
+const THUMBNAIL_BACKING: f64 = 2.0;
+const CHECKER_DARK: [u8; 4] = [56, 56, 56, 255];
+const CHECKER_LIGHT: [u8; 4] = [82, 82, 82, 255];
+
+/// The canvas's aspect ratio fitted inside a square slot (`fittedSize`).
+pub fn thumbnail_fitted_size(canvas: CGSize, slot: f64) -> CGSize {
+    if !(canvas.width > 0.0)
+        || !(canvas.height > 0.0)
+        || !canvas.width.is_finite()
+        || !canvas.height.is_finite()
+    {
+        return CGSize::new(slot, slot);
+    }
+    let scale = slot / canvas.width.max(canvas.height);
+    CGSize::new(
+        ((canvas.width * scale).round() as i64).max(1) as f64,
+        ((canvas.height * scale).round() as i64).max(1) as f64,
+    )
+}
+
+/// The layer's pixels (adjustment + effects applied) placed where they sit on
+/// a canvas-shaped checkerboard, whatever the layer's own bounds
+/// (`CanvasThumbnail.layer`).
+pub fn layer_canvas_thumbnail(layer: &ImageLayer, canvas: CGSize) -> Option<Bitmap> {
     let asset = layer.asset.as_ref()?;
     let mut pixels = asset.image.as_ref().clone();
     if let Some(adjustment) = &layer.adjustment {
@@ -759,7 +783,102 @@ pub fn layer_thumbnail(layer: &ImageLayer) -> Option<Bitmap> {
             pixels = grown;
         }
     }
-    Some(crate::raster::thumbnail_of(&pixels))
+    Some(canvas_thumbnail_bitmap(&pixels, &layer.transform, canvas, fill_checkerboard))
+}
+
+/// A mask placed on the canvas frame; the fill is the mask's edge tone, so a
+/// reveal-all mask reads all white and a hide-all mask all black
+/// (`CanvasThumbnail.mask`). `transform` is the mask's canvas placement.
+pub fn mask_canvas_thumbnail(
+    mask: &crate::document::LayerMask,
+    transform: &LayerTransform,
+    canvas: CGSize,
+) -> Option<Bitmap> {
+    let image = mask.asset.image.as_ref().clone();
+    let tone = mask_edge_tone(&image);
+    Some(canvas_thumbnail_bitmap(
+        &image,
+        transform,
+        canvas,
+        move |out| fill_solid(out, [tone, tone, tone, 255]),
+    ))
+}
+
+/// The mean gray of an image's outermost pixels (`edgeTone`); 255 for an
+/// empty image.
+pub fn mask_edge_tone(image: &Bitmap) -> u8 {
+    let (width, height) = (image.width, image.height);
+    if width == 0 || height == 0 {
+        return 255;
+    }
+    let mut total = 0u64;
+    let mut count = 0u64;
+    for y in 0..height {
+        let edge_row = y == 0 || y == height - 1;
+        for x in 0..width {
+            if edge_row || x == 0 || x == width - 1 {
+                total += image.pixel(x, y)[0] as u64;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        255
+    } else {
+        (total / count) as u8
+    }
+}
+
+fn canvas_thumbnail_bitmap(
+    image: &Bitmap,
+    transform: &LayerTransform,
+    canvas: CGSize,
+    fill: impl Fn(&mut Bitmap),
+) -> Bitmap {
+    let fitted = thumbnail_fitted_size(canvas, THUMBNAIL_BOX);
+    let width = ((fitted.width * THUMBNAIL_BACKING) as usize).max(1);
+    let height = ((fitted.height * THUMBNAIL_BACKING) as usize).max(1);
+    let mut out = Bitmap::new(width, height);
+    fill(&mut out);
+    let scale = if canvas.width > 0.0 {
+        out.width as f64 / canvas.width
+    } else {
+        1.0
+    };
+    let mut placed = LayerTransform::new(
+        CGPoint::new(transform.origin.x * scale, transform.origin.y * scale),
+        CGSize::new(transform.size.width * scale, transform.size.height * scale),
+    );
+    placed.rotation = transform.rotation;
+    placed.flip_x = transform.flip_x;
+    placed.flip_y = transform.flip_y;
+    placed.sampling = transform.sampling;
+    draw_layer_pixels(image, &placed, &mut out);
+    out
+}
+
+fn fill_solid(out: &mut Bitmap, color: [u8; 4]) {
+    for px in out.data.chunks_exact_mut(4) {
+        px.copy_from_slice(&color);
+    }
+}
+
+/// Dark gray base with alternating 12px light tiles (`CanvasThumbnail.layer`).
+fn fill_checkerboard(out: &mut Bitmap) {
+    fill_solid(out, CHECKER_DARK);
+    let tile = (6.0 * THUMBNAIL_BACKING) as usize;
+    for row in 0..out.height.div_ceil(tile) {
+        for column in 0..out.width.div_ceil(tile) {
+            if (row + column) % 2 == 0 {
+                for y in row * tile..((row + 1) * tile).min(out.height) {
+                    for x in column * tile..((column + 1) * tile).min(out.width) {
+                        let o = (y * out.width + x) * 4;
+                        out.data[o..o + 4].copy_from_slice(&CHECKER_LIGHT);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -797,6 +916,56 @@ mod tests {
         let out = draw_live_composite(&doc);
         assert_eq!(out.pixel(5, 5), [255, 0, 0, 255]);
         assert_eq!(out.pixel(15, 5), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn thumbnail_fits_the_canvas_aspect() {
+        let fitted = thumbnail_fitted_size(CGSize::new(200.0, 100.0), 30.0);
+        assert_eq!((fitted.width, fitted.height), (30.0, 15.0));
+        let degenerate = thumbnail_fitted_size(CGSize::new(0.0, 100.0), 30.0);
+        assert_eq!((degenerate.width, degenerate.height), (30.0, 30.0));
+    }
+
+    #[test]
+    fn layer_thumbnail_places_pixels_on_the_canvas_checkerboard() {
+        // A 100×100 canvas with a 40×40 red layer at (30,30): the 60×60
+        // thumbnail shows red in its middle and checkerboard grays outside.
+        let mut image = Bitmap::new(40, 40);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let layer = ImageLayer::with_asset(
+            ImportedImage::new(image, "L"),
+            CGPoint::new(30.0, 30.0),
+        );
+        let thumb = layer_canvas_thumbnail(&layer, CGSize::new(100.0, 100.0)).unwrap();
+        assert_eq!((thumb.width, thumb.height), (60, 60));
+        assert_eq!(thumb.pixel(30, 30), [255, 0, 0, 255]);
+        let corner = thumb.pixel(2, 2);
+        assert_eq!(corner[3], 255);
+        assert!(corner[0] == 56 || corner[0] == 82, "{corner:?}");
+    }
+
+    #[test]
+    fn mask_thumbnail_edge_tone_carries_to_the_edges() {
+        // A hide-all (black) mask placed away from its layer: outside the
+        // placement the frame reads the edge tone — black.
+        let mut mask = crate::document::LayerMask::solid(true);
+        {
+            let image = std::sync::Arc::make_mut(&mut mask.asset.image);
+            for px in image.data.chunks_exact_mut(4) {
+                px.copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+        let thumb = mask_canvas_thumbnail(
+            &mask,
+            &LayerTransform::new(CGPoint::new(20.0, 20.0), CGSize::new(40.0, 40.0)),
+            CGSize::new(100.0, 100.0),
+        )
+        .unwrap();
+        assert_eq!(thumb.pixel(2, 2)[0], 0);
+        // A 1×1 reveal-all solid keeps edge tone 255 (empty-frame default).
+        assert_eq!(mask_edge_tone(&Bitmap::new(0, 0)), 255);
     }
 
     #[test]
