@@ -4,6 +4,46 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 修复进度（2026-09-26 第十八轮，四个并行方向 + 主线集成）
+
+本轮四个子代理并行（levels_auto / 会话蒙版批 / 选区与新工具 / 测试移植），主线完成集成接线。测试 core 490 → 551（lib）+ 28（新建 `crates/core/tests/` 集成测试）+ app 10 → 16，全局 595 全绿。
+
+**C 域（§7.1-1 LevelsAutomatic 整文件）**
+- core 新模块 `adjust/levels_auto.rs`：三模式 Contrast/Color/Neutral、单通道 256 bin、clip 0.001（严格大于）、Neutral gamma=min(9.99, max(0.1, ln(mean)/ln(0.5)))（mean 按 gamma=1 区间对 apply 值加权），浮点运算顺序逐行对齐；12 个测试含 Swift `autoAlgorithmsAndEyedropperCalibration` 数值复刻。
+- app `levels_auto` 旧算法（1024 混合 bin 分位）删除，改走 core 三模式；Levels sheet Auto 行三个按钮（Contrast/Color/Neutral）接 `levels_auto_mode`（整体替换设置→同步滑杆→与手动滑杆同路径刷新）。
+- §7.1-8 Levels/HueSaturation 提交与预览经选区混合（`pixel::blend` 回混，预览=提交结果）；§7.2 Levels 直方图以选区 coverage 加权。
+- §9.3 滤镜滑杆默认值对齐 Filters.swift:39-45（Gaussian 4→1、Motion 20→10、AddNoise 12→10）。
+
+**A 域（§3.1 未修项批量）**
+- §3.1-5 undo/redo 恢复语义：`restore(snapshot)`——先 cancel_crop+cancel_gradient；`keep_mask_target = is_mask_selected && 活动层未变`，恢复后按其与蒙版存在性重算 `is_mask_selected`（EditorSession.swift:578-586）。app 在 document 变化时重适配视口。
+- §3.1-8 merge 守卫补全：`merge_plan` 逐条（canEditLayers、多选含非组层、组内含像素层、Merge Down 取正下方同父层且组则拒、anchor/parent/name 按 Swift 分支、层级校验失败静默回退）；新增 `can_merge_layers`（§3.1-8/11 相关守卫）。
+- §3.1-14 `LayerAdjustment.is_valid` 补 HSV 细分（hue ±360、sat/light ±100、bands handle 有限）。
+- §3.1-18 `begin_transform_persistent(bool)`；画布拖拽传 false（EditorCanvas.swift:2129），nudge 传 false。
+- 蒙版批：`select_layer_target`、`can_copy_mask`/`copy_mask`（"Copy/Replace Layer Mask"）、`toggle_mask_link`（"Unlink/Link Layer Mask"）、`displayed_mask_placement`（组变换/单层/蒙版草稿/distort 分支）；`set_preview_blend_mode`（LayerAppearance.swift:78，commit_transform 时清除）。
+
+**D/E 域（§8.1-4 + §2 两个整文件）**
+- §8.1-4 环→多边形配洞重写为**包含森林**（父级=面积最小且严格包含者，偶深度外环/奇深度洞），三层嵌套不再语义反转；5 个新测试含旧算法必败回归。
+- §2 MaskTracing 整文件落地 `tools/mask_tracing.rs`：dark/white/opaque pixels + trace（有向单位边字典、只留拐点、外顺内逆）逐行移植；session 入口 `load_layer_selection`/`load_mask_selection`（Cmd 点击缩略图/Select 菜单，"Load Layer/Mask Selection"）+ 3 个测试。
+- §2 ObjectSelection 整文件落地 `tools/object_selection.rs`：Vision 前景蒙版做成参数输入，其后数学全移植——联合双边上采样（空间 σ=5、luma σ=0.15）、腐蚀/膨胀 `min(10,|edgeOffset|)` 次、wand 描迹、RDP 简化容差 1.6、Chaikin 3 轮 0.25/0.75；7 个测试。
+
+**E 域（§5.2-2 + 连续引擎语义对齐）**
+- 笔画 provisional tail 改为**解析渲染**：settled 累积 Catmull–Rom 自适应细分段（弦差 ≤0.2px、深度 10，`continuousCurve` 逐行移植），tail=前一采样点→光标直线段，独立于永久 coverage 渲染——下一采样精确替换（drawTail/removeTail 的整网格等价）；tail 不再盖章进 `has_paint` 网格；4 个新测试（湿预览含尾、flush 换尾、样条细分 ≤0.2px、直线塌缩）。
+
+**G+H 域（§9.1/§9.3 菜单与缩略图批次）**
+- 菜单动态标题对齐 CompositorApp.swift：Invert/Invert Mask、Transform Selection/Layer（free transform 路由 can_transform_selection）、Duplicate Layer/Layer via Copy（`layer_via_copy` 内部路由）、Create/Release Clipping Mask、Show/Hide Layer、merge_title()、Delete Layer Mask/Layers/Layer（`deleteLayerOrMask` 路由）。
+- 菜单新条目：Edit 的 Clear Selection Pixels；Image 的 Curves/Black & White/Color Balance/Exposure/Gradient Map/Grain（走滤镜 sheet）；Filter 的 Remove Background（立即执行一条 undo）；Select 的 Layer's Pixels/Mask's Black Areas；Layer 的 New Adjustment Layer 子菜单（12 种 `add_adjustment`）、Group Selected Layers（⌘G 重绑）、Move Out of Folder、Rename Layer…（接面板重命名）、New Blank Layer。
+- §9.3 图层面板缩略图重写（CanvasThumbnail.swift 移植）：**整画布形状**（宽高比适配 30pt 槽、2x backing）+ 深灰棋盘格（12px tile），蒙版选中时显示蒙版缩略图且**边缘灰度延续到画布边**（`mask_edge_tone`）；缓存键含蒙版选中态。
+- undo/redo 后 document 变化重适配视口。
+
+**测试移植（§10，新建 crates/core/tests/ 集成测试）**
+- DownsampleTests 4/4、InnerGlow+OuterGlow 16/18、Export+JPEGExport 5、TypeTool 纯函数 3 + is_valid 半边，共 28 用例；缺口清单见 tests 内注释（会话流 TypeTool 用例、Metal parity、原子写 app 层）。
+
+**已知遗留（本轮记录，未修）**
+- `adjust/pixel.rs` `coverage` 的映射方向实现与命名相反（app 侧用双重求逆规避，探针验证几何正确）+ 采样半像素相位（选区边缘内侧 ~50% 混合）——§7.1-4 的残留，待专项修复。
+- AdjustmentEditing 会话（begin/preview/finish/cancel）、select_subject（需 Vision 替代源决策）、滤镜 Gaussian σ 截断（4σ vs CI ≈3σ）、guide 拖拽建线调用点、重命名的 Show-Hide 动态标题 effects 分支——属后续批次。
+
+---
+
 ## 修复进度（2026-09-24 第二轮，按 §11 优先级推进）
 
 以下报表缺陷已在本轮修复并有测试覆盖（`cargo test -p compositor-core` 338 全绿）：
