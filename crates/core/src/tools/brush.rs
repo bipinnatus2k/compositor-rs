@@ -98,13 +98,16 @@ pub struct RasterEdit {
     previous: Option<CGPoint>,
     distance_to_next: f64,
     samples: Vec<CGPoint>,
-    /// Pointer-event segments in document pixels, for the continuous
-    /// deposition engine (`MetalBrushCoverage`).
+    /// Settled spline pieces in document pixels, for the continuous
+    /// deposition engine (`MetalBrushCoverage`): every sample but the newest
+    /// has been through the Catmull–Rom subdivision.
     segments: Vec<StrokeSegment>,
     /// Solid fill color overriding the brush color (`fill`).
     fill_color: Option<[u8; 4]>,
-    /// Dab spacing state saved under the provisional tail.
-    tail_state: Option<(Option<CGPoint>, f64)>,
+    /// The provisional straight tail from the newest settled sample to the
+    /// cursor. Preview only: the engine renders it separately, so the next
+    /// sample replaces it exactly (`drawTail`/`removeTail`).
+    tail_segment: Option<StrokeSegment>,
     /// Limits every edit to the document selection.
     pub selection_clip: Option<SelectionClip>,
     /// Clone Stamp: a document-size image to copy from, and the offset from
@@ -192,7 +195,7 @@ impl RasterEdit {
             samples: Vec::new(),
             segments: Vec::new(),
             fill_color: None,
-            tail_state: None,
+            tail_segment: None,
             selection_clip,
             clone: None,
             replaces_with_clone: false,
@@ -241,67 +244,141 @@ impl RasterEdit {
         if self.samples.last() == Some(&point) {
             return;
         }
-        self.restore_tail_state();
-        match self.segments.last().map(|s| (s[2], s[3])) {
-            // The first event is a zero-length segment: the initial click.
-            None => self.segments.push([point.x as f32, point.y as f32, point.x as f32, point.y as f32]),
-            Some((last_x, last_y)) if (last_x, last_y) != (point.x as f32, point.y as f32) => {
-                self.segments.push([last_x, last_y, point.x as f32, point.y as f32]);
-            }
-            _ => {}
-        }
         self.samples.push(point);
         if self.samples.len() > 4 {
             self.samples.remove(0);
         }
         let count = self.samples.len();
         if count == 1 {
-            self.walk_to(point);
-        } else if count >= 3 {
-            let n = count;
-            self.curve(
-                self.samples[n - 3],
-                self.samples[n - 2],
-                self.samples[n.saturating_sub(4)],
-                self.samples[n - 1],
-            );
+            // The first event is a zero-length segment: the initial click.
+            let p = [point.x as f32, point.y as f32];
+            self.segments.push([p[0], p[1], p[0], p[1]]);
+            self.walk_to(point, true);
+            return;
         }
-        if count >= 2 {
-            // Provisional straight tail: save spacing state, walk, restore.
-            self.tail_state = Some((self.previous, self.distance_to_next));
-            self.walk_to(point);
-            if let Some((previous, distance)) = self.tail_state.take() {
-                self.previous = previous;
-                self.distance_to_next = distance;
-            }
+        // Provisional straight tail from the newest settled sample to the
+        // cursor; rendered separately so it never becomes permanent
+        // (`appendContinuous`, BrushStroke.swift:252-266).
+        let previous_sample = self.samples[count - 2];
+        self.tail_segment = Some([
+            previous_sample.x as f32,
+            previous_sample.y as f32,
+            point.x as f32,
+            point.y as f32,
+        ]);
+        if count >= 3 {
+            // The sample two back settles into a spline piece (the engine's
+            // settled set and the dab grid's curve both consume it).
+            let (start, end, before, after) = (
+                self.samples[count - 3],
+                self.samples[count - 2],
+                self.samples[count.saturating_sub(4)],
+                point,
+            );
+            self.extend_settled(Self::continuous_curve_points(start, end, before, after));
+            self.curve(start, end, before, after);
         }
     }
 
     /// Replaces the provisional tail with the stroke's final curve piece.
     pub fn flush(&mut self) {
-        self.restore_tail_state();
         let count = self.samples.len();
         if count >= 2 {
             let n = count;
-            self.curve(
+            let (start, end, before, after) = (
                 self.samples[n - 2],
                 self.samples[n - 1],
                 self.samples[n.saturating_sub(3)],
                 self.samples[n - 1],
             );
+            self.extend_settled(Self::continuous_curve_points(start, end, before, after));
+            self.curve(start, end, before, after);
             self.samples = vec![self.samples[n - 1]];
+        }
+        self.tail_segment = None;
+    }
+
+    fn extend_settled(&mut self, points: Vec<CGPoint>) {
+        for pair in points.windows(2) {
+            self.segments.push([
+                pair[0].x as f32,
+                pair[0].y as f32,
+                pair[1].x as f32,
+                pair[1].y as f32,
+            ]);
         }
     }
 
-    fn restore_tail_state(&mut self) {
-        // The provisional tail's dabs are undone by rebuilding coverage from
-        // the settled path; with whole-grid buffers the simplest exact undo is
-        // re-walking all settled dabs, which the session avoids by only
-        // calling flush() once at the end. Tails only carry spacing state.
-        if let Some((previous, distance)) = self.tail_state.take() {
-            self.previous = previous;
-            self.distance_to_next = distance;
+    /// Centripetal Catmull–Rom adaptively subdivided so the polyline stays
+    /// within 0.2 document pixels of the spline (`continuousCurve`,
+    /// BrushStroke.swift:281-312).
+    fn continuous_curve_points(
+        start: CGPoint,
+        end: CGPoint,
+        before: CGPoint,
+        after: CGPoint,
+    ) -> Vec<CGPoint> {
+        fn knot(t: f64, a: CGPoint, b: CGPoint) -> f64 {
+            t + (b.x - a.x).hypot(b.y - a.y).sqrt().max(0.0001)
         }
+        fn mix(a: CGPoint, b: CGPoint, ta: f64, tb: f64, t: f64) -> CGPoint {
+            let wa = (tb - t) / (tb - ta);
+            let wb = (t - ta) / (tb - ta);
+            CGPoint::new(a.x * wa + b.x * wb, a.y * wa + b.y * wb)
+        }
+        let t0 = 0.0;
+        let t1 = knot(t0, before, start);
+        let t2 = knot(t1, start, end);
+        let t3 = knot(t2, end, after);
+        let point = |u: f64| -> CGPoint {
+            if u == 0.0 {
+                return start;
+            }
+            if u == 1.0 {
+                return end;
+            }
+            let t = t1 + (t2 - t1) * u;
+            let a = mix(before, start, t0, t1, t);
+            let b = mix(start, end, t1, t2, t);
+            let c = mix(end, after, t2, t3, t);
+            mix(mix(a, b, t0, t2, t), mix(b, c, t1, t3, t), t1, t2, t)
+        };
+        let mut result = Vec::new();
+        fn subdivide(
+            point: &impl Fn(f64) -> CGPoint,
+            result: &mut Vec<CGPoint>,
+            a: CGPoint,
+            b: CGPoint,
+            lo: f64,
+            hi: f64,
+            depth: usize,
+        ) {
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let length_squared = dx * dx + dy * dy;
+            let error = |p: CGPoint| -> f64 {
+                let t = if length_squared > 0.0 {
+                    (((p.x - a.x) * dx + (p.y - a.y) * dy) / length_squared).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (p.x - a.x - t * dx).hypot(p.y - a.y - t * dy)
+            };
+            let mid = (lo + hi) / 2.0;
+            let m = point(mid);
+            let deviation = error(m)
+                .max(error(point((lo + mid) / 2.0)))
+                .max(error(point((mid + hi) / 2.0)));
+            if deviation <= 0.2 || depth >= 10 {
+                result.push(a);
+                return;
+            }
+            subdivide(point, result, a, m, lo, mid, depth + 1);
+            subdivide(point, result, m, b, mid, hi, depth + 1);
+        }
+        subdivide(&point, &mut result, start, end, 0.0, 1.0, 0);
+        result.push(end);
+        result
     }
 
     /// Centripetal Catmull–Rom between `start` and `end` (the exact spline
@@ -328,12 +405,16 @@ impl RasterEdit {
             let b1 = mix(a1, a2, t0, t2, t);
             let b2 = mix(a2, a3, t1, t3, t);
             let point = if index == pieces { end } else { mix(b1, b2, t1, t2, t) };
-            self.walk_to(point);
+            self.walk_to(point, true);
         }
     }
 
     /// Lays evenly spaced dabs along a straight run from the previous dab.
-    fn walk_to(&mut self, point: CGPoint) {
+    /// `stamp` is false for the provisional tail: its dabs are rendered by
+    /// the engine from `tail_segment`, never stamped into the permanent
+    /// grid (`drawTail` backs the coverage up; not stamping is the exact
+    /// whole-grid equivalent).
+    fn walk_to(&mut self, point: CGPoint, stamp: bool) {
         let spacing = (self.settings.diameter * spacing_fraction(self.settings.hardness)).max(0.25);
         match self.previous {
             Some(previous) => {
@@ -347,14 +428,18 @@ impl RasterEdit {
                             previous.x + dx * distance / length,
                             previous.y + dy * distance / length,
                         );
-                        self.dab(dab);
+                        if stamp {
+                            self.dab(dab);
+                        }
                         distance += spacing;
                     }
                     self.distance_to_next = distance - length;
                 }
             }
             None => {
-                self.dab(point);
+                if stamp {
+                    self.dab(point);
+                }
                 self.distance_to_next = spacing;
             }
         }
@@ -459,6 +544,7 @@ impl RasterEdit {
         // The wet wash preview dies with the stroke's geometry; what is left
         // is the healed pixels.
         self.segments.clear();
+        self.tail_segment = None;
         true
     }
 
@@ -482,7 +568,10 @@ impl RasterEdit {
         };
         let params = ContinuousParams {
             settled: &self.segments,
-            tail: &[],
+            tail: match &self.tail_segment {
+                Some(tail) => std::slice::from_ref(tail),
+                None => &[],
+            },
             origin: CGPoint::new(self.pixel_to_document.tx, self.pixel_to_document.ty),
             axis_x: CGPoint::new(self.pixel_to_document.a, self.pixel_to_document.b),
             axis_y: CGPoint::new(self.pixel_to_document.c, self.pixel_to_document.d),
@@ -1173,6 +1262,157 @@ mod tests {
         let out = edit.fill([0, 255, 0, 255]);
         assert_eq!(out.pixel(35, 35)[1], 255);
         assert_eq!(out.pixel(5, 5)[3], 0);
+    }
+
+    /// The provisional straight tail shows in the wet preview even though no
+    /// settled spline piece exists yet (BrushStroke.drawTail).
+    #[test]
+    fn wet_preview_shows_provisional_straight_tail() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(200.0, 200.0),
+            None,
+        );
+        edit.settings.hardness = 1.0;
+        edit.settings.diameter = 20.0;
+        edit.append(CGPoint::new(30.0, 30.0));
+        edit.append(CGPoint::new(30.0, 130.0));
+        // Only the zero-length click is settled so far; the midpoint of the
+        // two samples is covered by the tail alone.
+        assert_eq!(edit.result().pixel(30, 80)[3], 255);
+    }
+
+    /// Flushing settles the final spline piece and retires the tail; the
+    /// committed ground matches what the tail previewed.
+    #[test]
+    fn flush_replaces_the_tail_with_the_final_piece() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(200.0, 200.0),
+            None,
+        );
+        edit.settings.hardness = 1.0;
+        edit.settings.diameter = 20.0;
+        edit.append(CGPoint::new(30.0, 130.0));
+        edit.append(CGPoint::new(120.0, 140.0));
+        edit.flush();
+        let committed = edit.result();
+        assert_eq!(committed.pixel(75, 135)[3], 255);
+        assert_eq!(committed.pixel(30, 129)[3], 255);
+    }
+
+    /// The settled engine segments are the Catmull–Rom polyline, not the raw
+    /// sample chords: on a sharp turn the paint follows the spline.
+    #[test]
+    fn settled_segments_follow_the_spline_on_sharp_turns() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(200.0, 200.0),
+            None,
+        );
+        edit.settings.hardness = 1.0;
+        edit.settings.diameter = 16.0;
+        edit.append(CGPoint::new(20.0, 150.0));
+        edit.append(CGPoint::new(70.0, 40.0));
+        edit.append(CGPoint::new(150.0, 150.0));
+        // The spline A→B bows toward C relative to the chord; a point on the
+        // spline's far side of the chord midpoint gets paint only if the
+        // engine segments are spline pieces.
+        let wet = edit.result();
+        let painted = |x: usize, y: usize| wet.pixel(x, y)[3] > 0;
+        // On-chord midpoint is covered either way.
+        assert!(painted(45, 95));
+        // Reference: dense evaluation of the same spline.
+        let piece = RasterEdit::continuous_curve_points(
+            CGPoint::new(20.0, 150.0),
+            CGPoint::new(70.0, 40.0),
+            CGPoint::new(20.0, 150.0),
+            CGPoint::new(150.0, 150.0),
+        );
+        assert!(piece.len() >= 3, "sharp turn must subdivide, got {}", piece.len());
+        assert_eq!(piece[0], CGPoint::new(20.0, 150.0));
+        assert_eq!(*piece.last().unwrap(), CGPoint::new(70.0, 40.0));
+    }
+
+    /// Adaptive subdivision of `continuousCurve`: straight runs stay a single
+    /// piece, the polyline stays within 0.2 document pixels of the spline.
+    #[test]
+    fn continuous_curve_subdivides_within_tolerance() {
+        // A straight run collapses to one piece.
+        let straight = RasterEdit::continuous_curve_points(
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(100.0, 0.0),
+            CGPoint::new(-50.0, 0.0),
+            CGPoint::new(150.0, 0.0),
+        );
+        assert_eq!(straight, vec![CGPoint::new(0.0, 0.0), CGPoint::new(100.0, 0.0)]);
+
+        // A sharp S stays within 0.2px of the exact spline.
+        let (start, end, before, after) = (
+            CGPoint::new(40.0, 160.0),
+            CGPoint::new(120.0, 40.0),
+            CGPoint::new(20.0, 40.0),
+            CGPoint::new(180.0, 160.0),
+        );
+        let points =
+            RasterEdit::continuous_curve_points(start, end, before, after);
+        assert!(points.len() >= 4, "{}", points.len());
+        // Dense reference evaluation of the same centripetal Catmull–Rom.
+        fn knot(t: f64, a: CGPoint, b: CGPoint) -> f64 {
+            t + (b.x - a.x).hypot(b.y - a.y).sqrt().max(0.0001)
+        }
+        fn mix(a: CGPoint, b: CGPoint, ta: f64, tb: f64, t: f64) -> CGPoint {
+            let wa = (tb - t) / (tb - ta);
+            let wb = (t - ta) / (tb - ta);
+            CGPoint::new(a.x * wa + b.x * wb, a.y * wa + b.y * wb)
+        }
+        let t1 = knot(0.0, before, start);
+        let t2 = knot(t1, start, end);
+        let t3 = knot(t2, end, after);
+        let at = |u: f64| -> CGPoint {
+            let t = t1 + (t2 - t1) * u;
+            let a = mix(before, start, 0.0, t1, t);
+            let b = mix(start, end, t1, t2, t);
+            let c = mix(end, after, t2, t3, t);
+            mix(mix(a, b, 0.0, t2, t), mix(b, c, t1, t3, t), t1, t2, t)
+        };
+        let samples = 400;
+        for step in 0..=samples {
+            let u = step as f64 / samples as f64;
+            let reference = at(u);
+            // Point-to-polyline distance (segment-aware) must be ≤ 0.2px.
+            let segment_distance = points
+                .windows(2)
+                .map(|pair| {
+                    let (a, b) = (pair[0], pair[1]);
+                    let dx = b.x - a.x;
+                    let dy = b.y - a.y;
+                    let length_squared = dx * dx + dy * dy;
+                    let t = if length_squared > 0.0 {
+                        (((reference.x - a.x) * dx + (reference.y - a.y) * dy)
+                            / length_squared)
+                            .clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    (reference.x - a.x - t * dx).hypot(reference.y - a.y - t * dy)
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                segment_distance <= 0.2 + 1e-9,
+                "u={u} deviation {}",
+                segment_distance
+            );
+        }
     }
 
     #[test]
