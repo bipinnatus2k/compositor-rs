@@ -7,6 +7,7 @@ pub mod curves;
 pub mod hue_saturation;
 pub mod image_adjustments;
 pub mod levels;
+pub mod levels_auto;
 pub mod pixel;
 
 pub use curves::{CurvePoint, CurvesSettings};
