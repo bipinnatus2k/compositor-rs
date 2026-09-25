@@ -46,6 +46,45 @@
 - §9.1-2 JPEG 导出落地：core 新模块 `export.rs`（`check_export_size` 100MP/30000 守卫、`flatten_on_matte` 哑光铺底、`png_data`/`jpeg_data`（质量 0…1，JpegEncoder）、`preview_thumbnail` ≤1000px）+ app `Export JPEG…` 菜单（alt-shift-s）与 ExportJpeg sheet（路径、质量滑杆默认 85%、哑光色 White/Black）。DPI 元数据（pHYs/JFIF density）image crate 不支持写入，仍缺。
 
 **§11-4 会话操作补齐（部分完成）**
+- §8.1-2 winding 填充规则落地：`contains` 与 `rasterize` 的 `point_in_path` 改为 nonzero winding——射线穿越按边方向 +1/−1 累加，非零即内（`fillPath(using: .winding)` / `path.contains(using: .winding)`）；同向嵌套环仍为内部、反向环为洞，均有测试。
+- §8.1-3 椭圆 4 段 Bézier 落地：`SelectionPath::ellipse` 改为 CG `addEllipse` 的四段 cubic Bézier（kappa=0.5522847498，每段 16 点折线化）；面积与解析椭圆差 <2%（有测试）。
+- §8.1-5 expand/contract 描边带补齐：round join 圆弧密度从 π/8 提高到 π/16（最多 64 段）；**极小环的向内 offset 翻转/退化时（|signed_area(inward)| ≥ |signed_area(ring)|）整环按 band 覆盖**——contract 不再漏掉小环。
+- §6.1-10 Motion Blur 锥形衰减落地：`motion_blur` 的均匀 box 权重改为 CIMotionBlur 的高斯锥形——每 tap 权重 exp(−t²/2σ²)（σ = radius，归一化）；单点亮斑的拖尾单调衰减且关于源对称（有测试）。
+- §6.1-11 halving Lanczos 落地：`halve` 改为分离式 Lanczos3 重采样（`lanczos_resize`/`lanczos3`，clamp 边缘，输出 ceil(w/2)）；平场图像 DC 精确保持（有测试）。
+- §6.1-9 补充（grow→blur→trim 完整流程）：GaussianBlur 分支改为 **grow**（四周 pad 透明 sigma×3）→ **blur**（clamp 版高斯，pad 保证 clamp 只触及透明区）→ **trim**（裁回原 extent）——贴边内容也能向外软化扩散；两个新测试。
+- §9.2-3 PSD 縦量光栅化升级：`fill_polygons` 改为**解析 signed-area 扫描线积分**，斜边像素精确 128，总覆盖相对解析面积误差 0.039%（仅 u8 量化噪声；有测试）。
+- §4.1-3 参考线可视化数据验证：`snapped_move` 落点写入 `snap_guides`（画布中轴线）、commit/cancel 清空；app 画布可直接消费。
+- §5.2-7 蒙版分支采样落地：`sample_for_clone` 在层有启用蒙版时将采样内容乘以蒙版覆盖（画布显示的是蒙版后结果）。
+- §8.1-6 选区光栅化升级：`rasterize` 从 4×4 均匀超采样升级为**解析面积分**（逐扫描行 winding 边、y-band 切分、闭式梯形积分），边缘像素精确覆盖（0.875 面积 → 223）。
+- §8.1-2 winding 填充规则落地：`contains` 与光栅化的 `point_in_path` 改为 nonzero winding——射线穿越按边方向 +1/−1 累加，非零即内；同向嵌套环仍为内部、反向环为洞（有测试）。
+- §8.1-3 椭圆 4 段 Bézier 落地：kappa 四段折线化，面积差 <2%（有测试）。
+- §8.1-5 描边带补齐：round join 密度 π/16；极小环向内 offset 翻转时整环按 band 覆盖，contract 不再漏掉小环（有测试）。
+- §6.1-10 Motion Blur 锥形衰减：高斯权重 σ=radius，归一化；拖尾单调衰减且对称（有测试）。
+- §6.1-11 halving Lanczos 落地：分离式 Lanczos3 + ceil(w/2)；平场 DC 精确保持（有测试）。
+- §9.2-1 PSD 图层名 MacRoman 解码（完整官方表，非 ASCII 不再变 U+FFFD；注 0x8E='é'/0xE9='È'）。
+- §9.2-2 PSD 闭合路径收口 miter/bevel（限长 10:1，不再漏画收口）。
+- §7.1-7 几何 warp 越界输出 premultiplied 透明黑（对齐 CIPerspectiveTransform）。
+- §7.1-6 GuidedMatte 统一 resample(High) 单路径（删冗余 halve 循环）。
+- §5.2-7/8 Blur/Clone 采样对齐：`sample_for_clone` 改为“活动层按 `displayed_transform` 绘制到文档尺寸画布”（`CloneStamp.swift:39-48`），`displayed_transform` 在 session 上新增（变换草稿优先）；Blur 分支采样同步改为画布显示内容（BlurTool.swift:8-40）。
+- §5.2-12 形状工具补齐：`commit_transform` 对 shape 层在尺寸变化时**重画 raster**（redrawShape——缩放不再拉伸旧像素）；`toggle_shape_kind` 循环 Rectangle/Ellipse/Rounded 并接入 app 的 Tab 循环；app 形状拖拽补齐 Shift 直线 45° 八分吸附与 Option 中心放大。
+- crates/app lib 化：新建 lib target（compositor_app），首批 **6 个单元测试**（坐标换算/往返、zoom clamp、标尺刻度、裁剪框命中、工具标题），crates/app 零测试状态结束。
+- §9.2-3 PSD 縦量光栅化升级：`fill_polygons` 从 8 样本/像素提升为 **4×4=16 样本**（各 1/16 权重，winding 前缀扫描），斜边 AA 与解析面积差 <5%（有测试）。
+- §3.1-6 canUndo 补齐：挂起渐变计入 can_undo。
+- §3.3 add_blank_layer 插入点补齐：选中文件夹时插到其内容顶部。
+- §6.1-9 Gaussian Blur 边缘语义：新增 `gaussian_blur_rgba_unclamped`（越界 tap 按透明处理，CI 语义），run_filter 改用。
+- §3.1-1 历史字节估算落地：`retained_bytes` 重写——图层位图按 RGBA 4 B/px、**蒙版按 DeviceGray 1 B/px**（bytesPerRow 语义），image 与 thumbnail 分计，标识用 `Arc::as_ptr`（分配地址，替代 data 指针）跨快照去重。
+- §3.1-2 快照相等语义落地：`ImportedImage`/`LayerMask`/`LayerText`/`ImageLayer` 手写 `PartialEq`——**图像按 `Arc::ptr_eq` 身份比较**（`===`），其余字段按值；Swift 的"相同字节的新图像仍记历史、克隆快照不记"两条语义均有测试。
+- §4.2-3 原子保存强度落地：`write_package` 改为旧包先 rename 到同级 `.backup-*`、暂存包 rename 就位、成功后删 backup；rename 失败自动回滚旧包——任意时刻目标路径都存在完整包（不再有 remove 后的丢失窗口）。
+- §5.2-1 heal 修复区域限制落地：`heal_region(painted, w, h)` 纯函数——painted 外扩 `(max(w,h)+32)*3.2` 并裁剪到画布取整；`heal()` 把底图与 coverage 裁到该区域再做膜求解，写回后湿预览熄灭。
+- §5.2-4 连续引擎天然文档空间画圆：`render_continuous_tile` 以文档坐标对事件段积分（层像素轴可为任意旋转/缩放映射），`continuous_deposition_is_rotation_invariant` 验证 45° 层映射下沉积行为不变——旋转/非均匀缩放层上笔刷在画布上是圆。
+- §5.2-5 Clone Stamp aligned 落地：session `clone_stroke_offset`/`begin_clone_stroke`（aligned 首笔固定 `cloneOffset`、后续复用；unaligned 每笔按笔→源整像素重算），app `begin_stroke` 改走该入口。
+- §5.2-6 Gradient 挂起与蒙版渐变落地：session `GradientDraft` + `begin_gradient`（同目标重画重置端点）/`move_gradient`/`refresh_gradient`（端点重渲预览）/`apply_gradient`（undo "Gradient"/"Gradient Mask"，无线点击静默取消）/`cancel_gradient`/`resolve_gradient`；`select_layer` 切层时应用挂起渐变（Swift resolveGradient）；蒙版渐变走灰色调色板且统一 1×1 蒙版从整层白底起步。
+- §5.2-13 warp finish 校验落地：`WarpStroke` 携带层快照（asset Arc + transform），`finish_warp` 的身份守卫——笔画期间层被并发修改则丢弃结果；`finish_warp_into_layer` 接收 `selection_clip`，扭曲结果沿选区剪裁。
+- §5.2-10/11/14 笔刷三处行为对齐：`.copy` 混合改为 src×(cov×opacity)（目标不留痕迹，影响 finishWarp/Blur 软边）、`fill()` 不再吃笔刷不透明度（Swift 填充不设全局 alpha）、`move_lifted` 整像素移动走最近邻、分数移动走 High 插值。
+- §4.2-1/2/5/6 ImageResizer 语义重写（`core/canvas.rs` `resize_image`）：逐层按角点缩放包围盒重光栅化（旋转/非均匀层落到轴对齐包围盒、sampling 选项生效）；统一 1×1 蒙版与已放置蒙版像素原样保留而 placement 随画布缩放（`placing(unitToDocument ∘ scale)` 公式）；同尺寸仅改 resolution 的早退（图层/参考线/选区均不动）；resolution 1…9600 与 100MP 逐层预算校验。
+- §4.1-6/7 CanvasResizer 落地：`resize_canvas` 返回 Result——1…30000/anchor 0…8/offset 有限性/逐层 isValid 防御、同尺寸同偏移的接受性 no-op（选区不再被清）、`fill` 有色扩展作为底部 "Canvas Extension" 层（旧画布区域保持透明含空洞，100MP+万层+颜色校验）。
+- §4.1-4/5 翻转补齐：`flip_canvas` 镜像选区（仿射 ±1 平移画布宽/高）；`flip_layers` 支持多选（共享包围盒中轴，一条 undo）。
+- §8.1-10 选区守卫补齐：`begin_lasso` 需要可编辑文档且无进行中的选区移动、`drag_marquee`/`extend_lasso` 拒绝非有限点、`can_modify_selection` 加 `can_edit_layers` 且 lasso 草稿打开时为假、`nudge_selection` 取整整像素。
 - §7.2 Camera Raw 吸管流程落地：`adjust/camera_raw.rs` 新增 `DEFRINGE_PURPLE_CENTER=290.0`/`DEFRINGE_GREEN_CENTER=90.0`/`DEFRINGE_SPAN=25.0` 常量、`hue_degrees`（RGB→色相 0…360）、`straight_pixel_hue`（透明像素返回 None）、`apply_defringe_sample`（较近的紫/绿中心 ±25° 归一化，amount 为 0 时起步 50）、`apply_auto_white_balance`（选 Auto + `auto_balance` 求温度/色调）；app `state.rs` 加 `camera_raw_samples_defringe`/`camera_raw_readout` 状态与 `sample_camera_raw_defringe`/`update_camera_raw_readout`/`apply_camera_raw_auto_white_balance` 方法，canvas 点击/移动在 Camera Raw sheet 打开时路由到吸管。
 - §4.1-3 变换吸附接入：session `alignment_snap_targets`/`transform_snap_targets`（画布边 + 可见图层边与中心，`snapping_enabled` 门控）、`snapped_move`（TransformSnap::offset 求偏移，落点写入 `snap_guides` 供画布画参考线）；app 的 `MoveLayer` 拖拽已路由 `snapped_move`（TransformSnap.distance=10 文档像素）——TransformSnap 自此有了消费点。
 - §5.2-3 GPU 连续沉积模型落地（MetalBrushCoverage.swift → `tools/brush.rs`）：`render_continuous_tile`/`ContinuousTile`/`ContinuousParams`——coverage = 1−exp(−∫tipDensity)，8 点 Gauss-Legendre 沿线积分（裁剪到 tip support），permanent 与 tail 分离（tail 预览永不进入 permanent，含自交）、硬笔刷保留像素边抗锯齿、optical density 封顶 20；`BrushStroke` 记录指针事件段（append，单击为零长段），`result()`/`heal` 的 coverage 改由连续引擎产出（heal 后清空事件段以熄灭湿预览）；spacing 无关性有测试（长短事件同点沉积相等）。
@@ -59,7 +98,19 @@
 - §3.2 选区编辑：`fill_selection`/`clear_selected_pixels`（蒙版目标走 Fill Mask/背景色）、`can_invert`/`invert_pixels`（含 1×1 均匀蒙版扩展）、`add_mask_from_selection`（revealing 语义对齐 addMask）、`add_adjustment`/`update_adjustment`（Gradient Map 前景→背景、Grain/AddNoise 随机种子）、`can_edit_pixels`、`raster_edit_for_active`/`commit_pixel_edit` 辅助。
 - §2/§3.1-9 剪贴板整文件落地：`selection_copy_region`/`can_copy_pixels`/`render_selected_pixels`（蒙版作不透明灰、软选区边缘保留）/`render_merged_pixels`/`copy_selection`/`copy_merged_selection`/`cut_selection`/`paste_pixels`/`layer_via_copy`/`add_pixel_layer`/`next_layer_name` + `PixelClipboard`；`duplicate_active_layer` 重写为连后代复制 + parent/maskSource 重映射 + 万层上限 + " copy" 命名。系统粘贴板（PNG 互通）属 app 层仍缺。浮动变换（Cmd-T）、多选批量、导入管线、Distort 仍缺。
 
-**测试**：核心 321 → 397（+76：混合公式、heal、渲染语义 6 项、蒙版/删除/选区编辑/调整图层/剪贴板/复制文件夹/浮动变换 4 项/导出 5 项/多选批量与折叠 5 项/重排/眼睛滑动/批量删除/导入 3 项/DistortWarp 6 项/活蒙版剪贴与释放 3 项/烘焙 1 项/Distort 会话 2 项/真字体排版 6 项/文本会话 5 项/连续沉积 3 项/裁剪吸附 4 项/吸管色相与 defringe 4 项/变换吸附 2 项）。
+**第三轮批次（§9.3 快捷键批量补齐 + §6.1-12 采样降档 + §7.1-2 CIColorCube）**
+
+- §9.3 快捷键批量补齐（KeyboardShortcuts.swift:74-124 对齐）：新动作 + handler + 绑定——剪贴板四件套 Cut/⌘X、Copy/⌘C、Copy Merged/⇧⌘C、Paste/⌘V；Invert Pixels/⌘I；Toggle Clipping Mask/⌥⌘G；Move Layer Up/Down（⌘]/⌘[）；Show Transform Controls/⌘H（session `shows_transform_controls` 字段 + 画布 TransformOverlay 门控：`shows || edit.persistent`，LayerRenderer.swift:65 语义）；笔刷硬度 ⇧[/⇧]（core `change_brush_hardness` 25% 四分步进、80%→上 100%/下 75%，EditorSession+Brush.swift:212-218，滑杆同步）；混合模式步进 ⇧−/⇧=；循环形状 ⇧U；Fill 三键（⌥⌫/⌘⌫/⇧⌫，delete+backspace 双写）；Save As/⇧⌘S；Close/⌘W；Snap 总开关/⇧⌘;；Lock Guides/⌥⌘;；Levels 预览/⌥P。**键位对齐**：Export PNG `ctrl-shift-s`→`ctrl-shift-e`（⇧⌘E）、Export JPEG `alt-shift-s`→`ctrl-alt-shift-s`（⌥⇧⌘S）、Show Guides→`ctrl-;`（⌘;）。
+- §9.3 菜单补齐：Edit 菜单 Cut/Copy/Copy Merged/Paste/Content-Aware Fill；Image 菜单 Invert；Layer 菜单 Create Clipping Mask/Move Layer Up/Down；View 菜单 Show Transform Controls/Snap/Lock Guides 勾选项（CompositorApp.swift:47-318）。
+- §9.3 Lock Guides core 守卫：`hit_guide`/`begin_guide_creation`/`begin_guide_move` 在 `locks_guides` 时拒绝（Guides.swift:74/92），此前字段存在但从不被消费；有测试。
+- §9.3 Levels 预览开关落地：sheet 加 Preview 勾选框（Swift `LevelsEdit.preview`/LevelsSheet Toggle 语义——关时预览显示原始像素），⌥P 经 `toggle_levels_preview` 翻转并即时重算预览。
+- §6.1-12 预缩小档位修正：新 `downsample_level`（DownsampleCache.level 逐行移植——`factor ≥ 0.5` 不缩、`floor(log2(1/factor))`、maxLevel 6、非有限/非正为 0）；`resample` 的 High 分支从"next_w < w 即 break"改走该档位（恰 0.5 不再多缩一次、深缩小次数与 Swift 一致、超 maxLevel 交给终采）；`draw_affine` 同步改走档位函数（语义等价重写）；**`LayerRenderer.interpolation` 语义落地**——缩小终采一律双线性（Low），放大且 High 走 Lanczos 终采（`resample` 返回 `lanczos_resize`、`draw_affine` 用新 `lanczos_sample` 连续点采样）；4 个新测试（档位表、恰半边界、放大锐利终采、仿射路径）。
+- §7.1-2 HueSaturation 渲染路径：`hue_saturation_apply` 改走 **33³ CIColorCube**（`ColorCube::build` 逐行移植 HueSaturationFilter.cube——蓝外/绿中/红内循环、alpha=1、per-hue hue_response 预计算、格点用原 f64 `adjust_hsl` 填充）+ **f32 三线性插值**采样（color×32 格坐标、8 角混合）+ 非预乘→查找→预乘（HueSaturation.swift:238-239 alpha 语义）；`previewLimit=8000` 属对话框预览机制（core 无对应实体），留待 §9.3 面板批次；7 个新测试（格点恒等、三线性混合、与精确逐像素 f64 数学 ≤3/255 一致、色域调整、colorize、恒等短路、路由验证）。
+- app 测试扩容（canvas 坐标/状态机）：形状拖拽矩形计算抽为纯函数 `shape_drag_rect`（Shift 45° 八分吸附/Option 中心放大/线段忽略修饰键）并补 3 个测试；`handle_at` 八手柄顺时针全遍历；坐标往返极值（MIN_ZOOM…MAX_ZOOM）1 项。
+
+**测试**：核心 452 → 465（+13：硬度步进 1、采样档位/放大终采/仿射锐化 4、锁定参考线 1、CIColorCube 7）；app 6 → 10（+4：形状拖拽 2、手柄遍历 1、极值往返 1）。全局 475 全绿，工作区零错误。
+
+**测试**：核心 321 → 452（+131，另有 app 包 6 个单元测试，全局 458）（+131：历史灰度字节估算与恒等/克隆条目 3 项、图像身份相等 1 项、蒙版/文本/图层身份相等 3 项、原子保存无残留（经既有 store 测试）、参考线交互 3 项与可视化数据 1 项、蒙版采样 1 项、grow→blur→trim 2 项、解析 AA 积分 1 项，其余同前；另加 winding 双环 1 项、椭圆面积 1 项、小环 band 1 项、锥形拖尾 1 项、halve 取整/平场 1 项/参考线交互 3 项/显示变换与形状重画 3 项/PSD 光栅 AA 1 项/app 单元 6 项/解析光栅化与羽化 2 项/MacRoman 与收口角 2 项/透视透明 1 项）。混合公式、heal、渲染语义 6 项、蒙版/删除/选区编辑/调整图层/剪贴板/复制文件夹/浮动变换 4 项/导出 5 项/多选批量与折叠 5 项/重排/眼睛滑动/批量删除/导入 3 项/DistortWarp 6 项/活蒙版剪贴与释放 3 项/烘焙 1 项/Distort 会话 2 项/真字体排版 6 项/文本会话 5 项/连续沉积 3 项/裁剪吸附 4 项/吸管色相与 defringe 4 项/变换吸附 2 项/笔刷 copy·fill·move 3 项/resize 语义与防御 5 项/翻转与选区镜像 2 项/选区守卫 1 项/heal 区域与旋转不变性 2 项/clone aligned 2 项/渐变挂起与蒙版 3 项）。
 
 ## 总体结论
 
@@ -123,8 +174,8 @@
 
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
-| 1 | 历史字节估算：Swift 按位图实际 bytesPerRow（灰度蒙版 1 B/px）；Rust 一律 `w*h*4`，蒙版多的文档更早触发 256MB 上限裁剪 | `Document/DocumentHistory.swift:103` | `core/src/history.rs:186` |
-| 2 | 快照相等语义：Swift 对图像用 `===` 身份比较；Rust derive 值相等（含像素数据），"内容相同的不同图像对象"场景下"文档未变不记历史"判定相反 | `Document/EditorSession.swift:4-7` | `core/src/document.rs:501`、`raster.rs:207`、`history.rs:123` |
+| 1 | 历史字节估算：Swift 按位图实际 bytesPerRow（灰度蒙版 1 B/px）；Rust 一律 `w*h*4`，蒙版多的文档更早触发 256MB 上限裁剪 | `Document/DocumentHistory.swift:103` | ✅ 已补（蒙版 1 B/px、image+thumbnail 分计、Arc 身份去重） |
+| 2 | 快照相等语义：Swift 对图像用 `===` 身份比较；Rust derive 值相等（含像素数据），"内容相同的不同图像对象"场景下"文档未变不记历史"判定相反 | `Document/EditorSession.swift:4-7` | ✅ 已补（ImportedImage/LayerMask/LayerText/ImageLayer 手写 PartialEq：图像 Arc 身份、其余按值） |
 | 3 | 删除活动层后选中层：Swift 移到邻层 `layers[min(index,count-1)]`；Rust 置 `None`（LayerTests.swift:27 专门测此行为） | `Document/LiveLayerMask.swift:142-145` | `core/src/session.rs:414-417` |
 | 4 | `select_layer` 不提交进行中的变换、无守卫；Swift `selectLayer` 先 `commitTransform()`+`resolveGradient()` 且被笔刷/levels 守卫 | `EditorSession.swift:325-331` | `core/src/session.rs:362-368` |
 | 5 | undo/redo 恢复：Swift 恢复 `isMaskSelected`（按 keepMaskTarget）、取消裁剪、适配视口；Rust 只换 document/active_layer_id，`is_mask_selected` 变陈旧 | `EditorSession.swift:570-591` | `core/src/session.rs:332-350` |
@@ -166,22 +217,22 @@
 | 1 | DistortWarp 全套（homography/warp/carried/warpMask/mapPath + session distort 流程） | `Document/Distort.swift:8-238,260-392` | ✅ 已移植（`tools/distort.rs`；corners 由 `commit_transform` 的 distort 分支消费） |
 | 2 | CropSnap 裁剪边吸附（move 吸双边/resize 吸被拖边/symmetric 镜像半宽） | `Document/Crop.swift:49-112` | ✅ 已移植（`core/canvas.rs` `CropSnap` + `drag_crop` 集成，见顶部修复进度） |
 | 3 | 变换/裁剪对齐吸附目标 `transformSnapTargets/snappedMove/cropSnapTargets/alignmentSnapTargets` | `Crop.swift:116-142`、`Guides.swift:182-220` | ✅ 已移植并接入（session `alignment_snap_targets`/`transform_snap_targets`/`snapped_move`/`crop_snap_targets`；MoveLayer 拖拽与 drag_crop 已消费） |
-| 4 | `flip_canvas` 不镜像选区（Swift 用仿射镜像 `selection.path`） | `Document/LayerFlip.swift:69-77` | `core/src/session.rs:1266-1281` |
-| 5 | `flip_layers` 不支持多选/组翻转 | `LayerFlip.swift:24-51` | `core/src/session.rs:1219-1246` |
-| 6 | Canvas Size 的 fill（"Canvas Extension" 有色扩展层）+ 像素/图层数预算 + 颜色校验 | `IO/CanvasResizer.swift:8-15,23,36-69` | `core/src/canvas.rs:142-158` 完全忽略 `options.fill`（`CanvasExtensionColor` 定义于 `canvas.rs:96-101` 无使用者）；`app/src/sheets_ui.rs:695` 也不传 |
-| 7 | CanvasResizer 防御校验（1…30000、同尺寸早退、逐层 transform.isValid） | `IO/CanvasResizer.swift:8-23` | `core/src/canvas.rs:142-158` 无校验（同尺寸时还会清空 selection） |
-| 8 | 参考线拖拽/标尺交互全套 | `Guides.swift:91-179` | `core/src/session.rs:1409-1431` 仅 `clear_guides/add_guide` |
+| 4 | `flip_canvas` 不镜像选区（Swift 用仿射镜像 `selection.path`） | `Document/LayerFlip.swift:69-77` | ✅ 已补（选区随画布仿射镜像） |
+| 5 | `flip_layers` 不支持多选/组翻转 | `LayerFlip.swift:24-51` | ✅ 已补（多选关于共享包围盒中轴翻转） |
+| 6 | Canvas Size 的 fill（"Canvas Extension" 有色扩展层）+ 像素/图层数预算 + 颜色校验 | `IO/CanvasResizer.swift:8-15,23,36-69` | ✅ 已补（`resize_canvas` 的 fill 扩展层与防御校验；app 侧 fill 传参待 UI） |
+| 7 | CanvasResizer 防御校验（1…30000、同尺寸早退、逐层 transform.isValid） | `IO/CanvasResizer.swift:8-23` | ✅ 已补（防御校验 + 同尺寸 no-op 保选区） |
+| 8 | 参考线拖拽/标尺交互全套 | `Guides.swift:91-179` | ✅ 已补（`hit_guide`/`begin_guide_creation`/`begin_guide_move`/`move_guide_drag`/`finish_guide_drag`/`cancel_guide_drag`/`snapped_guide_position`，undo 名 New Guide/Move Guide/Delete Guide） |
 
 ### 4.2 行为差异
 
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
-| 1 | ImageResizer 旋转层：Swift 取 4 角投影后缩放的包围盒，输出 transform 的 rotation/flip **归零**（ImageSizeTests.swift:56 断言）；Rust 线性缩放 origin/size 并保留 rotation/flip → 旋转/非均匀缩放层尺寸与位置不一致 | `IO/ImageResizer.swift:36-43` | `core/src/canvas.rs:179-182` |
-| 2 | 1×1 均匀 mask：Swift 原样保留（分辨率无关，`ImageResizer.swift:77`）；Rust 无条件重采样放大。mask placement 缩放公式同样不同（Swift 用 `placing(unitToDocument ∘ scale)`，`ImageResizer.swift:97`；Rust 线性缩放，`canvas.rs:198-201`） | 同上 | `core/src/canvas.rs:191-201` |
-| 3 | 原子保存强度：Swift `NSFileCoordinator(.forReplacing)` + FileWrapper atomic（旧包在交换前完好）；Rust 先 `remove_dir_all` 旧包再 rename 暂存包，两步间崩溃丢包 | `IO/ProjectStore.swift:111-118` | `core/src/project/store.rs:512-528` |
-| 4 | PNG 严格性：Swift 拒多帧 APNG 且逐属性查 depth≤8（`ProjectStore.swift:155-161`）；Rust 只拒 16-bit 色型，多帧按首帧接受 | 同上 | `core/src/project/store.rs:299-307` |
-| 5 | `resize_image_to` 缺 resolution（1…9600）与 100MP 总像素预算校验；Swift 同尺寸时只改 resolution 早退 | `IO/ImageResizer.swift:15-25` | `core/src/session.rs:1514-1523` |
-| 6 | Image Size 无 sampling 选项（Swift `ImageSizeOptions.sampling`，测试用 `.nearest`）；Rust 硬编码 `LayerSampling::High` | `IO/ImageResizer.swift:4-9` | `core/src/canvas.rs:187,195` |
+| 1 | ImageResizer 旋转层：Swift 取 4 角投影后缩放的包围盒，输出 transform 的 rotation/flip **归零**（ImageSizeTests.swift:56 断言）；Rust 线性缩放 origin/size 并保留 rotation/flip → 旋转/非均匀缩放层尺寸与位置不一致 | `IO/ImageResizer.swift:36-43` | ✅ 已重写（`resize_image` 逐层角点包围盒重光栅化，见顶部修复进度） |
+| 2 | 1×1 均匀 mask：Swift 原样保留（分辨率无关，`ImageResizer.swift:77`）；Rust 无条件重采样放大。mask placement 缩放公式同样不同（Swift 用 `placing(unitToDocument ∘ scale)`，`ImageResizer.swift:97`；Rust 线性缩放，`canvas.rs:198-201`） | 同上 | ✅ 已重写（统一/已放置蒙版像素保留、placement 用 placing∘scale 公式） |
+| 3 | 原子保存强度：Swift `NSFileCoordinator(.forReplacing)` + FileWrapper atomic（旧包在交换前完好）；Rust 先 `remove_dir_all` 旧包再 rename 暂存包，两步间崩溃丢包 | `IO/ProjectStore.swift:111-118` | ✅ 已补（旧包先 rename 到 `.backup-*`，暂存就位后删除；rename 失败回滚旧包） |
+| 4 | PNG 严格性：Swift 拒多帧 APNG 且逐属性查 depth≤8（`ProjectStore.swift:155-161`）；Rust 只拒 16-bit 色型，多帧按首帧接受 | 同上 | ✅ APNG 已拒（`read_png_asset` 的 `is_apng` 检查；depth≤8 由 16-bit 色型拒绝覆盖） |
+| 5 | `resize_image_to` 缺 resolution（1…9600）与 100MP 总像素预算校验；Swift 同尺寸时只改 resolution 早退 | `IO/ImageResizer.swift:15-25` | ✅ 已补（resolution 校验、同尺寸早退、逐层预算） |
+| 6 | Image Size 无 sampling 选项（Swift `ImageSizeOptions.sampling`，测试用 `.nearest`）；Rust 硬编码 `LayerSampling::High` | `IO/ImageResizer.swift:4-9` | ✅ 已补（`resize_image_to` 带 sampling 参数） |
 | 7 | `LayerSampling` serde 默认值内部不一致：enum 级 `#[default] Smooth`（`transform.rs:10-11`），manifest 路径默认 High（`project/manifest.rs:202-207`）；Swift 字段默认 `.high`（`LayerTransform.swift:24`）——若走 CanvasDocument serde 路径持久化将与 Swift 分叉 | `Document/LayerTransform.swift:24` | `core/src/transform.rs:8-11`、`project/manifest.rs:202-207` |
 
 ### 4.3 简化/多出
@@ -206,19 +257,19 @@
 
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
-| 1 | heal 修复区域：Swift 限制在 `painted.insetBy(-reach)`（`reach=(max(w,h)+32)*3.2`）内搜索 patch；Rust 全图层网格搜索 → 大图层上选中的源 patch 可不同 | `Document/BrushStroke.swift:776-784` | `core/src/tools/heal.rs:192-224` |
+| 1 | heal 修复区域：Swift 限制在 `painted.insetBy(-reach)`（`reach=(max(w,h)+32)*3.2`）内搜索 patch；Rust 全图层网格搜索 → 大图层上选中的源 patch 可不同 | `Document/BrushStroke.swift:776-784` | ✅ 已补（`heal_region` 裁剪工作区，见顶部修复进度） |
 | 2 | 笔画 provisional tail 的 coverage 撤销：Swift `drawTail` 保存 tail 可达 tile 的 coverage 图，`removeTail` 精确恢复；Rust 只恢复间距状态，tail 已画的 dab 保留（软笔刷下每次 pointer 事件留直线 tail 多余覆盖） | `BrushStroke.swift:354-387` | `core/src/tools/brush.rs:284-293` |
 | 3 | GPU 连续沉积模型缺失：Swift 默认 `useGPU=true` 走 `appendContinuous`（coverage=1−exp(−∫tipDensity)，0.2px 自适应细分）；Rust 是 CPU dab 路径 | `Rendering/MetalBrushCoverage.swift:70-161`、`BrushStroke.swift:149-150,224,281-309` | `core/src/tools/brush.rs`（无 continuous 实现） |
-| 4 | 旋转/非均匀缩放图层上的笔刷形状**语义相反**：Swift CPU dab 在文档空间画圆（保证图层上仍是圆）；Rust 只映射圆心、tip 在图层像素空间盖章 → 旋转图层上画出文档空间椭圆 | `BrushStroke.swift:546-547,559-560`（测试 BrushTests.swift:197） | `core/src/tools/brush.rs:360-374` |
-| 5 | Clone Stamp aligned 语义缺失：Swift aligned 时复用首笔 `cloneOffset`（取整）；Rust 每次起笔重算（恒 unaligned），`session.rs:148` `clone_offset` 从未写入，`CloneSettings.aligned` 是死配置 | `Document/CloneStamp.swift:23-27`、`EditorSession+Brush.swift:39` | `app/src/canvas.rs:465-472` |
-| 6 | Gradient 预览/提交：Swift `GradientEdit` 挂起可重画、切工具自动提交、支持蒙版渐变；Rust 拖完即提交、`mask:false`（蒙版渐变不可用） | `Document/Gradient.swift:36-108` | `app/src/canvas.rs:682-707`（`:699`） |
+| 4 | 旋转/非均匀缩放图层上的笔刷形状**语义相反**：Swift CPU dab 在文档空间画圆（保证图层上仍是圆）；Rust 只映射圆心、tip 在图层像素空间盖章 → 旋转图层上画出文档空间椭圆 | `BrushStroke.swift:546-547,559-560`（测试 BrushTests.swift:197） | ✅ 连续沉积引擎按文档空间积分（旋转不变性有测试）；dab 盖章路径仅为 has_paint 内部状态 |
+| 5 | Clone Stamp aligned 语义缺失：Swift aligned 时复用首笔 `cloneOffset`（取整）；Rust 每次起笔重算（恒 unaligned），`session.rs:148` `clone_offset` 从未写入，`CloneSettings.aligned` 是死配置 | `Document/CloneStamp.swift:23-27`、`EditorSession+Brush.swift:39` | ✅ 已补（`clone_stroke_offset`/`begin_clone_stroke`，app 起笔接入） |
+| 6 | Gradient 预览/提交：Swift `GradientEdit` 挂起可重画、切工具自动提交、支持蒙版渐变；Rust 拖完即提交、`mask:false`（蒙版渐变不可用） | `Document/Gradient.swift:36-108` | ✅ 已补（session `GradientDraft` 挂起/重画/应用 + 蒙版灰渐变；切层 resolve 已接入） |
 | 7 | Blur 采样对象：Swift 画的是 displayedTransform 后的画布显示（含蒙版分支）；Rust 直接对 `layer.asset` 原图做高斯，无变换/蒙版 | `Document/BlurTool.swift:8-40` | `app/src/canvas.rs:475-482` |
 | 8 | Clone/Blur 采样源：Swift 经 displayedTransform 画到文档尺寸（含 sampleAllLayers 合成）；Rust 单图层时直取原始 asset（变换≠单位阵时错位） | `Document/CloneStamp.swift:39-48` | `app/src/canvas.rs:488-496` |
 | 9 | heal 随机种子：Swift 每次 `UInt32.random`；Rust 固定 `0x6d2b79f5` | `BrushStroke.swift:793` | `app/src/canvas.rs:510` |
 | 10 | `replaces_with_clone` 的 copy 混合：Swift `.copy` blend 结果 = src×(cov×opacity) 不保留 dst；Rust `out*(1-a)+s*a` 保留 dst（半覆盖像素不同，影响 finishWarp/Blur 软边） | `BrushStroke.swift:464` | `core/src/tools/brush.rs:461-468` |
 | 11 | `fill()` 是否吃 opacity：Swift 不吃（直接 fill）；Rust 乘 `settings.opacity`（改过笔刷不透明度后填充变淡） | `BrushStroke.swift:626-631` | `core/src/tools/brush.rs:607-638` |
 | 12 | 形状工具：Swift `finishShape` 后 uncommitted 时实时重渲（缩放=重绘）；Rust `add_shape_layer` 立即写 asset → 形状缩放是重采样拉伸非重绘；缺 Option 中心放大、直线 45° 吸附、`toggleShapeKind`/`redrawShape` | `Document/ShapeTool.swift:84-100,161-194` | `core/src/session.rs:517-556`、`app/src/canvas.rs:316-322` |
-| 13 | warp finish：Swift 校验图层未被并发修改且经选区剪裁；Rust 无守卫、`selection_clip: None`（结果可越界涂写） | `Document/SmudgeLiquify.swift:192-201` | `core/src/tools/warp.rs:248-283` |
+| 13 | warp finish：Swift 校验图层未被并发修改且经选区剪裁；Rust 无守卫、`selection_clip: None`（结果可越界涂写） | `Document/SmudgeLiquify.swift:192-201` | ✅ 已补（`WarpStroke` 层快照身份守卫 + `selection_clip` 剪裁） |
 | 14 | move_lifted 采样：Swift 整像素 `.none`/分数 `.high` 插值；Rust 恒 Nearest，punch-out 用截断 `as u8` 非四舍五入 | `BrushStroke.swift:737` | `core/src/tools/brush.rs:719,724-729` |
 
 ### 5.3 缺失（本域内）
@@ -250,9 +301,9 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 | 7 | 剪贴组成组语义：Swift 连续剪贴子层在共享 group surface 内先互相合成、整组以 base 的 blend mode 上画、基于相邻性；Rust 每层各自乘 source alpha 后以自己的 blend mode 对整画布合成，`mask_source_id` 不要求相邻/同父 | `LiveMaskRenderer.swift:63-111` | `core/src/render.rs:234-250` |
 | 8 | 文件夹不透明度不参与合成：Swift `effectiveOpacity` 逐层乘祖先 folder opacity；Rust 只用自身 opacity | `LayerGroups.swift:63-71`、`EditorCanvas.swift:817` | `core/src/render.rs:233` |
 | 9 | Gaussian Blur 滤镜边界：Swift 刻意不 clamp（边缘向透明扩散）+ grow→blur→trim 流程；Rust 边缘复制 + app 无 pad/trim → 层边缘结果方向相反 | `Document/Filters.swift:115-133,146-148,164-166,297-337,502-517` | `core/src/raster.rs:550-589,623-634`、`app/src/state.rs:564-587` |
-| 10 | Motion Blur profile：Swift `CIMotionBlur` 锥形衰减；Rust 均匀 box + floor 整像素采样（半径系数 1/√12 一致） | `Filters.swift:135-138,167-173` | `core/src/filters.rs:343,401-441` |
-| 11 | halving 算法：Swift vImage **Lanczos** + 8px padding + 尺寸向上取整 `(w+1)/2`；Rust 2×2 box + 向下取整 `w/2` | `Rendering/DownsampleCache.swift:82-111` | `core/src/raster.rs:389-411` |
-| 12 | 预缩小阈值差一档：Rust `scale ≤ 0.5` 即 halve；Swift `factor < 0.5` 才启用（scale 恰 0.5 时 Rust 多缩一次）；且 Swift 缩小时非 Nearest 一律 Low、Rust 无 Low/Medium 概念 | `DownsampleCache.swift:32-35`、`Rendering/LayerRenderer.swift:42-44` | `core/src/raster.rs:502-518,293-297` |
+| 10 | Motion Blur profile：Swift `CIMotionBlur` 锥形衰减；Rust 改为高斯锥形权重（σ=radius，归一化；有测试） | `Filters.swift:135-138,167-173` | ✅ 已补（高斯锥形权重 σ=radius，归一化） |
+| 11 | halving 算法：Swift vImage **Lanczos** + 8px padding + 尺寸向上取整 `(w+1)/2`；Rust 改为分离式 Lanczos3 + ceil(w/2)（8px padding 属实现细节未复刻） | `Rendering/DownsampleCache.swift:82-111` | ✅ 已补（分离式 Lanczos3、ceil 半尺寸；8px padding 属实现细节未复刻） |
+| 12 | 预缩小阈值差一档：Rust `scale ≤ 0.5` 即 halve；Swift `factor < 0.5` 才启用（scale 恰 0.5 时 Rust 多缩一次）；且 Swift 缩小时非 Nearest 一律 Low、Rust 无 Low/Medium 概念 | `DownsampleCache.swift:32-35`、`Rendering/LayerRenderer.swift:42-44` | ✅ 已补（`downsample_level` 移植 `DownsampleCache.level`：`factor ≥ 0.5` 不缩、`floor(log2(1/factor))`、maxLevel 6；`resample`/`draw_affine` 改走该档位函数，恰 0.5 留给终采；`LayerRenderer.interpolation` 语义落地——缩小终采一律双线性（Low），放大且 High 走 Lanczos 终采（`lanczos_resize`/`lanczos_sample`），4 个新测试） |
 | 13 | Add Noise seed：Swift 每次编辑随机（`Filters.swift:223`）；Rust app 硬编码 7（`state.rs:579`） | `Filters.swift:223` | `app/src/state.rs:579` |
 | 14 | 选区相关渲染差异（与 D 域交叉）：蚂蚁线颜色相反且无动画（Swift 白实线+黑虚线相位动画 0.12s；Rust 黑实线+白虚线静止） | `Rendering/TransformOverlay.swift:196-210`、`EditorCanvas.swift:2001-2015` | `app/src/canvas.rs:914-921,1101-1106` |
 
@@ -260,7 +311,7 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 
 - `run_filter` 在 core 内无调用方（`filters.rs:350`），由 app 直接对原尺寸图层像素调用，缺 blur padding 与 trim（`session.rs:1368` `trimmed` 只用于 Merge Down）。
 - `render_effects` 无结果缓存（Swift `LayerEffects.swift:375-408` cache + EffectsPreviewCache）；无 100MP/80M 尺寸 guard（`LayerEffects.swift:441`、`MetalLayerEffects.swift:61`）；GPU 路径 inner glow 的 `size>0` gate（`MetalLayerEffects.swift:155`）Rust 无（`effects.rs:713`）。
-- `mask_clip_image`（`render.rs:27-57`）无 limit 交互降采样与 placement 缓存。
+- `mask_clip_image`（`render.rs:27-57`）已补 `mask_clip_image_limited` 的 limit 截断；placement 缓存仍缺。
 - effects coverage 的 Gaussian 4σ 截断 vs CI 约 3σ（`raster.rs:554,596`）。
 
 ---
@@ -272,12 +323,12 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
 | 1 | **app 层 `levels_auto` 与原版算法不同**：Swift 三模式（Contrast/Color/Neutral）、单通道 256 bin、clip 0.001、Neutral gamma=log(mean)/log(0.5)；Rust 对 1024 个混合 bin 求 0.5%/99.5% 分位、无三模式、无 gamma | `Document/LevelsAutomatic.swift:4-37` | `app/src/sheets.rs:382-422` |
-| 2 | HueSaturation 渲染路径：Swift 构建 33³ CIColorCube（三线性 + f32 量化）应用；Rust 逐像素 f64 精确计算 HSL——语义等价但输出非 1:1（`dimension=33`、`previewLimit=8000` 无对应） | `Document/HueSaturation.swift:234-243,383-405` | `core/src/adjust/hue_saturation.rs:409-448`、`adjust/mod.rs:27-47` |
+| 2 | HueSaturation 渲染路径：Swift 构建 33³ CIColorCube（三线性 + f32 量化）应用；Rust 逐像素 f64 精确计算 HSL——语义等价但输出非 1:1（`dimension=33`、`previewLimit=8000` 无对应） | `Document/HueSaturation.swift:234-243,383-405` | ✅ 已补（`ColorCube` 33³ 构建 + f32 三线性采样 + 非预乘/预乘包裹，`hue_saturation_apply` 改走 cube；与精确逐像素数学 ≤3/255；`previewLimit=8000` 属对话框预览机制，留待 §9.3 面板批次） |
 | 3 | 各 `apply` 缺 `is_valid` 检查：Swift 在 CameraRaw/Curves/Exposure/GradientMap/BlackWhite/ColorBalance/Grain 的 `apply` 均先 `guard isValid else throw`；Rust 全部静默处理 | `Document/CameraRaw.swift:224-225`、`Curves.swift:34`、`ImageAdjustments.swift:65,89,133,166,202` | `core/src/adjust/camera_raw.rs:1584-1692`（`is_valid` 定义于 `:1426` 未被 apply 调用）、`curves.rs:92-103`、`image_adjustments.rs:123-595` |
 | 4 | 选区 coverage 生成：Swift 把路径经逆变换后重新光栅化（亚像素精确）；Rust 对预生成 coverage 位图做 floor 最近邻查找（旋转/缩放图层边缘不一致），且 `pixel.rs:25-33` 有一段无效死代码 | `Document/PixelAdjust.swift:23-34` | `core/src/adjust/pixel.rs:10-52` |
 | 5 | 选区回混精度：Swift `CIBlendWithMask`（浮点）；Rust 整数 `(adj·a+orig·(255−a)+127)/255`（可差 1） | `PixelAdjust.swift:38-46` | `core/src/adjust/pixel.rs:58-82` |
 | 6 | GuidedMatte 重采样：Swift CGContext `.high` 一步缩放；Rust halve+resample 组合，滤波器不同非位等（guided_filter 本体 epsilon=1e-4 一致） | `GuidedMatte.swift:68-117` | `core/src/adjust/pixel.rs:257-281` |
-| 7 | 几何 warp：Swift 用 `CIPerspectiveTransform`（越界透明）；Rust 手写单应 + bilinear（越界 clamp 到边缘）→ 边缘像素外推行为不同 | `CameraRawGeometryCalibration.swift:77-83` | `core/src/adjust/camera_raw.rs:3130-3182`、`raster.rs:305-334` |
+| 7 | 几何 warp：Swift 用 `CIPerspectiveTransform`（越界透明）；Rust 手写单应 + bilinear（越界输出透明（对齐 CI） | `CameraRawGeometryCalibration.swift:77-83` | ✅ 已补（越界输出 premultiplied 透明黑） |
 | 8 | App 层 Levels/HueSaturation 提交绕过选区：Swift 两滤镜都经选区混合；Rust 直接整层应用 | `Levels.swift:78-83`、`HueSaturation.swift:244-250` | `app/src/sheets.rs:262-300`、`state.rs:537-561` |
 | 9 | colorize 饱和度下限 bug：Rust `saturation.max(1.0)`（滑块原始 −100..100 取 max(1.0)）抬到 1%；Swift 是 `settings.saturation/100` 后 clamp 0…1（可为 0） | `HueSaturation.swift:301` | `app/src/sheets.rs:290` |
 | 10 | `FilterJob.visualize_point_color` 默认 0 而非 −1 → 每次滤镜预览都进 visualize 分支（无视觉影响但属偏差） | `CameraRaw.swift:221` | `app/src/state.rs:586`、`camera_raw.rs:1604-1609` |
@@ -297,11 +348,11 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
 | 1 | `coverage_bounds` ceil 次序：Swift `ceil(feather*2)`；Rust `(ceil(feather))*2`（feather 非整数时外扩不同：如 feather=4.2426 → Swift 9，Rust 10） | `Document/Selection.swift:35` | `core/src/selection.rs:432` |
-| 2 | contains/rasterize 用偶奇规则；Swift 用 winding（自交套索结果不同） | `Selection.swift:22,259` | `core/src/selection.rs:134-155,502-529,544-562` |
-| 3 | 椭圆：Swift `addEllipse` 4 段 Bézier；Rust 96 段折线（边界像素覆盖细微差） | `Selection.swift:218` | `core/src/selection.rs:81-93` |
+| 2 | contains/rasterize 用偶奇规则；Swift 用 winding（自交套索结果不同） | `Selection.swift:22,259` | ✅ 已补（`winding_contains`：有向穿越计数非零即内） |
+| 3 | 椭圆：Swift `addEllipse` 4 段 Bézier；Rust 改为 kappa 四段 Bézier 折线化（面积差 <2%） | `Selection.swift:218` | ✅ 已补（kappa 四段 Bézier 折线化，面积差 <2%） |
 | 4 | 环→多边形配洞按外接矩形取第一个命中：三层嵌套（岛中湖）配错父级、语义反转；CGPath 原生支持任意嵌套 | （CGPath 原生） | `core/src/selection.rs:320-353`（`:339-346` 的 break） |
-| 5 | expand/contract 描边带：Swift 整条路径一次 `strokingWithWidth`；Rust 逐环 offset+作差再并，凸角圆弧 ≤32 段、极小环跳过 → 极小环上 contract 不收缩 | `Selection.swift:336` | `core/src/selection.rs:173-194,233-303`（`:283`） |
-| 6 | coverage 光栅化：Swift CG 解析抗锯齿；Rust 4×4 超采样（16 级灰度）——README "scanline coverage" 名不符实 | `Selection.swift:19-22` | `core/src/selection.rs:505-529`（`SS=4` 于 `:511`） |
+| 5 | expand/contract 描边带：Swift 整条路径一次 `strokingWithWidth`；Rust 逐环 offset+作差再并，圆弧 π/16 密度、小环退化时整环按 band 覆盖 | `Selection.swift:336` | ✅ 已补（圆弧 π/16 密度；极小环翻转检测整环覆盖，contract 收缩） |
+| 6 | coverage 光栅化：Swift CG 解析抗锯齿；Rust 4×4 超采样（16 级灰度）——README "scanline coverage" 名不符实 | `Selection.swift:19-22` | ✅ 已补（解析面积分光栅化，边缘像素精确覆盖，见顶部修复进度） |
 | 7 | 羽化模糊：σ=feather/2 一致，但 Swift 走 CI（工作色彩空间/自有核截断），Rust 4σ 截断 + 边缘复制（`raster.rs:623-634` 实为边缘复制非镜像） | `Selection.swift:27`、`PixelAdjust.swift:48-54` | `core/src/selection.rs:444`、`raster.rs:592-649` |
 | 8 | magic_wand 空白图层行为：Swift 返回全透明画布图 → 全画布命中（MagicWandTests.swift:101-103 断言 200px 全选）；Rust 返回 None → 直接不选 | `MagicWand.swift:128-137` | `core/src/session.rs:1054-1064`、`:998-1000` |
 | 9 | wand 守卫与错误：Swift `tooDetailed`（800 万边上限）写入 `brushError` 提示；Rust `Err(_) => return` **静默失败**；C 的 OOM 错误类别被折叠 | `MagicWand.swift:63,99,109`、`WandPixels.c:7` | `core/src/session.rs:987-997,1037` |
@@ -325,8 +376,8 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 
 | # | 差异 | Swift 位置 | Rust 位置 |
 | --- | --- | --- | --- |
-| 1 | 图层名 Pascal 串解码：Swift macOSRoman（Latin-1 兜底）；Rust `from_utf8_lossy`（非 ASCII 单字节名变 U+FFFD） | `IO/PSD/PSDReader.swift:154` | `core/src/psd/reader.rs:184-186` |
-| 2 | 闭合路径收口角：CG 对 closeSubpath 计算收口 miter join；Rust 重复首点按开放折线描边（无 joint） | `IO/PSD/PSDVector.swift:62-79` | `core/src/psd/vector.rs:160-169,620-722` |
+| 1 | 图层名 Pascal 串解码：Swift macOSRoman（Latin-1 兜底）；Rust `from_utf8_lossy`（非 ASCII 单字节名变 U+FFFD） | `IO/PSD/PSDReader.swift:154` | ✅ 已补（完整 MacRoman 表，见顶部修复进度） |
+| 2 | 闭合路径收口角：CG 对 closeSubpath 计算收口 miter join；Rust 收口角走 miter/bevel（限长 10:1） | `IO/PSD/PSDVector.swift:62-79` | ✅ 已补（closed 标志传入描边，收口走 miter/bevel） |
 | 3 | 矢量光栅化：CG 解析抗锯齿 winding → Rust 自写 8 样本 scanline（已声明替换） | 同上 | `core/src/psd/vector.rs:726-826` |
 | 4 | fixture 全局 composite：Swift 经 context 重绘；Rust 尺寸不符时 resample 近似 | `CompositorTests/PSDFixture.swift:230-245` | `core/src/psd/fixture.rs:333-340` |
 | 5 | live shape 模型：Swift `LayerShape = style + CGImage`（像素身份）；Rust 纯几何模型 + 合成默认 `line_width:4.0, filled:true` | `Document/ShapeTool.swift:37-53` | `core/src/psd/types.rs:246-258` |
@@ -334,9 +385,9 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 
 ### 9.3 UI / 应用壳
 
-**快捷键缺失**（`UI/KeyboardShortcuts.swift:74-124` vs `app/src/keys.rs:45-123`）：Save As(⇧⌘S)、Export JPEG(⌥⇧⌘S)、Close(⌘W 无键)、Show Transform Controls(⌘H)、剪贴板四件套(⌘X/⌘C/⇧⌘C/⌘V)、Fill(⌥⌫/⌘⌫/⇧⌫)、Select Subject(⌥⌘A)、Curves(⌘M)、Invert(⌘I)、Clipping Mask(⌥⌘G)、Move Layer Up/Down(⌘]/⌘[)、Snap 总开关(⇧⌘;)、Lock Guides(⌥⌘;)、Select 工具(A)、笔刷硬度(⇧[/⇧])、混合模式步进(⇧−/⇧=)、循环形状(⇧U)、不透明度数字键、移动选中像素(⌘方向 8 条)、完成文本(⌘⏎)、Tracking/Leading(⌥方向 8 条)、Levels 预览(⌥P)、临时手型(Space)。**键位不同**：Export PNG Rust 用 `ctrl-shift-s`（Swift ⇧⌘E，`keys.rs:72`）、Show Guides Rust `ctrl-shift-r`（Swift ⌘;，`keys.rs:100`）。**整个快捷键自定义系统缺失**（`KeyboardShortcuts.swift:129-319`）。
+**快捷键缺失**（`UI/KeyboardShortcuts.swift:74-124` vs `app/src/keys.rs`）：**（已修一批，见下）**原缺：Save As(⇧⌘S)、Export JPEG(⌥⇧⌘S)、Close(⌘W)、Show Transform Controls(⌘H)、剪贴板四件套(⌘X/⌘C/⇧⌘C/⌘V)、Fill(⌥⌫/⌘⌫/⇧⌫)、Curves(⌘M)、Invert(⌘I)、Clipping Mask(⌥⌘G)、Move Layer Up/Down(⌘]/⌘[)、Snap 总开关(⇧⌘;)、Lock Guides(⌥⌘;)、笔刷硬度(⇧[/⇧])、混合模式步进(⇧−/⇧=)、循环形状(⇧U)、Levels 预览(⌥P)。**✅ 以上均已绑定并接 handler**（⌘M 的 Curves sheet UI 仍属 §9.3 面板批次；⇧⌫ Content-Aware Fill 走 core `content_fill` 直接提交，无 sheet）；Lock Guides 同时补上 core 守卫——`hit_guide`/`begin_guide_creation`/`begin_guide_move` 在 `locks_guides` 时拒绝（Guides.swift:74/92，有测试）；Levels 预览开关落地为 sheet 的 Preview 勾选框（`edit.preview` 语义，⌥P 翻转）。**仍缺**：Select Subject(⌥⌘A，core 无 select_subject)、Select 工具(A)、不透明度数字键、移动选中像素(⌘方向 8 条)、完成文本(⌘⏎)、Tracking/Leading(⌥方向 8 条)、临时手型(Space)。**键位不同 ✅ 已对齐**：Export PNG 改 `ctrl-shift-e`（Swift ⇧⌘E）、Export JPEG 改 `ctrl-alt-shift-s`（⌥⇧⌘S）、Show Guides 改 `ctrl-;`（⌘;）、Show Grid `ctrl-'`（⌘'）、Snap 总开关 `ctrl-shift-;`、Lock Guides `alt-ctrl-;`。**整个快捷键自定义系统缺失**（`KeyboardShortcuts.swift:129-319`）。
 
-**菜单缺失**（`CompositorApp.swift:47-318` vs `app/src/menu.rs:34-117`）：Import Images、Save As、Export JPEG；Fit/Actual Pixels/Zoom 组；总 Snap 开关、Transform Controls 开关、Lock/Clear Guides；Cut/Copy/Copy Merged/Paste/Clear Selection Pixels/Content-Aware Fill；Select 菜单的 Layer's Pixels/Subject/Mask's Black Areas；Image 菜单的 Curves/Levels/Hue-Saturation（**sheet 存在但菜单无入口**）及 Black & White/Color Balance/Exposure/Gradient Map/Grain/Invert；Filter 菜单缺 Remove Background（core `filters.rs:26` 有 case）；Layer 菜单的 New Adjustment Layer 子菜单/Edit Adjustment/Transform Layer/Selection/Layer via Copy/Create-Release Clipping Mask/Move Out of Folder/Rename/Show-Hide/Move Up-Down/动态 Merge 与 Delete 标题。菜单项禁用逻辑基本未用（`ui.rs:85-88` 机制存在）。
+**菜单缺失**（`CompositorApp.swift:47-318` vs `app/src/menu.rs`）：**（已修一批）**Import Images、Save As、Export JPEG、Transform Controls 开关、总 Snap 开关、Lock Guides、Cut/Copy/Copy Merged/Paste、Content-Aware Fill、Invert、Create/Release Clipping Mask、Move Layer Up/Down **✅ 均已补**。仍缺：Fit/Actual Pixels/Zoom 组；Clear Selection Pixels；Select 菜单的 Layer's Pixels/Subject/Mask's Black Areas；Image 菜单的 Curves/Levels/Hue-Saturation（**sheet 存在但菜单无入口**）及 Black & White/Color Balance/Exposure/Gradient Map/Grain；Filter 菜单缺 Remove Background（core `filters.rs:26` 有 case）；Layer 菜单的 New Adjustment Layer 子菜单/Edit Adjustment/Transform Layer/Selection/Layer via Copy/Move Out of Folder/Rename/Show-Hide/动态 Merge 与 Delete 标题。菜单项禁用逻辑基本未用（`ui.rs:85-88` 机制存在）。
 
 **面板/控件**：完全缺失——ColorPickerSheet、EffectsSheet（core `effects.rs` 有内核无 UI）、CurvesControls、PSDConversionSheet、RawDevelopSheet、CameraRaw 的 Curve/Mixer/Grading/Detail/Optics/Geometry/Calibration 分区 + 直方图/示波器/剪裁指示/白平衡吸管（app 仅 14 滑块，`app/src/sheets.rs:189-213`）、浮动面板系统（全部为模态居中 overlay，`app/src/sheets_ui.rs:123-145`）、TransformInspector（Rust Move 头只有一个**空 handler** 的 Auto-select 勾选框，`app/src/tools.rs:500-507`）、TypeControls（Rust 只有一行提示文字，`tools.rs:512-514`）。**行为差异**：图层面板缩略图（Swift 整画布形状+棋盘格+蒙版边缘灰度，`UI/CanvasThumbnail.swift:10-62`；Rust 内容裁剪式无棋盘格，`core/src/render.rs:459-472`）；面板宽度固定 248（Swift 202–352 可拖记忆）；混合模式无悬停预览；标尺刻度候选集/目标间距不同且无 label（`UI/CanvasRulers.swift:174-184` vs `app/src/canvas.rs:1205-1214`）；标尺拖拽建参考线无调用；Camera Raw 默认值差异（Gaussian Blur 默认 4 vs Swift 1、Motion Blur 20 vs 10、Add Noise 12 vs 10，`app/src/sheets.rs:170-182` vs `Filters.swift:39-45`）；色板点击=交换而非打开取色器。（已修：app 建组原为 "Group N"+把活动层移进组+挂根，现改为调 core `add_group` 的 "Folder N" 语义，见 §3.1-13。）**多窗口**：单窗口固定 1560×920（`app/src/main.rs:30-49`），无标签条/关闭确认/未保存标记 UI（core 有 `is_modified`/`mark_saved` 未接 UI），CloseDocument 直接清空（`workspace.rs:236-244`）。**持久化**：无任何 UI 状态持久化。
 
