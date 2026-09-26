@@ -4,6 +4,38 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 修复进度（2026-09-26 第十九轮：AdjustmentEditing + 面板系统 + 快捷键自定义 + 选区混合修复）
+
+三个子代理并行（AdjustmentEditing+pixel 修复 / Curves+面板 / 快捷键自定义），主线完成接线。测试 595 → 659 全绿（core lib 563 + 集成 28 + app lib 52 + bin 16）。
+
+**§2 AdjustmentEditing 整文件落地**
+- session：`begin_adjustment_editing`/`edited_adjustment`/`preview_adjustment_editing`/`finish_adjustment_editing`（OK 一条 undo、Cancel 精确还原、编辑绑定打开时的图层、Invert 无设置）；渲染经 draw_live_composite 直接消费，无渲染端改动。
+- app 接线：Layer 菜单 "Edit Adjustment…"——按 kind 打开 Levels/Hue-Saturation/Filter sheet 并从图层设置预填编辑器；滑杆改动写 session 编辑器并经 `preview_adjustment_editing` 实时预览；OK 提交、Cancel 还原（confirm/cancel sheet 分支）。
+
+**§7.1-4 选区 coverage 双缺陷修复（上轮遗留）**
+- 方向修正：像素中心经 mapping **正向**映射 + 面积语义采样（IDENTITY 下与 rasterize 逐位一致，50% 边缘伪影消失）；新增 `coverage_path`/`blend_path` 把选区路径经逆变换**重光栅化**（亚像素精确，feather 按逆映射比例重加）；sheets.rs 双重求逆规避移除，既有测试收紧到精确值。
+
+**§9.3 面板/控件批次**
+- **Curves 曲线编辑器**（滤镜 sheet Curves 分支，CurvesControls.swift 1:1）：通道下拉、240px 曲线画布（5×5 网格 + 单调 Hermite 采样白线 + 8px 控制点）、点击加点（32 点上限、x∈1…254、距点 ≥1）、近点抓取（<14）、拖动（y 逐字、内部点 x 钳邻点）、窗口级跟踪、Input/Output 读数、Remove/Reset；预览与 OK 走滤镜管线。
+- **TypeControls**（Type 工具头）：字体下拉（扫 core 字体目录）、字号（钳 1…2000）、色块（text 取色器）、对齐、Tracking、Leading（Auto 占位）；实时写 `change_text_style`。
+- **TransformInspector**（Move 工具头）：X/Y/W/H/Scale/° 字段（draft → 层 → 未链接 mask 的显示值，W/H 锁比、Scale 缩放、旋转 %360）、Auto-select、Show Controls、Sampling 下拉（拐角扭曲禁用）、Flip H/V、Cancel/Apply。
+
+**§9.3 快捷键自定义系统（KeyboardShortcuts.swift:129-319 整系统）**
+- 新模块 shortcuts.rs：84 动作目录（稳定 id + Swift 对齐名 + 分组 + 默认键位）、ShortcutRegistry（覆盖/重置/生效表）、冲突与保留键校验（Swift problem(in:) 语义 + Display 文案）、JSON 持久化（平台配置目录、原子写、损坏/冲突全有或全无回退）；`bindings()` 改由注册表生成（菜单提示自动跟随）。19 个测试。
+- 顺带修复默认表真冲突：Contract Sheet 与 Canvas Size 同为 ctrl-alt-c（gpui 修饰键序无关）→ Contract 改 `ctrl-alt-shift-c`。
+
+**主线批次**
+- §5.3 蒙版绘画打通：蒙版选中时笔画以蒙版网格为基准、蒙版图为源、`mask_paint_white` 定白/黑，提交替换蒙版 asset 保留 placement/link（canPaint 守卫：修复画笔/仿制图章禁于蒙版、调整层禁画、空选区禁画）。
+- §5.3 笔刷平滑"绳拽模型"落地（此前滑杆不消费）：半径=平滑值/zoom，绳内抖动不进入笔画、绳绷直时跟随、flush 结束于指针位置。
+- 图层面板缩略图 **Cmd 点击载入选区**（Shift 加选/Option 减选）。
+- Move 工具 `transformPressLayer` 拾取：auto-select 选中指针下层级更高的图层（含背景上的前景层偏好）、Cmd 直接拾取、空画布拖活动层；Auto-select 勾选框接通。
+- §3.3 `mask_clip_image` 的 MaskPlacementCache（8 项/64MP LRU，Arc 身份键）+ interactive limit 改 `.rounded(.up)`。
+- §9.3 标尺刻度候选集对齐 CanvasRulers.majorStep（1-2-5 全表、70pt 目标、50k 上限）+ 整数标签函数。
+
+**仍缺（后续批次）**：标尺拖拽建参考线（需 CanvasDrag 扩展）、工具默认值持久化（ToolDefaults）、shortcut 设置 UI 编辑器（注册表 API 已就绪）、TypeControls 字段 ↑↓ 步进与 SF Symbol 图标、TransformInspector 的 Esc/Return 与把手实时跟随、Transform Auto-select 持久化、select_subject 的 Vision 替代源、浮动面板系统、多窗口/标签条、RAW 导入、JPEG DPI 元数据、像素移动（PixelMove）会话入口。
+
+---
+
 ## 修复进度（2026-09-26 第十八轮，四个并行方向 + 主线集成）
 
 本轮四个子代理并行（levels_auto / 会话蒙版批 / 选区与新工具 / 测试移植），主线完成集成接线。测试 core 490 → 551（lib）+ 28（新建 `crates/core/tests/` 集成测试）+ app 10 → 16，全局 595 全绿。
