@@ -271,7 +271,7 @@ impl AppState {
                 self.begin_gradient(doc);
             }
             NavigationTool::Move => {
-                self.begin_move(doc, cx);
+                self.begin_move(doc, event.modifiers.control, cx);
             }
             NavigationTool::Crop => {
                 self.begin_crop(doc, cx);
@@ -854,7 +854,24 @@ impl AppState {
 
     // MARK: Move
 
-    fn begin_move(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+    fn begin_move(&mut self, doc: CGPoint, command: bool, cx: &mut Context<Self>) {
+        // A picked layer becomes the transform target before the drag starts.
+        if self.session.transform_edit.is_none() {
+            if let Some(document) = self.session.document.as_ref() {
+                if let Some((id, picked)) = transform_press_layer(
+                    document,
+                    self.session.active_layer_id,
+                    self.transform_auto_select,
+                    command,
+                    true,
+                    doc,
+                ) {
+                    if picked {
+                        self.session.select_layer(Some(id));
+                    }
+                }
+            }
+        }
         if self.session.transform_edit.is_none() {
             if self.session.can_transform() {
                 // The drag begins a transient transform (persistent false,
@@ -991,6 +1008,67 @@ impl AppState {
 /// non-line shapes and snaps a line's angle to eighths of a turn, Option
 /// grows a non-line shape symmetrically from its anchor. A line ignores both
 /// beyond the snap — it is stored as its bounding box.
+/// `transformPressLayer` (EditorCanvas.swift:1317-1350): the layer a
+/// transform press drags, and whether it was picked from under the
+/// pointer. Cmd picks the layer under the pointer; otherwise the active
+/// layer, unless auto-select finds another layer there — including one
+/// stacked above a selected background that also contains the press. A
+/// press on empty canvas still drags the active layer.
+fn transform_press_layer(
+    document: &compositor_core::document::CanvasDocument,
+    active_id: Option<uuid::Uuid>,
+    auto_select: bool,
+    command: bool,
+    can_pick: bool,
+    pixel: compositor_core::geometry::CGPoint,
+) -> Option<(uuid::Uuid, bool)> {
+    let order = document.render_layers();
+    let under = order
+        .iter()
+        .rev()
+        .find(|l| l.asset.is_some() && l.transform.contains(pixel))
+        .map(|l| l.id);
+    let active = active_id
+        .and_then(|id| order.iter().find(|l| l.id == id))
+        .copied();
+    // Cmd picks the layer under the pointer on its own.
+    if command && can_pick {
+        if let Some(id) = under {
+            return Some((id, true));
+        }
+    }
+    if let Some(active) = active {
+        if active.transform.contains(pixel) {
+            // `render_layers` is bottom to top, so a later index paints
+            // above. Prefer that layer when auto-select is on; a
+            // full-canvas background contains every press, and keeping it
+            // would hide a foreground layer stacked on top of it.
+            if can_pick && auto_select {
+                if let (Some(under), Some(active)) = (under, active_id) {
+                    if under != active {
+                        let top = order.iter().position(|l| l.id == under);
+                        let current = order.iter().position(|l| l.id == active);
+                        if let ((Some(top)), (Some(current))) = (top, current) {
+                            if top > current {
+                                return Some((under, true));
+                            }
+                        }
+                    }
+                }
+            }
+            return Some((active.id, false));
+        }
+    }
+    if can_pick && (auto_select || command) {
+        if let Some(id) = under {
+            return Some((id, true));
+        }
+    }
+    active.map(|l| (l.id, false))
+}
+
+
+
 fn shape_drag_rect(
     kind: compositor_core::document::ShapeKind,
     anchor: CGPoint,
@@ -1406,9 +1484,56 @@ fn ruler_label(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_at, nice_tick, ruler_label, shape_drag_rect};
-    use compositor_core::document::ShapeKind;
+    use super::{handle_at, nice_tick, ruler_label, shape_drag_rect, transform_press_layer};
+    use compositor_core::document::{CanvasDocument, ImageLayer, ShapeKind};
     use compositor_core::geometry::{CGPoint, CGRect};
+    use compositor_core::raster::{Bitmap, ImportedImage};
+
+    #[test]
+    fn transform_press_auto_selects_the_layer_above() {
+        let mut doc = CanvasDocument::new(100, 100);
+        let mut background = Bitmap::new(100, 100);
+        for px in background.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[240, 240, 240, 255]);
+        }
+        let mut foreground = Bitmap::new(40, 40);
+        for px in foreground.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let background =
+            ImageLayer::with_asset(ImportedImage::new(background, "bg"), CGPoint::ZERO);
+        let foreground = ImageLayer::with_asset(
+            ImportedImage::new(foreground, "fg"),
+            CGPoint::new(30.0, 30.0),
+        );
+        let (bg, fg) = (background.id, foreground.id);
+        doc.layers = vec![background, foreground];
+        // Auto-select picks the foreground stacked above the background.
+        assert_eq!(
+            transform_press_layer(&doc, Some(bg), true, false, true, CGPoint::new(50.0, 50.0)),
+            Some((fg, true))
+        );
+        // Without auto-select the press drags the active layer.
+        assert_eq!(
+            transform_press_layer(&doc, Some(bg), false, false, true, CGPoint::new(50.0, 50.0)),
+            Some((bg, false))
+        );
+        // Outside the foreground the press still drags the active layer.
+        assert_eq!(
+            transform_press_layer(&doc, Some(bg), true, false, true, CGPoint::new(10.0, 10.0)),
+            Some((bg, false))
+        );
+        // Cmd picks the layer under the pointer on its own.
+        assert_eq!(
+            transform_press_layer(&doc, Some(bg), false, true, true, CGPoint::new(50.0, 50.0)),
+            Some((fg, true))
+        );
+        // A press outside the active layer falls back to dragging it.
+        assert_eq!(
+            transform_press_layer(&doc, Some(fg), false, false, true, CGPoint::new(5.0, 5.0)),
+            Some((fg, false))
+        );
+    }
 
     #[test]
     fn nice_tick_rounds_up_to_a_ruler_step() {

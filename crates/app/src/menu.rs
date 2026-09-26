@@ -135,6 +135,7 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
                     .menu("Black & White", Box::new(keys::AddAdjustmentBlackWhite))
                     .menu("Color Balance", Box::new(keys::AddAdjustmentColorBalance))
             })
+            .menu("Edit Adjustment…", Box::new(keys::EditAdjustment))
             .separator()
             .menu(transform_label, Box::new(keys::FreeTransform))
             .menu(duplicate_label, Box::new(keys::DuplicateLayer))

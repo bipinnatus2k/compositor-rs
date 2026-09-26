@@ -104,6 +104,7 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_add_adjustment_invert))
             .on_action(cx.listener(Self::on_add_adjustment_black_white))
             .on_action(cx.listener(Self::on_add_adjustment_color_balance))
+            .on_action(cx.listener(Self::on_edit_adjustment))
             // Select
             .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_deselect))
@@ -190,6 +191,49 @@ impl Render for AppState {
             .children(self.render_sheet_overlay(cx))
             .children(crate::color_picker_ui::render_color_picker(self, cx))
     }
+}
+
+/// The layer's adjustment settings as the filter-sheet editor reads them:
+/// every slot present on the adjustment overrides the default.
+fn filter_settings_from_adjustment(
+    adjustment: &compositor_core::adjustment::LayerAdjustment,
+) -> compositor_core::filters::FilterSettings {
+    let mut settings = compositor_core::filters::FilterSettings::default();
+    if let Some(value) = &adjustment.exposure_settings {
+        settings.exposure = value.clone();
+    }
+    if let Some(value) = &adjustment.gradient_map_settings {
+        settings.gradient_map = value.clone();
+    }
+    if let Some(value) = &adjustment.grain_settings {
+        settings.grain = value.clone();
+    }
+    if let Some(value) = &adjustment.black_white_settings {
+        settings.black_white = value.clone();
+    }
+    if let Some(value) = &adjustment.color_balance_settings {
+        settings.color_balance = value.clone();
+    }
+    if let Some(value) = adjustment.blur_radius {
+        settings.radius = value;
+    }
+    if let Some(value) = adjustment.motion_angle {
+        settings.angle = value;
+    }
+    if let Some(value) = adjustment.motion_distance {
+        settings.distance = value;
+    }
+    if let Some(value) = adjustment.noise_amount {
+        settings.amount = value;
+    }
+    if let Some(value) = adjustment.noise_gaussian {
+        settings.gaussian = value;
+    }
+    if let Some(value) = adjustment.noise_monochromatic {
+        settings.monochromatic = value;
+    }
+    settings.curves = adjustment.curves.clone();
+    settings
 }
 
 fn color_bytes(color: compositor_core::document::PaletteColor) -> [u8; 4] {
@@ -523,6 +567,49 @@ impl AppState {
     }
     fn on_add_adjustment_color_balance(&mut self, _: &keys::AddAdjustmentColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
         self.add_adjustment(AdjustmentKind::ColorBalance, cx);
+    }
+    fn on_edit_adjustment(&mut self, _: &keys::EditAdjustment, w: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.session.active_layer_id else {
+            return;
+        };
+        let Some(adjustment) = self
+            .session
+            .active_layer()
+            .and_then(|layer| layer.adjustment.clone())
+        else {
+            return;
+        };
+        // Invert has no settings to edit.
+        if adjustment.kind == AdjustmentKind::Invert
+            || !self.session.begin_adjustment_editing(id)
+        {
+            return;
+        }
+        // Prefill the editor from the layer's current settings.
+        match adjustment.kind {
+            AdjustmentKind::Levels => {
+                self.session.levels = Some(adjustment.levels.clone());
+                self.open_sheet(SheetKind::Levels, w, cx);
+            }
+            AdjustmentKind::Hsv => {
+                self.session.hue_saturation =
+                    Some(adjustment.hsv_settings.clone().unwrap_or_else(|| {
+                        compositor_core::adjust::HueSaturationSettings::new(
+                            adjustment.hue,
+                            adjustment.saturation,
+                            adjustment.lightness,
+                            adjustment.colorize,
+                        )
+                    }));
+                self.open_sheet(SheetKind::HueSaturation, w, cx);
+            }
+            other => {
+                if let Some(filter) = other.filter_kind() {
+                    self.session.filter_edit = Some(filter_settings_from_adjustment(&adjustment));
+                    self.open_sheet(SheetKind::Filter(filter), w, cx);
+                }
+            }
+        }
     }
 
     // MARK: Select

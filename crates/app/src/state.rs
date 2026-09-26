@@ -1367,6 +1367,13 @@ impl AppState {
 
     /// Runs `filter` over the preview base and shows it live on canvas.
     pub fn apply_filter_preview(&mut self, kind: FilterKind, settings: FilterSettings) {
+        // Editing an adjustment layer: the settings go to the session's
+        // filter editor and the layer previews through the live composite.
+        if self.session.adjustment_editing_id.is_some() {
+            self.session.filter_edit = Some(settings);
+            self.session.preview_adjustment_editing(true);
+            return;
+        }
         let Some(base) = self.preview_base.clone() else { return };
         let selection = self.selection_clip();
         let job = FilterJob {

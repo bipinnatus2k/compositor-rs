@@ -937,6 +937,10 @@ impl AppState {
         if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Effects) {
             self.session.finish_effects_editing(false);
         }
+        // An adjustment editing session restores the opening settings.
+        if self.session.adjustment_editing_id.is_some() {
+            self.session.finish_adjustment_editing(false);
+        }
         self.close_sheet(cx);
     }
 
@@ -1057,6 +1061,13 @@ impl AppState {
     // MARK: OK
 
     pub fn confirm_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Editing an adjustment layer: the settings previewed live, OK keeps
+        // them as one undo step and skips the layer-pixel commit paths.
+        if self.session.adjustment_editing_id.is_some() {
+            self.session.finish_adjustment_editing(true);
+            self.close_sheet(cx);
+            return;
+        }
         let kind = match self.sheet.as_ref() {
             Some(sheet) => sheet.kind,
             None => return,

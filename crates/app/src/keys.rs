@@ -30,6 +30,7 @@ actions!(compositor, [
     NewLayer, DuplicateLayer, DeleteLayer, MergeDown, NewGroup, AddMask,
     FlipLayerHorizontal, FlipLayerVertical,
     GroupSelectedLayers, MoveOutOfFolder, RenameLayer, ToggleLayerVisibility,
+    EditAdjustment,
     // Select / Edit extras
     ClearSelectionPixels,
     LoadLayerSelection, LoadMaskSelection,
