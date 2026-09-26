@@ -76,6 +76,55 @@ pub fn png_data(composite: &Bitmap) -> Option<Vec<u8>> {
     Some(buffer)
 }
 
+/// `pngData` with the document resolution as a pHYs chunk (Swift's
+/// `kCGImagePropertyDPIWidth/Height` properties).
+pub fn png_data_with_dpi(composite: &Bitmap, dpi: f64) -> Option<Vec<u8>> {
+    let png = png_data(composite)?;
+    Some(inject_png_dpi(&png, dpi))
+}
+
+/// Inserts a pHYs chunk (pixels per meter, unit 1) right after IHDR, where
+/// the encoder put none.
+fn inject_png_dpi(png: &[u8], dpi: f64) -> Vec<u8> {
+    const SIGNATURE: usize = 8;
+    if png.len() < SIGNATURE + 12 {
+        return png.to_vec();
+    }
+    let pixels_per_meter = (dpi / 0.0254).round().max(1.0) as u32;
+    let mut chunk = Vec::with_capacity(21);
+    chunk.extend_from_slice(&9u32.to_be_bytes());
+    chunk.extend_from_slice(b"pHYs");
+    chunk.extend_from_slice(&pixels_per_meter.to_be_bytes());
+    chunk.extend_from_slice(&pixels_per_meter.to_be_bytes());
+    chunk.push(1); // unit: meter
+    let crc = crc32(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    // The first chunk is IHDR; pHYs must precede any IDAT.
+    let first_length = u32::from_be_bytes([png[8], png[9], png[10], png[11]]) as usize;
+    let insert_at = SIGNATURE + 12 + first_length;
+    if insert_at > png.len() {
+        return png.to_vec();
+    }
+    let mut out = Vec::with_capacity(png.len() + chunk.len());
+    out.extend_from_slice(&png[..insert_at]);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[insert_at..]);
+    out
+}
+
+/// CRC-32 (IEEE 802.3, reflected), as PNG chunk checksums require.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 /// `ImageExporter.jpeg`: the composite flattened onto its matte, encoded with
 /// the given quality.
 pub fn jpeg_data(composite: &Bitmap, options: &JpegOptions) -> Option<Vec<u8>> {
@@ -100,6 +149,36 @@ pub fn jpeg_data(composite: &Bitmap, options: &JpegOptions) -> Option<Vec<u8>> {
             .ok()?;
     }
     Some(buffer)
+}
+
+/// `jpeg` with the document resolution patched into the JFIF APP0 density
+/// fields (Swift's DPI properties; the encoder always writes a JFIF APP0
+/// with unit 0 and density 1).
+pub fn jpeg_data_with_dpi(composite: &Bitmap, options: &JpegOptions, dpi: f64) -> Option<Vec<u8>> {
+    let jpeg = jpeg_data(composite, options)?;
+    Some(patch_jfif_density(&jpeg, dpi))
+}
+
+/// Rewrites the JFIF APP0's density to dots-per-inch. Leaves the buffer
+/// untouched when the header isn't the JFIF segment the encoder writes.
+fn patch_jfif_density(jpeg: &[u8], dpi: f64) -> Vec<u8> {
+    let mut out = jpeg.to_vec();
+    // SOI (FFD8) then APP0 (FFE0): "JFIF\0" at 6..11, units at 13,
+    // X/Y density at 14..18.
+    let is_jfif = out.len() >= 19
+        && out[0] == 0xFF
+        && out[1] == 0xD8
+        && out[2] == 0xFF
+        && out[3] == 0xE0
+        && &out[6..11] == b"JFIF\0";
+    if !is_jfif {
+        return out;
+    }
+    let density = dpi.round().clamp(1.0, 65_535.0) as u16;
+    out[13] = 1; // density unit: dots per inch
+    out[14..16].copy_from_slice(&density.to_be_bytes());
+    out[16..18].copy_from_slice(&density.to_be_bytes());
+    out
 }
 
 /// `JPEGResult.preview` — a thumbnail at most 1000 pixels across.
@@ -211,5 +290,39 @@ mod tests {
         let px = decoded.get_pixel(0, 0);
         assert_eq!(px[3], 128, "alpha survives PNG");
         assert_eq!(px[0], 255, "straight red channel");
+    }
+
+    /// The pHYs chunk lands after IHDR with the resolution in pixels per
+    /// meter, and the file still decodes.
+    #[test]
+    fn png_dpi_injects_a_phys_chunk() {
+        let composite = red_on_transparent();
+        let data = png_data_with_dpi(&composite, 144.0).expect("encodes");
+        // First chunk after the signature is IHDR (13 data bytes).
+        assert_eq!(&data[12..16], b"IHDR");
+        let ihdr_length = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let phys = &data[8 + 12 + ihdr_length..8 + 12 + ihdr_length + 21];
+        assert_eq!(&phys[4..8], b"pHYs");
+        let ppm = u32::from_be_bytes([phys[8], phys[9], phys[10], phys[11]]);
+        assert_eq!(ppm, (144.0_f64 / 0.0254).round() as u32);
+        assert_eq!(phys[16], 1, "unit is the meter");
+        let crc = u32::from_be_bytes([phys[17], phys[18], phys[19], phys[20]]);
+        assert_eq!(crc, crc32(&phys[4..17]), "chunk checksum valid");
+        let decoded = image::load_from_memory(&data).expect("still decodes");
+        assert_eq!((decoded.width(), decoded.height()), (8, 8));
+    }
+
+    /// The JFIF APP0 density fields carry the resolution in dots per inch.
+    #[test]
+    fn jpeg_dpi_patches_the_jfif_density() {
+        let composite = red_on_transparent();
+        let data = jpeg_data_with_dpi(&composite, &JpegOptions::default(), 300.0).expect("encodes");
+        assert_eq!(data[13], 1, "density unit: inch");
+        let density = u16::from_be_bytes([data[14], data[15]]);
+        assert_eq!(density, 300);
+        let y = u16::from_be_bytes([data[16], data[17]]);
+        assert_eq!(y, 300);
+        let decoded = image::load_from_memory(&data).expect("still decodes");
+        assert_eq!((decoded.width(), decoded.height()), (8, 8));
     }
 }
