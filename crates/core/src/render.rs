@@ -66,6 +66,83 @@ pub fn draw_layer_pixels(image: &Bitmap, transform: &LayerTransform, dst: &mut B
 /// stretched over the layer's `width` × `height` grid at `layer`. Covering the
 /// layer (placement None) that's the mask itself; placed apart, it is
 /// resampled into that grid.
+thread_local! {
+    /// `MaskPlacementCache`: masks resampled into their layers' grids, so
+    /// redraws reuse them; the least recently used go beyond a few entries
+    /// or a pixel budget (`LayerMask.swift:126-166`).
+    static MASK_PLACEMENT_CACHE: RefCell<MaskPlacementCache> =
+        RefCell::new(MaskPlacementCache::default());
+}
+
+#[derive(Default)]
+struct MaskPlacementCache {
+    entries: Vec<MaskPlacementEntry>,
+    clock: u64,
+}
+
+struct MaskPlacementEntry {
+    /// `Arc::as_ptr` of the mask asset — Swift compares CGImage identity.
+    mask_id: usize,
+    placement: LayerTransform,
+    layer: LayerTransform,
+    width: usize,
+    height: usize,
+    image: Bitmap,
+    last_use: u64,
+}
+
+const MASK_PLACEMENT_CACHE_ENTRIES: usize = 8;
+const MASK_PLACEMENT_CACHE_PIXELS: usize = 64_000_000;
+
+impl MaskPlacementCache {
+    fn lookup(
+        &mut self,
+        mask_id: usize,
+        placement: &LayerTransform,
+        layer: &LayerTransform,
+        width: usize,
+        height: usize,
+    ) -> Option<Bitmap> {
+        self.clock += 1;
+        let index = self.entries.iter().position(|e| {
+            e.mask_id == mask_id
+                && &e.placement == placement
+                && &e.layer == layer
+                && e.width == width
+                && e.height == height
+        })?;
+        self.entries[index].last_use = self.clock;
+        Some(self.entries[index].image.clone())
+    }
+
+    fn store(&mut self, mut entry: MaskPlacementEntry) {
+        self.clock += 1;
+        entry.last_use = self.clock;
+        self.entries.push(entry);
+        while self.entries.len() > MASK_PLACEMENT_CACHE_ENTRIES
+            || self
+                .entries
+                .iter()
+                .map(|e| e.width * e.height)
+                .sum::<usize>()
+                > MASK_PLACEMENT_CACHE_PIXELS
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.last_use)
+                .map(|(i, _)| i);
+            match oldest {
+                Some(i) => {
+                    self.entries.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+}
+
 pub fn mask_clip_image(
     mask: &LayerMask,
     over: &LayerTransform,
@@ -93,7 +170,6 @@ pub fn mask_clip_image_limited(
         Some(placement) => placement,
         None => return Some(mask_gray_as_bitmap(&mask.asset.image)),
     };
-    let _ = limit;
     if placement.same_placement(over) || width == 0 || height == 0 {
         return Some(mask_gray_as_bitmap(&mask.asset.image));
     }
@@ -104,12 +180,20 @@ pub fn mask_clip_image_limited(
         Some(cap) if width.max(height) > cap => {
             let factor = cap as f64 / width.max(height) as f64;
             (
-                ((width as f64 * factor).round() as usize).max(1),
-                ((height as f64 * factor).round() as usize).max(1),
+                ((width as f64 * factor).ceil() as usize).max(1),
+                ((height as f64 * factor).ceil() as usize).max(1),
             )
         }
         _ => (width, height),
     };
+    let mask_id = std::sync::Arc::as_ptr(&mask.asset.image) as usize;
+    if let Some(hit) = MASK_PLACEMENT_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .lookup(mask_id, &placement, over, width, height)
+    }) {
+        return Some(hit);
+    }
     let mut out = Bitmap::new(width, height);
     let fill = (background * 255.0) as u8;
     for chunk in out.data.chunks_exact_mut(4) {
@@ -124,6 +208,19 @@ pub fn mask_clip_image_limited(
     let doc_to_placement = pixel_to_document(&placement, source.width as f64, source.height as f64).inverted();
     let mapping = doc_to_placement.concat(&layer_to_doc);
     draw_affine(&mut out, &source, &mapping, LayerSampling::High, None);
+    if width * height <= MASK_PLACEMENT_CACHE_PIXELS {
+        MASK_PLACEMENT_CACHE.with(|cache| {
+            cache.borrow_mut().store(MaskPlacementEntry {
+                mask_id,
+                placement,
+                layer: *over,
+                width,
+                height,
+                image: out.clone(),
+                last_use: 0,
+            })
+        });
+    }
     Some(out)
 }
 
@@ -966,6 +1063,50 @@ mod tests {
         assert_eq!(thumb.pixel(2, 2)[0], 0);
         // A 1×1 reveal-all solid keeps edge tone 255 (empty-frame default).
         assert_eq!(mask_edge_tone(&Bitmap::new(0, 0)), 255);
+    }
+
+    /// A placed mask resampled into its layer grid repeats identically from
+    /// the placement cache, and a moved-apart placement rebuilds.
+    #[test]
+    fn mask_placement_cache_returns_consistent_pixels() {
+        let mut image = Bitmap::new(20, 20);
+        for y in 0..20 {
+            for x in 0..20 {
+                let v = if x < 10 { 0 } else { 255 };
+                image.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        let mut mask = crate::document::LayerMask::solid(true);
+        mask.asset = ImportedImage::new(image, "mask");
+        mask.placement = Some(LayerTransform::new(
+            CGPoint::new(10.0, 10.0),
+            CGSize::new(40.0, 40.0),
+        ));
+        let over = LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0));
+        let first = mask_clip_image(&mask, &over, 50, 50).unwrap();
+        let second = mask_clip_image(&mask, &over, 50, 50).unwrap();
+        assert_eq!(first.data, second.data);
+        // Moving the mask apart changes the resample.
+        mask.placement = Some(LayerTransform::new(
+            CGPoint::new(20.0, 10.0),
+            CGSize::new(40.0, 40.0),
+        ));
+        let moved = mask_clip_image(&mask, &over, 50, 50).unwrap();
+        assert_ne!(first.data, moved.data);
+    }
+
+    /// The interactive limit caps the longest side and rounds the target up
+    /// (`rounded(.up)`).
+    #[test]
+    fn mask_clip_limit_caps_and_ceils() {
+        let mut mask = crate::document::LayerMask::solid(true);
+        mask.placement = Some(LayerTransform::new(
+            CGPoint::new(5.0, 5.0),
+            CGSize::new(30.0, 30.0),
+        ));
+        let over = LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0));
+        let clipped = mask_clip_image_limited(&mask, &over, 33, 17, Some(16)).unwrap();
+        assert_eq!((clipped.width, clipped.height), (16, 9));
     }
 
     #[test]

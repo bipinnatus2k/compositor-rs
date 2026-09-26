@@ -117,6 +117,10 @@ pub struct RasterEdit {
     pub replaces_with_clone: bool,
     /// Selected pixels lifted out of the layer (`lift_selection`).
     lifted: Option<(Bitmap, CGRect)>,
+    /// Smoothing string state: the anchor trails the pointer taut; the raw
+    /// pointer is kept so flush can end the stroke where the hand did.
+    smoothing_anchor: Option<CGPoint>,
+    smoothing_pointer: Option<CGPoint>,
 }
 
 impl RasterEdit {
@@ -200,6 +204,8 @@ impl RasterEdit {
             clone: None,
             replaces_with_clone: false,
             lifted: None,
+            smoothing_anchor: None,
+            smoothing_pointer: None,
         }
     }
 
@@ -231,10 +237,38 @@ impl RasterEdit {
         tip
     }
 
+    /// Smoothing: the brush trails the pointer on a string and only moves
+    /// once the pointer pulls that string taut — samples inside the radius
+    /// never reach the stroke (`EditorSession+Brush.swift:77-87`). The
+    /// stroke's first sample sets the anchor; the radius is `settings`
+    /// smoothing with the zoom already folded in by the caller.
+    pub fn append_smoothed(&mut self, pointer: CGPoint) {
+        if self.settings.smoothing <= 0.0 {
+            self.append(pointer);
+            return;
+        }
+        let radius = self.settings.smoothing;
+        let Some(anchor) = self.smoothing_anchor else {
+            self.smoothing_anchor = Some(pointer);
+            self.smoothing_pointer = Some(pointer);
+            self.append(pointer);
+            return;
+        };
+        self.smoothing_pointer = Some(pointer);
+        let delta = CGPoint::new(pointer.x - anchor.x, pointer.y - anchor.y);
+        let distance = delta.x.hypot(delta.y);
+        if distance <= radius {
+            return;
+        }
+        let step = (distance - radius) / distance;
+        let moved = CGPoint::new(anchor.x + delta.x * step, anchor.y + delta.y * step);
+        self.smoothing_anchor = Some(moved);
+        self.append(moved);
+    }
+
     /// Mouse samples arrive sparsely, so dabs follow a Catmull–Rom curve
     /// through them, with a provisional straight tail until the next sample.
-    pub fn append(&mut self, point: CGPoint) {
-        if !point.x.is_finite()
+    pub fn append(&mut self, point: CGPoint) {        if !point.x.is_finite()
             || !point.y.is_finite()
             || point.x.abs() > 10_000_000.0
             || point.y.abs() > 10_000_000.0
@@ -281,7 +315,16 @@ impl RasterEdit {
     }
 
     /// Replaces the provisional tail with the stroke's final curve piece.
+    /// With smoothing the brush can trail short of the pointer, so the
+    /// stroke ends where the hand did (`finishBrushImmediately`).
     pub fn flush(&mut self) {
+        if let (Some(pointer), Some(anchor)) =
+            (self.smoothing_pointer, self.smoothing_anchor)
+        {
+            if self.settings.smoothing > 0.0 && pointer != anchor {
+                self.append(pointer);
+            }
+        }
         let count = self.samples.len();
         if count >= 2 {
             let n = count;
@@ -1413,6 +1456,37 @@ mod tests {
                 segment_distance
             );
         }
+    }
+
+    /// Smoothing ignores samples inside the string radius, trails the
+    /// pointer beyond it, and flush ends the stroke where the hand did
+    /// (`EditorSession+Brush.smoothed`).
+    #[test]
+    fn smoothing_trails_the_pointer_and_catches_up() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(300.0, 300.0),
+            None,
+        );
+        edit.settings.smoothing = 10.0; // document px; the caller folds zoom in
+        edit.settings.hardness = 1.0;
+        edit.settings.diameter = 12.0;
+        edit.append_smoothed(CGPoint::new(50.0, 50.0));
+        // A slack jitter never reaches the stroke.
+        edit.append_smoothed(CGPoint::new(55.0, 50.0));
+        assert_eq!(edit.segments.len(), 1, "only the zero-length click");
+        // Beyond the radius the brush trails on the circle.
+        edit.append_smoothed(CGPoint::new(200.0, 50.0));
+        let wet = edit.result();
+        assert_eq!(wet.pixel(120, 50)[3], 255, "tail renders along the string");
+        assert_eq!(wet.pixel(198, 50)[3], 0, "the brush stops short of the pointer");
+        // Flushing closes the gap with the raw pointer.
+        edit.flush();
+        let out = edit.result();
+        assert_eq!(out.pixel(196, 50)[3], 255);
     }
 
     #[test]

@@ -297,10 +297,12 @@ impl AppState {
                 .child(SharedString::from(if visible { "\u{25CF}" } else { "\u{25CB}" })),
         );
 
-        // Thumbnail.
+        // Thumbnail. Cmd-click loads the layer's (or the mask's) pixels as
+        // the selection; Shift adds and Option subtracts (MaskTracing).
         let thumbnail = self.thumbnail_image(id, layer);
         row = row.child(
             gpui_kit::div()
+                .id(SharedString::from(format!("layer-thumb-{}", index)))
                 .w(px(THUMB))
                 .h(px(THUMB))
                 .flex_shrink_0()
@@ -313,7 +315,26 @@ impl AppState {
                     cell.child(
                         gpui_kit::img(image).size_full(),
                     )
-                }),
+                })
+                .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                    let modifiers = event.modifiers();
+                    if !modifiers.control && !modifiers.platform {
+                        return;
+                    }
+                    let mode = if modifiers.shift {
+                        compositor_core::selection::SelectionMode::Add
+                    } else if modifiers.alt {
+                        compositor_core::selection::SelectionMode::Subtract
+                    } else {
+                        compositor_core::selection::SelectionMode::Replace
+                    };
+                    if this.session.is_mask_selected {
+                        this.session.load_mask_selection(id, mode);
+                    } else {
+                        this.session.load_layer_selection(id, mode);
+                    }
+                    this.touch(cx);
+                })),
         );
 
         // Name (or the rename input).

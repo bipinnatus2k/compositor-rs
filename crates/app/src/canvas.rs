@@ -321,7 +321,7 @@ impl AppState {
                 );
             }
             Some(CanvasDrag::Stroke(edit)) => {
-                edit.append(doc);
+                edit.append_smoothed(doc);
             }
             Some(CanvasDrag::Warp(stroke)) => {
                 stroke.append(doc);
@@ -476,12 +476,67 @@ impl AppState {
         let mut settings = self.session.brush_settings;
         settings.erasing = self.session.brush_mode == BrushToolMode::Erase;
         settings.healing = self.session.tool == NavigationTool::SpotHealing;
-        let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
+        // Smoothing trails the pointer on a string of `smoothing` screen
+        // points — in document pixels the radius divides by the zoom. Only
+        // the Brush tool smooths (EditorSession+Brush.swift:78).
+        if self.session.tool == NavigationTool::Brush {
+            settings.smoothing /= self.zoom.max(0.0001);
+        } else {
+            settings.smoothing = 0.0;
+        }
+        // canPaint: a mask stroke needs an enabled mask and paints its grid;
+        // layer strokes skip adjustment layers; an empty selection blocks.
+        let mask_target = self.session.is_mask_selected
+            && layer
+                .mask
+                .as_ref()
+                .map(|m| m.is_enabled)
+                .unwrap_or(false);
+        // Spot Healing and Clone Stamp rework image pixels; they have
+        // nothing to do on a mask (EditorSession+Brush.swift:31).
+        if mask_target
+            && matches!(
+                self.session.tool,
+                NavigationTool::SpotHealing | NavigationTool::CloneStamp
+            )
+        {
+            return;
+        }
+        if !mask_target && layer.adjustment.is_some() {
+            return;
+        }
+        if document
+            .selection
+            .as_ref()
+            .map(|s| s.path.is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let (source, base_transform, mask) = if mask_target {
+            let m = layer.mask.as_ref().unwrap();
+            // A mask stroke paints white (reveal) or black (hide).
+            let v = if self.session.mask_paint_white { 1.0 } else { 0.0 };
+            settings.red = v;
+            settings.green = v;
+            settings.blue = v;
+            (
+                Some(m.asset.image.as_ref().clone()),
+                layer.mask_transform(),
+                true,
+            )
+        } else {
+            (
+                layer.asset.as_ref().map(|a| a.image.as_ref().clone()),
+                layer.transform,
+                false,
+            )
+        };
         let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
         let mut edit = RasterEdit::new(
             source,
-            layer.transform,
-            false,
+            base_transform,
+            mask,
             settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
@@ -505,7 +560,7 @@ impl AppState {
                 edit.clone = Some((blurred, CGSize::ZERO));
             }
         }
-        edit.append(doc);
+        edit.append_smoothed(doc);
         self.drag = Some(CanvasDrag::Stroke(edit));
     }
 
@@ -564,7 +619,8 @@ impl AppState {
                 .unwrap_or(0x6d2b79f5);
             edit.heal(mode, seed);
             let (snapshot, transform, _) = edit.paint_snapshot();
-            self.commit_pixels(snapshot, transform, "Spot Healing", cx);
+            let mask = edit.is_mask;
+            self.commit_pixels(snapshot, transform, "Spot Healing", mask, cx);
             return;
         }
         let erasing = edit.settings.erasing;
@@ -581,7 +637,8 @@ impl AppState {
         } else {
             "Brush Stroke"
         };
-        self.commit_pixels(snapshot, transform, name, cx);
+        let mask = edit.is_mask;
+        self.commit_pixels(snapshot, transform, name, mask, cx);
     }
 
     // MARK: Smudge / Liquify
@@ -653,7 +710,8 @@ impl AppState {
             name,
             selection_clip,
         ) {
-            self.commit_pixels(snapshot, transform, name, cx);
+            // The warp always targets the layer's pixels.
+            self.commit_pixels(snapshot, transform, name, false, cx);
         }
     }
 
@@ -709,12 +767,16 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Stores new pixels into the active layer as one undoable step.
+    /// Stores new pixels into the active layer (or its mask, when the stroke
+    /// painted one) as one undoable step. A mask commit replaces the mask's
+    /// pixels only — enabled/placement/link state survives
+    /// (`LayerMask.replacing`).
     pub(crate) fn commit_pixels(
         &mut self,
         image: compositor_core::raster::ImportedImage,
         transform: compositor_core::transform::LayerTransform,
         name: &str,
+        mask: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.session.active_layer_id else {
@@ -726,9 +788,16 @@ impl AppState {
         if let Some(doc) = self.session.document.as_mut() {
             if let Some(layer) = doc.layer_mut(id) {
                 let mut image = image;
-                image.name = layer.name.clone();
-                layer.asset = Some(image);
-                layer.transform = transform;
+                if mask {
+                    if let Some(m) = layer.mask.as_mut() {
+                        image.name = m.asset.name.clone();
+                        m.asset = image;
+                    }
+                } else {
+                    image.name = layer.name.clone();
+                    layer.asset = Some(image);
+                    layer.transform = transform;
+                }
             }
         }
         self.session
@@ -749,6 +818,7 @@ impl AppState {
             compositor_core::raster::ImportedImage::new(bitmap, String::new()),
             transform,
             name,
+            false,
             cx,
         );
     }
@@ -1272,7 +1342,7 @@ fn paint_rulers(window: &mut Window, bounds: Bounds<Pixels>, scene: &CanvasScene
     window.paint_quad(gpui_kit::fill(left, background));
 
     // Ticks every `tick` document pixels, chosen for roughly 50 px on screen.
-    let tick = nice_tick(50.0 / scene.zoom.max(0.001));
+    let tick = nice_tick(70.0 / scene.zoom.max(0.001));
     let color = rgba(0xb4b4b4aa);
     let mut value = 0.0f64;
     while value * scene.zoom <= scene.doc.0 * scene.zoom {
@@ -1310,20 +1380,33 @@ fn paint_rulers(window: &mut Window, bounds: Bounds<Pixels>, scene: &CanvasScene
     ));
 }
 
+/// Numbered ticks about 70 points apart, using 1-2-5 steps in document
+/// pixels (`CanvasRulers.majorStep`).
 fn nice_tick(rough: f64) -> f64 {
     let candidates = [
-        1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+        1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1_000.0, 2_000.0,
+        2_500.0, 5_000.0, 10_000.0, 20_000.0, 25_000.0,
     ];
     candidates
         .iter()
         .copied()
         .find(|candidate| *candidate >= rough)
-        .unwrap_or(10000.0)
+        .unwrap_or(50_000.0)
+}
+
+/// Whole-pixel tick label (`CanvasRulers.label`).
+fn ruler_label(value: f64) -> String {
+    let rounded = value.round();
+    if rounded == 0.0 {
+        "0".to_string()
+    } else {
+        (rounded as i64).to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_at, nice_tick, shape_drag_rect};
+    use super::{handle_at, nice_tick, ruler_label, shape_drag_rect};
     use compositor_core::document::ShapeKind;
     use compositor_core::geometry::{CGPoint, CGRect};
 
@@ -1332,9 +1415,17 @@ mod tests {
         assert_eq!(nice_tick(0.4), 1.0);
         assert_eq!(nice_tick(3.0), 5.0);
         assert_eq!(nice_tick(7.5), 10.0);
-        assert_eq!(nice_tick(120.0), 250.0);
+        assert_eq!(nice_tick(15.0), 20.0);
+        assert_eq!(nice_tick(120.0), 200.0);
         // Beyond the last candidate it saturates.
-        assert_eq!(nice_tick(99_999.0), 10_000.0);
+        assert_eq!(nice_tick(99_999.0), 50_000.0);
+    }
+
+    #[test]
+    fn ruler_labels_are_whole_pixels() {
+        assert_eq!(ruler_label(0.0), "0");
+        assert_eq!(ruler_label(99.6), "100");
+        assert_eq!(ruler_label(-2.5), "-3");
     }
 
     #[test]
