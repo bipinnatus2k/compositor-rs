@@ -3,19 +3,22 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    px, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    px, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Disableable, Selectable, Sizable};
 
 use compositor_core::document::NavigationTool;
 use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 use compositor_core::tools::brush::GradientShape;
+use compositor_core::transform::LayerSampling;
 
 use crate::state::AppState;
-use crate::ui::{MenuEntry, dropdown, labeled_slider, text_label};
+use crate::ui::{div_row, dropdown, labeled_slider, text_label, MenuEntry};
 
 /// The rail entries in display order: (tool, letter, name).
 const TOOLS: [(NavigationTool, &str, &str); 16] = [
@@ -66,7 +69,7 @@ fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::tool_title;
+    use super::{font_menu_names, tool_title};
     use compositor_core::document::NavigationTool;
 
     #[test]
@@ -76,6 +79,37 @@ mod tests {
         // The brush has two modes depending on the eraser toggle.
         assert_eq!(tool_title(NavigationTool::Brush, false), "Brush");
         assert_eq!(tool_title(NavigationTool::Brush, true), "Eraser");
+    }
+
+    #[test]
+    fn font_menu_names_include_the_current_face_once() {
+        let catalog = vec![
+            "Arial".to_string(),
+            "Calibri".to_string(),
+            "segoeui".to_string(),
+        ];
+        // A catalog face: the list stays sorted, no duplicate.
+        let names = font_menu_names("Calibri", &catalog, 250);
+        assert_eq!(names, vec!["Arial", "Calibri", "segoeui"]);
+        // A face the catalog lacks (Helvetica on this host): it is added and
+        // sorted in.
+        let names = font_menu_names("Helvetica", &catalog, 250);
+        assert_eq!(names, vec!["Arial", "Calibri", "Helvetica", "segoeui"]);
+    }
+
+    #[test]
+    fn font_menu_names_keep_the_current_face_under_the_cap() {
+        let catalog: Vec<String> = ["ahab", "bob", "zed", "zig"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        // The cap keeps the first faces plus the current one at the end.
+        let names = font_menu_names("yarr", &catalog, 3);
+        assert_eq!(names, vec!["ahab", "bob", "yarr"]);
+        // The current face is always present, even when it would overflow.
+        let names = font_menu_names("zed", &catalog, 2);
+        assert_eq!(names, vec!["ahab", "zed"]);
+        assert_eq!(font_menu_names("only", &[], 1), vec!["only"]);
     }
 }
 
@@ -522,19 +556,236 @@ impl AppState {
         }
 
         if tool == NavigationTool::Move {
-            header = header.child(checkbox(
-                &app,
-                "move-auto-select",
-                "Auto-select",
-                true,
-                |_, _, _, _| {},
-            ));
+            // TransformInspector.swift: toggles, the numeric fields, flip,
+            // sampling, then Cancel/Apply.
+            let edit = self.session.transform_edit.as_ref();
+            let has_edit = edit.is_some();
+            let corners = edit.map(|edit| edit.corners.is_some()).unwrap_or(false);
+            let mask = edit.map(|edit| edit.mask).unwrap_or_else(|| {
+                self.session.is_mask_selected
+                    && self
+                        .session
+                        .active_layer()
+                        .and_then(|layer| {
+                            layer.mask.as_ref().map(|mask| !mask.is_linked)
+                        })
+                        .unwrap_or(false)
+            });
+            // The fields gray out while nothing can transform, or while a
+            // corner distort owns the edit (the handles are the controls).
+            let fields_enabled = (self.session.can_transform() || has_edit) && !corners;
+            header = header
+                .child(
+                    text_label(if mask { "Transform Mask" } else { "Transform" }, false)
+                        .text_size(px(12.0))
+                        .flex_shrink_0(),
+                )
+                .child(checkbox(
+                    &app,
+                    "transform-auto-select",
+                    "Auto-select",
+                    self.transform_auto_select,
+                    |state, checked, _, cx| {
+                        // transformAutoSelect (EditorSession.swift:198). The
+                        // canvas click-through itself is canvas-side wiring.
+                        state.transform_auto_select = checked;
+                        state.touch(cx);
+                    },
+                ))
+                .child(checkbox(
+                    &app,
+                    "transform-show-controls",
+                    "Show Controls",
+                    self.session.shows_transform_controls,
+                    |state, checked, _, cx| {
+                        state.session.shows_transform_controls = checked;
+                        state.touch(cx);
+                    },
+                ))
+                .child(number_field("transform-x", "X", &self.transform_x_input, px(52.0)))
+                .child(number_field("transform-y", "Y", &self.transform_y_input, px(52.0)))
+                .child(number_field("transform-w", "W", &self.transform_w_input, px(52.0)))
+                .child(number_field("transform-h", "H", &self.transform_h_input, px(52.0)))
+                .child(checkbox(
+                    &app,
+                    "transform-lock-ratio",
+                    "Lock",
+                    self.session.locks_transform_ratio,
+                    |state, checked, _, cx| {
+                        state.session.locks_transform_ratio = checked;
+                        state.touch(cx);
+                    },
+                ))
+                .child(number_field(
+                    "transform-scale",
+                    "Scale %",
+                    &self.transform_scale_input,
+                    px(56.0),
+                ))
+                .child(number_field(
+                    "transform-rotation",
+                    "\u{b0}",
+                    &self.transform_rotation_input,
+                    px(48.0),
+                ))
+                .child(sampling_dropdown(&app, self.transform_displayed(), fields_enabled))
+                .child(
+                    Button::new("transform-flip-h")
+                        .label("Flip H")
+                        .small()
+                        .outline()
+                        .disabled(!fields_enabled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.transform_flip(true, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("transform-flip-v")
+                        .label("Flip V")
+                        .small()
+                        .outline()
+                        .disabled(!fields_enabled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.transform_flip(false, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("transform-cancel")
+                        .label("Cancel")
+                        .small()
+                        .disabled(!has_edit)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.session.cancel_transform();
+                            this.sync_transform_inputs(window, cx);
+                            this.touch(cx);
+                        })),
+                )
+                .child(
+                    Button::new("transform-apply")
+                        .label("Apply")
+                        .small()
+                        .primary()
+                        .disabled(!has_edit)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.session.commit_transform();
+                            this.sync_transform_inputs(window, cx);
+                            this.touch(cx);
+                        })),
+                );
         }
         if tool == NavigationTool::Hand {
             header = header.child(text_label("Drag to pan · scroll to zoom", true));
         }
         if tool == NavigationTool::Type {
-            header = header.child(text_label("Click on the canvas to place a text layer", true));
+            // TypeControls.swift: font, size, color, alignment, tracking,
+            // leading, and the draft buttons.
+            let style = self.session.current_text_style();
+            let font = style.font_name.clone();
+            let names = font_menu_names(&font, available_font_names(), FONT_MENU_CAP);
+            let entries = names
+                .into_iter()
+                .map(|name| {
+                    let chosen = name.clone();
+                    MenuEntry::new(name.clone(), move |state, _, cx| {
+                        let chosen = chosen.clone();
+                        state.session.change_text_style(move |style| {
+                            style.font_name = chosen;
+                        });
+                        state.touch(cx);
+                    })
+                    .checked(style.font_name == name)
+                })
+                .collect();
+            let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+            let color = self.session.type_color();
+            let color_rgb =
+                (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
+            let has_document = self.session.document.is_some();
+            let has_draft = self.session.text_draft.is_some();
+            let active_is_text = self
+                .session
+                .active_layer()
+                .and_then(|layer| layer.live_text())
+                .is_some();
+            header = header
+                .child(dropdown(&app, "type-font", font, px(150.0), entries))
+                .child(
+                    div_row()
+                        .child(Input::new(&self.type_size_input).id("type-size").small().w(px(52.0)))
+                        .child(text_label("px", true)),
+                )
+                .child(
+                    gpui_kit::div()
+                        .id("type-color")
+                        .w(px(36.0))
+                        .h(px(18.0))
+                        .rounded_xs()
+                        .border_1()
+                        .border_color(gpui_kit::rgb(0x111111))
+                        .bg(gpui_kit::rgb(color_rgb))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_text_color_picker_ui(window, cx);
+                        })),
+                )
+                .child(alignment_buttons(&app, style.alignment))
+                .child(
+                    div_row()
+                        .child(text_label("Tracking", true))
+                        .child(
+                            Input::new(&self.type_tracking_input)
+                                .id("type-tracking")
+                                .small()
+                                .w(px(48.0)),
+                        ),
+                )
+                .child(
+                    div_row()
+                        .child(text_label("Leading", true))
+                        .child(
+                            Input::new(&self.type_leading_input)
+                                .id("type-leading")
+                                .small()
+                                .w(px(52.0)),
+                        ),
+                );
+            if has_draft {
+                header = header
+                    .child(
+                        Button::new("type-cancel")
+                            .label("Cancel")
+                            .small()
+                            .disabled(!has_document)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.session.cancel_text();
+                                this.sync_text_style_inputs(window, cx);
+                                this.touch(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("type-done")
+                            .label("Done")
+                            .small()
+                            .primary()
+                            .disabled(!has_document)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.session.finish_text();
+                                this.sync_text_style_inputs(window, cx);
+                                this.touch(cx);
+                            })),
+                    );
+            } else {
+                header = header.child(
+                    Button::new("type-edit")
+                        .label("Edit Text")
+                        .small()
+                        .disabled(!has_document || !active_is_text)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.session.edit_active_text();
+                            this.sync_text_style_inputs(window, cx);
+                            this.touch(cx);
+                        })),
+                );
+            }
         }
         if tool == NavigationTool::Shape {
             let kind = self.session.shape_kind;
@@ -581,6 +832,177 @@ impl AppState {
 
         header.into_any_element()
     }
+
+    /// Flip H / Flip V (`TransformInspector`'s flip buttons): one transform
+    /// change each, then the fields follow.
+    pub fn transform_flip(
+        &mut self,
+        horizontal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transform_change(
+            move |value| {
+                if horizontal {
+                    value.flip_x = !value.flip_x;
+                } else {
+                    value.flip_y = !value.flip_y;
+                }
+            },
+            cx,
+        );
+        self.sync_transform_inputs(window, cx);
+    }
+}
+
+/// Cap on the Type header's font menu: the catalog holds every installed
+/// face, and the popup only takes so many.
+const FONT_MENU_CAP: usize = 250;
+
+/// The current font plus the installed catalog, sorted case-insensitively;
+/// the current name always survives the cap (Swift's
+/// `Set(availableFonts + [selected]).sorted()`).
+pub fn font_menu_names(current: &str, catalog: &[String], cap: usize) -> Vec<String> {
+    let mut names: Vec<String> = catalog
+        .iter()
+        .filter(|name| name.as_str() != current)
+        .cloned()
+        .collect();
+    names.truncate(cap.saturating_sub(1));
+    names.push(current.to_string());
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+}
+
+/// The installed-font catalog: file stems from the font directories core's
+/// text engine scans (`tools/text.rs`). A style's `font_name` is matched
+/// against font file names there, so stems work as menu entries; the
+/// list is cached because the directory scan is not cheap.
+fn available_font_names() -> &'static Vec<String> {
+    static FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        const DIRECTORIES: &[&str] = &[
+            "C:\\Windows\\Fonts",
+            "/System/Library/Fonts",
+            "/System/Library/Fonts/Supplemental",
+            "/Library/Fonts",
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+        ];
+        let mut names: Vec<String> = Vec::new();
+        for directory in DIRECTORIES {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let extension = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.to_ascii_lowercase());
+                if !matches!(extension.as_deref(), Some("ttf" | "otf" | "ttc")) {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        names.sort_by_key(|name| name.to_lowercase());
+        names.dedup();
+        names
+    })
+}
+
+/// One of the inspector's labeled numeric fields (TransformValueField's
+/// `label + rounded field`). Typing writes through the field's Change
+/// subscription; nothing here touches the session.
+fn number_field(
+    id: &'static str,
+    label: &str,
+    state: &Entity<InputState>,
+    width: gpui_kit::Pixels,
+) -> gpui_kit::Div {
+    div_row()
+        .child(text_label(label.to_string(), true))
+        .child(Input::new(state).id(id).small().w(width))
+}
+
+/// The Type bar's alignment segment (`TextAlignment.allCases`): ghost
+/// buttons with the selected one lit. The widget set here has no SF Symbol
+/// glyphs, so the labels carry the meaning.
+fn alignment_buttons(
+    app: &gpui_kit::WeakEntity<AppState>,
+    selected: compositor_core::document::TextAlignment,
+) -> gpui_kit::Div {
+    let mut row = gpui_kit::div().flex().flex_row().gap_0p5().flex_shrink_0();
+    for (alignment, label) in [
+        (
+            compositor_core::document::TextAlignment::Left,
+            "Left",
+        ),
+        (
+            compositor_core::document::TextAlignment::Center,
+            "Center",
+        ),
+        (
+            compositor_core::document::TextAlignment::Right,
+            "Right",
+        ),
+    ] {
+        row = row.child(
+            Button::new(SharedString::from(format!("type-align-{}", label)))
+                .label(label)
+                .ghost()
+                .compact()
+                .selected(selected == alignment)
+                .on_click({
+                    let app = app.clone();
+                    move |_, _, cx| {
+                        app.update(cx, |state, cx| {
+                            state.session.change_text_style(move |style| {
+                                style.alignment = alignment;
+                            });
+                            state.touch(cx);
+                        })
+                        .ok();
+                    }
+                }),
+        );
+    }
+    row
+}
+
+/// The Sampling picker (`LayerSampling.allCases`); disabled while a corner
+/// distort owns the edit.
+fn sampling_dropdown(
+    app: &gpui_kit::WeakEntity<AppState>,
+    value: Option<compositor_core::transform::LayerTransform>,
+    enabled: bool,
+) -> gpui_kit::AnyElement {
+    let current = value
+        .map(|value| value.sampling)
+        .unwrap_or(LayerSampling::High);
+    let entries: Vec<MenuEntry> = LayerSampling::ALL
+        .iter()
+        .map(|sampling| {
+            let sampling = *sampling;
+            MenuEntry::new(sampling.label(), move |state, _, cx| {
+                state.transform_change(move |value| value.sampling = sampling, cx);
+            })
+            .checked(current == sampling)
+        })
+        .collect();
+    let app = app.clone();
+    let button = Button::new("transform-sampling")
+        .label(current.label())
+        .outline()
+        .small()
+        .w(px(120.0))
+        .disabled(!enabled);
+    button
+        .dropdown_menu(move |menu, _, _| crate::ui::build_menu(&app, menu, &entries))
+        .into_any_element()
 }
 
 /// A checkbox whose handler receives the app, the new value, window and ctx.

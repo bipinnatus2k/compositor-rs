@@ -105,7 +105,11 @@ pub fn dropdown(
         .dropdown_menu(move |menu, _, _| build_menu(&app, menu, &entries))
 }
 
-fn build_menu(app: &WeakEntity<AppState>, mut menu: PopupMenu, entries: &[MenuEntry]) -> PopupMenu {
+pub(crate) fn build_menu(
+    app: &WeakEntity<AppState>,
+    mut menu: PopupMenu,
+    entries: &[MenuEntry],
+) -> PopupMenu {
     for entry in entries {
         if entry.separator {
             menu = menu.separator();

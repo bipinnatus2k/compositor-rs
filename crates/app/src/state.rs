@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::{
-    px, App, AppContext, Bounds, Context, Entity, FocusHandle, KeyDownEvent,
+    px, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
     KeyUpEvent, Pixels, Point, RenderImage, Subscription, Window,
 };
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::slider::SliderState;
 use gpui_kit::component::slider::SliderEvent;
@@ -18,7 +18,7 @@ use image::Frame;
 use compositor_core::document::CanvasDocument;
 use compositor_core::document::ImageLayer;
 use compositor_core::filters::{FilterJob, FilterKind, FilterSettings};
-use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect};
+use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::raster::{ImportedImage, Bitmap};
 use compositor_core::render;
@@ -125,6 +125,133 @@ pub struct SheetState {
     pub levels: compositor_core::adjust::LevelsSettings,
 }
 
+/// The Curves filter sheet's editor state (`CurvesControls.swift`'s
+/// `settings`/`selected`/`dragging`). It lives outside `SheetState` because
+/// the curve canvas needs element bounds, and because the sheet's sliders
+/// have nothing to do with it; it is created when the Curves sheet body
+/// first renders and dropped with the sheet.
+pub struct CurvesEditor {
+    /// The curve being edited: four channels of control points plus the
+    /// visible channel.
+    pub settings: compositor_core::adjust::CurvesSettings,
+    /// The selected control point (drawn in the accent color, the Remove
+    /// point target).
+    pub selected: Option<usize>,
+    /// The point under an active drag, if any.
+    pub dragging: Option<usize>,
+    /// The curve canvas's last layout bounds (window pixels); pointer events
+    /// convert through this into curve units.
+    pub canvas_bounds: Bounds<Pixels>,
+}
+
+impl CurvesEditor {
+    pub(crate) fn new() -> Self {
+        CurvesEditor {
+            settings: compositor_core::adjust::CurvesSettings::default(),
+            selected: None,
+            dragging: None,
+            canvas_bounds: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
+        }
+    }
+}
+
+/// Which Type-header numeric field changed (`TypeControls.swift`'s key
+/// paths on `LayerTextStyle`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TextStyleField {
+    Size,
+    Tracking,
+    Leading,
+}
+
+/// Which Transform-inspector numeric field changed
+/// (`TransformInspector.swift`'s value fields).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TransformField {
+    X,
+    Y,
+    Width,
+    Height,
+    Scale,
+    Rotation,
+}
+
+/// `TransformValueField.formatted`: no trailing zeros on a whole number, two
+/// decimals otherwise.
+pub fn format_number(value: f64) -> String {
+    if (value - value.round()).abs() < 0.005 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{:.2}", value)
+    }
+}
+
+/// The Type size field's clamp: 1…2000 px (TypeControls.swift's arrowSteps
+/// change, which the typed path clamps to as well).
+pub fn clamp_font_size(value: f64) -> f64 {
+    value.clamp(1.0, 2000.0)
+}
+
+/// The Leading field shows nothing while Auto (leading 0) —
+/// TypeControls.swift's `leading > 0 ? String(...) : ""`.
+pub fn leading_to_text(leading: f64) -> String {
+    if leading > 0.0 {
+        format!("{}", leading.round() as i64)
+    } else {
+        String::new()
+    }
+}
+
+/// Typing into the Leading field: unparseable or empty means Auto (0); the
+/// result is clamped to 0…5000.
+pub fn leading_from_text(text: &str) -> f64 {
+    let value = text.trim().parse::<f64>().unwrap_or(0.0);
+    if value.is_finite() {
+        value.clamp(0.0, 5000.0)
+    } else {
+        0.0
+    }
+}
+
+/// `TransformInspector.resize`: typing a width or height resizes about the
+/// origin box, scaling the other side first when the ratio is locked.
+/// Numbers under 1 are refused, as in Swift.
+pub fn resize_transform(
+    mut value: LayerTransform,
+    number: f64,
+    width: bool,
+    lock: bool,
+) -> LayerTransform {
+    if number < 1.0 || !number.is_finite() {
+        return value;
+    }
+    if width {
+        if lock && value.size.width > 0.0 {
+            value.size.height *= number / value.size.width;
+        }
+        value.size.width = number;
+    } else {
+        if lock && value.size.height > 0.0 {
+            value.size.width *= number / value.size.height;
+        }
+        value.size.height = number;
+    }
+    value
+}
+
+/// The rotation field wraps through 360 (`$0.rotation =
+/// $1.truncatingRemainder(dividingBy: 360)`); Rust's `%` is the same
+/// truncating remainder.
+pub fn normalize_rotation(degrees: f64) -> f64 {
+    degrees % 360.0
+}
+
+/// Parses a numeric field's text; non-finite or unparseable input is
+/// refused (Swift's `Double(text)` guard).
+pub fn parse_field(text: &str) -> Option<f64> {
+    text.trim().parse::<f64>().ok().filter(|value| value.is_finite())
+}
+
 /// Everything the window shows, owned as a single GPUI entity.
 pub struct AppState {
     pub session: EditorSession,
@@ -175,6 +302,25 @@ pub struct AppState {
     pub space_saved_tool: Option<compositor_core::document::NavigationTool>,
     /// The open color picker's widgets (`color_picker_ui`).
     pub picker_ui: Option<crate::color_picker_ui::PickerUi>,
+    /// The Curves filter sheet's editor; `None` while no Curves sheet is
+    /// open (see `CurvesEditor`).
+    pub curves_editor: Option<CurvesEditor>,
+    /// Move tool: select layers by clicking the canvas
+    /// (`transformAutoSelect` in EditorSession.swift, persisted through
+    /// ToolDefaults there; the core session has no such field, so the app
+    /// carries it until it is wired into canvas picking).
+    pub transform_auto_select: bool,
+    /// The Type header's numeric fields (size, tracking, leading).
+    pub type_size_input: Entity<InputState>,
+    pub type_tracking_input: Entity<InputState>,
+    pub type_leading_input: Entity<InputState>,
+    /// The Transform inspector's numeric fields (X, Y, W, H, Scale %, °).
+    pub transform_x_input: Entity<InputState>,
+    pub transform_y_input: Entity<InputState>,
+    pub transform_w_input: Entity<InputState>,
+    pub transform_h_input: Entity<InputState>,
+    pub transform_scale_input: Entity<InputState>,
+    pub transform_rotation_input: Entity<InputState>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
     key_epoch: std::time::Instant,
 }
@@ -189,7 +335,7 @@ fn slider(min: f32, max: f32, step: f32, value: f32) -> SliderState {
 }
 
 impl AppState {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut session = EditorSession::new();
         session.create_document(1280, 800, true);
         let brush = &session.brush_settings;
@@ -207,6 +353,22 @@ impl AppState {
             slider(1.0, 100.0, 1.0, (session.gradient_settings.opacity * 100.0) as f32)
         });
         let opacity_slider = cx.new(|_| slider(0.0, 100.0, 1.0, 100.0));
+
+        let style = session.current_text_style();
+        let number_input = |value: f64, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).default_value(format_number(value)))
+        };
+        let type_size_input = number_input(style.font_size, window, cx);
+        let type_tracking_input = number_input(style.tracking, window, cx);
+        let type_leading_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(leading_to_text(style.leading))
+        });
+        let transform_x_input = number_input(0.0, window, cx);
+        let transform_y_input = number_input(0.0, window, cx);
+        let transform_w_input = number_input(0.0, window, cx);
+        let transform_h_input = number_input(0.0, window, cx);
+        let transform_scale_input = number_input(100.0, window, cx);
+        let transform_rotation_input = number_input(0.0, window, cx);
 
         let mut state = AppState {
             session,
@@ -239,9 +401,21 @@ impl AppState {
             subscriptions: Vec::new(),
             space_saved_tool: None,
             picker_ui: None,
+            curves_editor: None,
+            transform_auto_select: false,
+            type_size_input,
+            type_tracking_input,
+            type_leading_input,
+            transform_x_input,
+            transform_y_input,
+            transform_w_input,
+            transform_h_input,
+            transform_scale_input,
+            transform_rotation_input,
             key_epoch: std::time::Instant::now(),
         };
         state.subscribe_sliders(cx);
+        state.subscribe_inputs(cx);
         state
     }
 
@@ -568,6 +742,319 @@ impl AppState {
         self.refresh_levels_preview(cx);
     }
 
+    // MARK: Curves sheet
+
+    /// Runs the curve editor's settings as the Curves filter preview, the
+    /// same path the other filter sheets' sliders use.
+    pub fn apply_curves_preview(&mut self, cx: &mut Context<Self>) {
+        let mut settings = FilterSettings::default();
+        if let Some(editor) = self.curves_editor.as_ref() {
+            settings.curves = editor.settings.clone();
+        }
+        self.apply_filter_preview(FilterKind::Curves, settings);
+        self.touch(cx);
+    }
+
+    // MARK: Type header (TypeControls.swift)
+
+    /// A typed change in one of the Type header's fields writes straight
+    /// into the style — the draft while text is being edited, the defaults
+    /// otherwise (`session.changeTextStyle`).
+    pub fn text_style_field_changed(
+        &mut self,
+        field: TextStyleField,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match field {
+            TextStyleField::Size => {
+                if let Some(value) = parse_field(text) {
+                    let value = clamp_font_size(value);
+                    self.session.change_text_style(move |style| style.font_size = value);
+                }
+            }
+            TextStyleField::Tracking => {
+                if let Some(value) = parse_field(text) {
+                    self.session.change_text_style(move |style| style.tracking = value);
+                }
+            }
+            TextStyleField::Leading => {
+                let value = leading_from_text(text);
+                self.session.change_text_style(move |style| style.leading = value);
+            }
+        }
+        self.touch(cx);
+    }
+
+    /// Pushes the current style back into the Type header's fields (Swift's
+    /// `sync`, run when a value may have moved under an unfocused field).
+    pub fn sync_text_style_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let style = self.session.current_text_style();
+        let fields = [
+            (&self.type_size_input, format_number(style.font_size)),
+            (&self.type_tracking_input, format_number(style.tracking)),
+            (&self.type_leading_input, leading_to_text(style.leading)),
+        ];
+        for (input, text) in fields {
+            let focused = input.read(cx).focus_handle(cx).is_focused(window);
+            if !focused && input.read(cx).value() != text {
+                input.update(cx, |state, cx| state.set_value(text, window, cx));
+            }
+        }
+    }
+
+    /// The Type header's color chip: opens the app color picker on the text
+    /// color (`session.openTextColorPicker`). The picker is built here rather
+    /// than in `color_picker_ui` because that module only knows the palette
+    /// targets.
+    pub fn open_text_color_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.color_picker.is_some() {
+            return;
+        }
+        self.session.open_text_color_picker();
+        if self.session.color_picker.is_some() {
+            self.build_picker_ui(window, cx);
+        }
+        self.touch(cx);
+    }
+
+    /// Builds the picker widgets for whatever target the session just
+    /// opened (`open_color_picker_ui`'s widget half).
+    fn build_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.session.color_picker.as_ref() else {
+            return;
+        };
+        let hsb = picker.hsb;
+        let hue = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(360.0)
+                .step(1.0)
+                .default_value(hsb.hue as f32)
+        });
+        let saturation = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(100.0)
+                .step(1.0)
+                .default_value((hsb.saturation * 100.0) as f32)
+        });
+        let brightness = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(100.0)
+                .step(1.0)
+                .default_value((hsb.brightness * 100.0) as f32)
+        });
+        let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
+        for (slider, apply) in [
+            (hue.clone(), (|hsb: &mut compositor_core::document::PickerHSB, v: f64| hsb.hue = v)
+                as fn(&mut compositor_core::document::PickerHSB, f64)),
+            (
+                saturation.clone(),
+                |hsb: &mut compositor_core::document::PickerHSB, v: f64| {
+                    hsb.saturation = v / 100.0;
+                },
+            ),
+            (
+                brightness.clone(),
+                |hsb: &mut compositor_core::document::PickerHSB, v: f64| {
+                    hsb.brightness = v / 100.0;
+                },
+            ),
+        ] {
+            let subscription = cx.subscribe(
+                &slider,
+                move |state: &mut Self, _slider, event: &SliderEvent, cx: &mut Context<Self>| {
+                    let value = match event {
+                        SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+                    };
+                    let Some(picker) = state.session.color_picker.as_mut() else {
+                        return;
+                    };
+                    apply(&mut picker.hsb, value as f64);
+                    // An effect's color previews live on the layer
+                    // (ColorPalette.swift:113-118).
+                    if matches!(picker.target, compositor_core::session::ColorPickerTarget::Effect { .. }) {
+                        state.session.preview_effect_color();
+                    }
+                    state.touch(cx);
+                },
+            );
+            self.subscriptions.push(subscription);
+        }
+        self.picker_ui = Some(crate::color_picker_ui::PickerUi {
+            hue,
+            saturation,
+            brightness,
+            hex,
+        });
+    }
+
+    // MARK: Transform inspector (TransformInspector.swift)
+
+    /// The transform the inspector's fields show: the draft while an edit is
+    /// open, else the active layer's (or its unlinked mask's) transform
+    /// (`session.editedTransform`).
+    pub fn transform_displayed(&self) -> Option<LayerTransform> {
+        if let Some(edit) = self.session.transform_edit.as_ref() {
+            return Some(edit.draft);
+        }
+        let layer = self.session.active_layer()?;
+        let mask_alone = self.session.is_mask_selected
+            && layer.mask.as_ref().map(|mask| !mask.is_linked).unwrap_or(false);
+        Some(if mask_alone {
+            layer.mask_transform()
+        } else {
+            layer.transform
+        })
+    }
+
+    /// 100% scale: the layer's pixels, else the displayed size
+    /// (`transformPixelSize ?? activeLayer?.size ?? value.size`).
+    pub fn transform_pixel_size(&self) -> CGSize {
+        if let Some(layer) = self.session.active_layer() {
+            if let Some(asset) = layer.asset.as_ref() {
+                return CGSize::new(asset.image.width as f64, asset.image.height as f64);
+            }
+        }
+        self.transform_displayed()
+            .map(|value| value.size)
+            .unwrap_or(CGSize::new(1.0, 1.0))
+    }
+
+    /// `TransformInspector.change`: open an edit if none runs, fold the
+    /// update into its draft, and show it live.
+    pub fn transform_change(
+        &mut self,
+        update: impl FnOnce(&mut LayerTransform),
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.transform_edit.is_none() {
+            self.session.begin_transform();
+        }
+        let Some(edit) = self.session.transform_edit.as_ref() else {
+            return;
+        };
+        let mut value = edit.draft;
+        update(&mut value);
+        self.session.preview_transform(value);
+        self.touch(cx);
+    }
+
+    /// A typed change in one of the inspector's fields
+    /// (`TransformInspector`'s `field`/`resize`/scale closures).
+    pub fn transform_field_changed(
+        &mut self,
+        field: TransformField,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(number) = parse_field(text) else {
+            return;
+        };
+        match field {
+            TransformField::X => self.transform_change(|value| value.origin.x = number, cx),
+            TransformField::Y => self.transform_change(|value| value.origin.y = number, cx),
+            TransformField::Width | TransformField::Height => {
+                let lock = self.session.locks_transform_ratio;
+                let width = field == TransformField::Width;
+                self.transform_change(
+                    move |value| *value = resize_transform(*value, number, width, lock),
+                    cx,
+                );
+            }
+            TransformField::Scale => {
+                if number <= 0.0 {
+                    return;
+                }
+                let pixel_size = self.transform_pixel_size();
+                self.transform_change(
+                    move |value| *value = value.scaled(number, pixel_size),
+                    cx,
+                );
+            }
+            TransformField::Rotation => self
+                .transform_change(|value| value.rotation = normalize_rotation(number), cx),
+        }
+    }
+
+    /// Pushes the displayed transform back into the inspector's fields
+    /// (`TransformValueField.sync`).
+    pub fn sync_transform_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(value) = self.transform_displayed() else {
+            return;
+        };
+        let pixel_size = self.transform_pixel_size();
+        let fields = [
+            (&self.transform_x_input, format_number(value.origin.x)),
+            (&self.transform_y_input, format_number(value.origin.y)),
+            (&self.transform_w_input, format_number(value.size.width)),
+            (&self.transform_h_input, format_number(value.size.height)),
+            (
+                &self.transform_scale_input,
+                format_number(value.scale_percent(pixel_size)),
+            ),
+            (&self.transform_rotation_input, format_number(value.rotation)),
+        ];
+        for (input, text) in fields {
+            let focused = input.read(cx).focus_handle(cx).is_focused(window);
+            if !focused && input.read(cx).value() != text {
+                input.update(cx, |state, cx| state.set_value(text, window, cx));
+            }
+        }
+    }
+
+    /// Wiring for the header's numeric fields: typing writes straight into
+    /// the session (Swift's live `onChange(of: text)`).
+    fn subscribe_inputs(&mut self, cx: &mut Context<Self>) {
+        let text_fields = [
+            (self.type_size_input.clone(), TextStyleField::Size),
+            (self.type_tracking_input.clone(), TextStyleField::Tracking),
+            (self.type_leading_input.clone(), TextStyleField::Leading),
+        ];
+        for (input, field) in text_fields {
+            let watched = input.clone();
+            let subscription = cx.subscribe(
+                &input,
+                move |state: &mut Self,
+                      _input,
+                      event: &InputEvent,
+                      cx: &mut Context<Self>| {
+                    if let InputEvent::Change = event {
+                        let text = watched.read(cx).value().to_string();
+                        state.text_style_field_changed(field, &text, cx);
+                    }
+                },
+            );
+            self.subscriptions.push(subscription);
+        }
+        let transform_fields = [
+            (self.transform_x_input.clone(), TransformField::X),
+            (self.transform_y_input.clone(), TransformField::Y),
+            (self.transform_w_input.clone(), TransformField::Width),
+            (self.transform_h_input.clone(), TransformField::Height),
+            (self.transform_scale_input.clone(), TransformField::Scale),
+            (self.transform_rotation_input.clone(), TransformField::Rotation),
+        ];
+        for (input, field) in transform_fields {
+            let watched = input.clone();
+            let subscription = cx.subscribe(
+                &input,
+                move |state: &mut Self,
+                      _input,
+                      event: &InputEvent,
+                      cx: &mut Context<Self>| {
+                    if let InputEvent::Change = event {
+                        let text = watched.read(cx).value().to_string();
+                        state.transform_field_changed(field, &text, cx);
+                    }
+                },
+            );
+            self.subscriptions.push(subscription);
+        }
+    }
+
     /// Every mutation funnels through here so the frame image rebuilds.
     pub fn touch(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
@@ -833,6 +1320,7 @@ impl AppState {
 
     pub fn close_sheet(&mut self, cx: &mut Context<Self>) {
         self.sheet = None;
+        self.curves_editor = None;
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
@@ -1004,7 +1492,13 @@ pub fn bgra_render_image(bitmap: &Bitmap) -> Arc<RenderImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_zoom, doc_to_screen_at, screen_to_doc_at, MAX_ZOOM, MIN_ZOOM};
+    use super::{
+        clamp_font_size, clamp_zoom, doc_to_screen_at, format_number, leading_from_text,
+        leading_to_text, normalize_rotation, parse_field, resize_transform, screen_to_doc_at,
+        TransformField, MAX_ZOOM, MIN_ZOOM,
+    };
+    use compositor_core::geometry::{CGPoint, CGSize};
+    use compositor_core::transform::LayerTransform;
 
     #[test]
     fn doc_to_screen_applies_zoom_and_pan() {
@@ -1043,6 +1537,76 @@ mod tests {
             assert!((doc.x - 250.0).abs() < 1e-2, "zoom {zoom}: x = {}", doc.x);
             assert!((doc.y - 90.0).abs() < 1e-2, "zoom {zoom}: y = {}", doc.y);
         }
+    }
+
+    #[test]
+    fn format_number_drops_trailing_zeros() {
+        // TransformValueField.formatted.
+        assert_eq!(format_number(34.0), "34");
+        assert_eq!(format_number(34.004), "34");
+        assert_eq!(format_number(-0.004), "0");
+        assert_eq!(format_number(12.25), "12.25");
+        assert_eq!(format_number(1.0 / 3.0), "0.33");
+    }
+
+    #[test]
+    fn font_size_clamps_to_the_type_bar_range() {
+        assert_eq!(clamp_font_size(40.0), 40.0);
+        assert_eq!(clamp_font_size(0.2), 1.0);
+        assert_eq!(clamp_font_size(5000.0), 2000.0);
+    }
+
+    #[test]
+    fn leading_shows_blank_for_auto() {
+        assert_eq!(leading_to_text(0.0), "");
+        assert_eq!(leading_to_text(86.4), "86");
+        assert_eq!(leading_from_text(""), 0.0);
+        assert_eq!(leading_from_text(" 48 "), 48.0);
+        assert_eq!(leading_from_text("auto"), 0.0);
+        assert_eq!(leading_from_text("9000"), 5000.0);
+        assert_eq!(leading_from_text("-4"), 0.0);
+        assert_eq!(leading_from_text("NaN"), 0.0);
+    }
+
+    #[test]
+    fn resize_transform_scales_the_other_side_when_locked() {
+        let value = LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 50.0));
+        let width = resize_transform(value, 200.0, true, true);
+        assert_eq!(width.size, CGSize::new(200.0, 100.0));
+        // Unlocked keeps the other side.
+        let plain = resize_transform(value, 200.0, true, false);
+        assert_eq!(plain.size, CGSize::new(200.0, 50.0));
+        let height = resize_transform(value, 100.0, false, true);
+        assert_eq!(height.size, CGSize::new(200.0, 100.0));
+        // Swift's `guard number >= 1`: small and non-finite numbers change nothing.
+        assert_eq!(resize_transform(value, 0.5, true, true).size, value.size);
+        assert_eq!(
+            resize_transform(value, f64::NAN, false, false).size,
+            value.size
+        );
+    }
+
+    #[test]
+    fn rotation_wraps_through_360() {
+        assert_eq!(normalize_rotation(450.0), 90.0);
+        assert_eq!(normalize_rotation(-90.0), -90.0);
+        assert_eq!(normalize_rotation(720.0), 0.0);
+    }
+
+    #[test]
+    fn parse_field_refuses_garbage() {
+        assert_eq!(parse_field(" 12.5 "), Some(12.5));
+        assert_eq!(parse_field("12px"), None);
+        assert_eq!(parse_field(""), None);
+        assert_eq!(parse_field("inf"), None);
+        assert_eq!(parse_field("NaN"), None);
+    }
+
+    #[test]
+    fn transform_field_names_are_distinct() {
+        // The subscription roles must not collapse when copied.
+        assert!(TransformField::X != TransformField::Y);
+        assert!(TransformField::Width != TransformField::Height);
     }
 }
 
