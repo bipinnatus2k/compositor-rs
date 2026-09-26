@@ -359,7 +359,7 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 
 ### 5.4 简化
 
-256px 瓦片引擎 → 整网缓冲（`brush.rs:5-10` 自述）；tip 渲染近似（CG 解析抗锯齿/25 站径向渐变 → 逐像素解析，非 bit-exact）；tip 两级缓存（stamp ≤160px / gridTip ≤3000px）→ 每次重算；clone 采样 CG `.medium` → 最近邻（`brush.rs:456-460`）。
+256px 瓦片引擎 → 整网缓冲（`brush.rs:5-10` 自述）；tip 渲染近似（CG 解析抗锯齿/25 站径向渐变 → 逐像素解析，非 bit-exact）；~~tip 两级缓存 → 每次重算~~ ✅ 已补（tip 按 (直径,硬度) 线程局部记忆化）；clone 采样 CG `.medium` → 最近邻（`brush.rs:456-460`）。
 
 ### 5.5 多出
 
@@ -390,7 +390,7 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 
 ### 6.2 缺失/简化
 
-- `run_filter` 在 core 内无调用方（`filters.rs:350`），由 app 直接对原尺寸图层像素调用，缺 blur padding 与 trim（`session.rs:1368` `trimmed` 只用于 Merge Down）。
+- ~~`run_filter` 在 core 内无调用方，由 app 直接对原尺寸图层像素调用，缺 blur padding 与 trim~~ ✅ 已补（`run_filter` 的 GaussianBlur 分支实现 grow→blur→trim 完整流程，app 滤镜预览/提交统一走 `run_filter`）。
 - `render_effects` 无结果缓存（Swift `LayerEffects.swift:375-408` cache + EffectsPreviewCache）；无 100MP/80M 尺寸 guard（`LayerEffects.swift:441`、`MetalLayerEffects.swift:61`）；GPU 路径 inner glow 的 `size>0` gate（`MetalLayerEffects.swift:155`）Rust 无（`effects.rs:713`）。
 - `mask_clip_image`（`render.rs:27-57`）已补 `mask_clip_image_limited` 的 limit 截断；placement 缓存仍缺。
 - effects coverage 的 Gaussian 4σ 截断 vs CI 约 3σ（`raster.rs:554,596`）。
@@ -450,7 +450,7 @@ TypeTool 排版整体：Swift `textAttributes/textBoxSize/textImage`（字体/�
 | 1 | **PSD 导入未接入 app**：`open_document` 对 `.psd` 走 `image::open`（workspace 只启用 png/jpeg feature）→ 必然失败只显示 "Open failed"。README "Photoshop PSD files are imported" 目前不成立 | `Document/EditorSession.swift:741,764-776`、`IO/PSD/PSDReader.swift:10-27` | `app/src/sheets_ui.rs:829-897`（无任何 `PsdReader` 引用） |
 | 2 | JPEG 导出整体缺失（`JPEGOptions`/质量/哑光色/DPI/预览） | `IO/ImageExporter.swift:95-154`、`UI/JPEGExportSheet.swift` | 无 |
 | 3 | EXIF 方向、色彩管理（ICC→sRGB）、导入格式白名单（heic/tiff）、导入尺寸预算全缺 | `IO/ImageImporter.swift:37-52` | `app/src/sheets_ui.rs:855-866` |
-| 4 | 导出无尺寸 guard、无 DPI 元数据（pHYs）、非原子写 | `ImageExporter.swift:22-23,80-82,111-138` | `app/src/sheets_ui.rs:783-807` |
+| 4 | 导出无尺寸 guard、无 DPI 元数据（pHYs）、非原子写 | `ImageExporter.swift:22-23,80-82,111-138` | ✅ 尺寸 guard 与 DPI 元数据已补（`export.rs` 的 `check_export_size` + PNG pHYs 注入/JPEG JFIF 密度修补；app 侧接线待导出路径调用） |
 | 5 | 拖放导入（ImageFileDrop）、"Open With"/Dock 打开、RAW 导入 | `IO/ImageFileDrop.swift:7-33`、`IO/CompositorApplicationDelegate.swift:14-22`、`IO/RawImporter.swift` | 无 |
 
 ### 9.2 PSD 细节差异
