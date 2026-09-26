@@ -2,11 +2,17 @@
 //! selection coverage on an image's pixel grid, blending a result back through
 //! a selection, whole-image invert, and guided-filter matte refinement.
 
-use crate::geometry::{CGAffineTransform, CGRect};
+use crate::geometry::{CGAffineTransform, CGPoint};
 use crate::raster::{resample, Bitmap, GrayMask, LayerSampling};
-use crate::selection::SelectionClip;
+use crate::selection::{DocumentSelection, SelectionClip};
 
-/// Selection coverage rasterized on the image's pixel grid.
+/// Selection coverage on the image's pixel grid, read from a clip that was
+/// already rasterized at document resolution (`SelectionClip`). Every pixel
+/// center is mapped into the document through the placement — `pixelToDocument`
+/// applied forward, the reverse of `context.concatenate(pixelToDocument.inverted())`
+/// — and reads the coverage pixel that contains it, so the selection lands on
+/// the grid positions that actually sit under it. Callers that still hold the
+/// selection's outline should prefer `coverage_path`, which is sub-pixel exact.
 pub fn coverage(
     selection: &SelectionClip,
     width: usize,
@@ -14,68 +20,67 @@ pub fn coverage(
     pixel_to_document: &CGAffineTransform,
 ) -> GrayMask {
     let mut mask = GrayMask::new(width.max(1), height.max(1));
-    if selection.coverage.is_none() {
+    let Some(cov) = selection.coverage.as_ref() else {
         return mask; // Empty selection clips everything away.
-    }
-    // The selection's own coverage, drawn into this grid through the inverse
-    // of the image's placement.
-    let inverse = pixel_to_document.inverted();
-    let rect = CGRect::new(0.0, 0.0, width as f64, height as f64);
-    // Corners of the image grid mapped to the document.
-    let corners = [
-        CGPoint::new(0.0, 0.0).applying(pixel_to_document),
-        CGPoint::new(width as f64, 0.0).applying(pixel_to_document),
-        CGPoint::new(0.0, height as f64).applying(pixel_to_document),
-        CGPoint::new(width as f64, height as f64).applying(pixel_to_document),
-    ];
-    for (i, corner) in corners.iter().enumerate() {
-        let _ = (i, corner);
-    }
-    // Sample the selection's own antialiased coverage at each pixel center
-    // (bilinear, so rotated/scaled layers keep sub-pixel soft edges).
-    let cov = selection.coverage.as_ref().unwrap();
+    };
     for y in 0..height {
         for x in 0..width {
-            let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&inverse);
-            let sx = doc.x - selection.rect.min_x();
-            let sy = doc.y - selection.rect.min_y();
+            let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(pixel_to_document);
+            let sx = (doc.x - selection.rect.min_x()).floor();
+            let sy = (doc.y - selection.rect.min_y()).floor();
             if sx < 0.0 || sy < 0.0 || sx >= cov.width as f64 || sy >= cov.height as f64 {
                 continue;
             }
-            mask.data[y * width + x] = sample_coverage(cov, sx, sy);
+            mask.data[y * width + x] = cov.data[sy as usize * cov.width + sx as usize];
         }
     }
     mask
 }
 
-/// Bilinear sample of a coverage mask at a fractional position.
-fn sample_coverage(cov: &GrayMask, x: f64, y: f64) -> u8 {
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let fx = (x - x0 as f64) as f32;
-    let fy = (y - y0 as f64) as f32;
-    let x1 = (x0 + 1).min(cov.width - 1);
-    let y1 = (y0 + 1).min(cov.height - 1);
-    let top = cov.data[y0 * cov.width + x0] as f32 * (1.0 - fx)
-        + cov.data[y0 * cov.width + x1] as f32 * fx;
-    let bottom = cov.data[y1 * cov.width + x0] as f32 * (1.0 - fx)
-        + cov.data[y1 * cov.width + x1] as f32 * fx;
-    (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+/// `PixelAdjust.coverage`: the selection rasterized on the image's pixel grid.
+/// The outline is drawn through the inverse of the image's placement
+/// (`concatenate(pixelToDocument.inverted())`) and re-rasterized — an exact
+/// area fill, so an edge lands sub-pixel correct on any rotated or scaled
+/// grid, and an empty selection clips everything away.
+pub fn coverage_path(
+    selection: &DocumentSelection,
+    width: usize,
+    height: usize,
+    pixel_to_document: &CGAffineTransform,
+) -> GrayMask {
+    let mut mask = GrayMask::new(width.max(1), height.max(1));
+    if selection.is_empty() {
+        return mask;
+    }
+    let inverse = pixel_to_document.inverted();
+    let local = DocumentSelection {
+        path: selection.path.transformed(&inverse),
+        antialiased: selection.antialiased,
+        feather: selection.feather,
+    };
+    mask = crate::selection::rasterize(
+        &local.path,
+        width.max(1),
+        height.max(1),
+        local.antialiased || local.feather > 0.0,
+    );
+    if local.feather > 0.0 {
+        // The falloff lives in document units (σ = feather / 2): scale it by
+        // how many pixels a document unit spans on this grid — the inverse
+        // placement's per-axis scale, averaged.
+        let pixels_per_unit = {
+            let x = (inverse.a * inverse.a + inverse.b * inverse.b).sqrt();
+            let y = (inverse.c * inverse.c + inverse.d * inverse.d).sqrt();
+            (x + y) / 2.0
+        };
+        mask = crate::raster::gaussian_blur_gray(&mask, local.feather / 2.0 * pixels_per_unit);
+    }
+    mask
 }
-
-use crate::geometry::CGPoint;
 
 /// coverage × adjusted + (1 − coverage) × original, in float, so fully
 /// selected pixels stay exact and soft edges blend (`CIBlendWithMask`).
-pub fn blend(
-    adjusted: &Bitmap,
-    original: &Bitmap,
-    selection: &SelectionClip,
-    pixel_to_document: &CGAffineTransform,
-) -> Bitmap {
-    debug_assert_eq!(adjusted.width, original.width);
-    debug_assert_eq!(adjusted.height, original.height);
-    let mask = coverage(selection, adjusted.width, adjusted.height, pixel_to_document);
+fn blend_with_mask(adjusted: &Bitmap, original: &Bitmap, mask: &GrayMask) -> Bitmap {
     let mut result = adjusted.clone();
     for (i, chunk) in result.data.chunks_exact_mut(4).enumerate() {
         let a = mask.data[i] as f32 / 255.0;
@@ -94,6 +99,35 @@ pub fn blend(
         }
     }
     result
+}
+
+/// `PixelAdjust.blend` for a clip already rasterized at document resolution;
+/// `blend_path` is the outline-based port.
+pub fn blend(
+    adjusted: &Bitmap,
+    original: &Bitmap,
+    selection: &SelectionClip,
+    pixel_to_document: &CGAffineTransform,
+) -> Bitmap {
+    debug_assert_eq!(adjusted.width, original.width);
+    debug_assert_eq!(adjusted.height, original.height);
+    let mask = coverage(selection, adjusted.width, adjusted.height, pixel_to_document);
+    blend_with_mask(adjusted, original, &mask)
+}
+
+/// `PixelAdjust.blend` for a selection outline: the coverage is rasterized on
+/// the image's own grid (`coverage_path`), so soft edges stay exact under any
+/// placement.
+pub fn blend_path(
+    adjusted: &Bitmap,
+    original: &Bitmap,
+    selection: &DocumentSelection,
+    pixel_to_document: &CGAffineTransform,
+) -> Bitmap {
+    debug_assert_eq!(adjusted.width, original.width);
+    debug_assert_eq!(adjusted.height, original.height);
+    let mask = coverage_path(selection, adjusted.width, adjusted.height, pixel_to_document);
+    blend_with_mask(adjusted, original, &mask)
 }
 
 /// The same blend for gray masks.
@@ -301,7 +335,7 @@ fn resample_bitmap_gray(mask: &GrayMask, w: usize, h: usize) -> GrayMask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{CGPoint, CGSize};
+    use crate::geometry::{CGPoint, CGRect, CGSize};
     use crate::selection::{DocumentSelection, SelectionPath};
 
     fn rect_selection() -> SelectionClip {
@@ -315,10 +349,10 @@ mod tests {
         let identity = CGAffineTransform::IDENTITY;
         let mask = coverage(&clip, 10, 10, &identity);
         assert_eq!(mask.value(4, 4), 255);
-        // Bilinear sub-pixel sampling spreads the AA edge by up to half a
-        // pixel into the neighbors of the boundary.
-        assert!(mask.value(1, 1) <= 64, "{}", mask.value(1, 1));
-        assert!(mask.value(7, 7) <= 64, "{}", mask.value(7, 7));
+        // The containing coverage pixel is read whole: a pixel outside the
+        // outline stays 0, with no half-lit smear across the boundary.
+        assert_eq!(mask.value(1, 1), 0);
+        assert_eq!(mask.value(7, 7), 0);
     }
 
     #[test]
@@ -334,7 +368,85 @@ mod tests {
         }
         let out = blend(&adjusted, &original, &clip, &CGAffineTransform::IDENTITY);
         assert_eq!(out.pixel(4, 4)[0], 255); // selected → adjusted
-        assert!(out.pixel(1, 1)[0] <= 64, "outside stays original: {:?}", out.pixel(1, 1));
+        assert_eq!(out.pixel(1, 1)[0], 0, "outside stays original");
+    }
+
+    /// A layer rotated 45° about its center at (10, 10): the document-space
+    /// rectangle selection x,y 4…16 crosses the 10×10 grid as the rotated
+    /// square, and its edges cut the boundary pixels sub-pixel exactly.
+    #[test]
+    fn coverage_path_rasterizes_the_transformed_outline() {
+        use crate::raster::pixel_to_document;
+        use crate::transform::LayerTransform;
+        let mut transform = LayerTransform::new(CGPoint::new(5.0, 5.0), CGSize::new(10.0, 10.0));
+        transform.rotation = 45.0;
+        let mapping = pixel_to_document(&transform, 10.0, 10.0);
+        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(4.0, 4.0, 12.0, 12.0)));
+        let mask = coverage_path(&selection, 10, 10, &mapping);
+        // A grid pixel is selected where its document position lands inside
+        // the rectangle: the edge midpoints are in, the far corners out.
+        assert_eq!(mask.value(5, 5), 255);
+        assert_eq!(mask.value(0, 5), 255);
+        assert_eq!(mask.value(9, 5), 255);
+        assert_eq!(mask.value(5, 0), 255);
+        assert_eq!(mask.value(5, 9), 255);
+        assert_eq!(mask.value(2, 2), 255);
+        // The rotated square's edges cut the grid corners: the corner pixels
+        // keep only a sliver, their neighbors about seven-eighths.
+        assert!(mask.value(0, 0) < 64, "{}", mask.value(0, 0));
+        assert!(mask.value(9, 9) < 64, "{}", mask.value(9, 9));
+        assert!((190..=240).contains(&mask.value(1, 0)), "{}", mask.value(1, 0));
+        assert!((190..=240).contains(&mask.value(9, 8)), "{}", mask.value(9, 8));
+        // Across the top row the transition happens within one pixel, with no
+        // half-lit band spilling past the edge.
+        assert_eq!(mask.value(2, 0), 255);
+        assert!((190..=240).contains(&mask.value(1, 0)), "{}", mask.value(1, 0));
+        assert!(mask.value(9, 0) < 64, "{}", mask.value(9, 0));
+    }
+
+    /// A layer shifted two pixels right adjusts exactly where its pixels sit
+    /// under the selection — the placement maps pixel centers forward into
+    /// the document — and the selection edge blends at half coverage.
+    #[test]
+    fn blend_path_follows_the_layer_placement() {
+        use crate::raster::pixel_to_document;
+        use crate::transform::LayerTransform;
+        // Document x 2.5…6.5 over a layer shifted two pixels right: the rim
+        // lands mid-pixel on both ends of the run.
+        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
+        let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
+        let mapping = pixel_to_document(&transform, 10.0, 1.0);
+        let base = solid(10, [0, 0, 0, 255]);
+        let adjusted = solid(10, [255, 255, 255, 255]);
+        let out = blend_path(&adjusted, &base, &selection, &mapping);
+        // The layer's pixels 1…3 sit fully inside, 0 and 4 half covered.
+        assert_eq!(out.pixel(0, 0)[0], 128);
+        for x in 1..4 {
+            assert_eq!(out.pixel(x, 0)[0], 255, "column {x}");
+        }
+        assert_eq!(out.pixel(4, 0)[0], 128);
+        assert_eq!(out.pixel(5, 0)[0], 0);
+        assert_eq!(out.pixel(8, 0)[0], 0);
+    }
+
+    /// The same blend with no selection at all: the adjustment stands whole.
+    #[test]
+    fn blend_path_without_selection_keeps_everything() {
+        let selection = DocumentSelection::default();
+        let base = solid(4, [0, 0, 0, 255]);
+        let adjusted = solid(4, [255, 255, 255, 255]);
+        let out = blend_path(&adjusted, &base, &selection, &CGAffineTransform::IDENTITY);
+        for x in 0..4 {
+            assert_eq!(out.pixel(x, 0)[0], 0, "an empty selection clips the edit away");
+        }
+    }
+
+    fn solid(width: usize, value: [u8; 4]) -> Bitmap {
+        let mut bitmap = Bitmap::new(width, 1);
+        for x in 0..width {
+            bitmap.set_pixel(x, 0, value);
+        }
+        bitmap
     }
 
     #[test]

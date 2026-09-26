@@ -368,6 +368,20 @@ pub struct EditorSession {
     pub hue_saturation: Option<crate::adjust::HueSaturationSettings>,
     pub hue_saturation_layer_id: Option<Uuid>,
 
+    // Adjustment layer editing (AdjustmentEditing.swift); methods below
+    // `update_adjustment`. The ordinary editors send their changes to the
+    // edited layer's metadata instead of pixels, and the canvas renders every
+    // preview live through the layer's own adjustment.
+    /// The layer being edited (`adjustmentEditingID`).
+    pub adjustment_editing_id: Option<Uuid>,
+    /// The edited adjustment's opening value (`adjustmentOriginal`): Cancel
+    /// restores it, OK commits the editors' settings over it.
+    pub adjustment_original: Option<crate::adjustment::LayerAdjustment>,
+    /// The filter panel's live settings while an adjustment layer is being
+    /// edited (`filterEdit.settings`); Levels and Hue/Saturation use the
+    /// fields above.
+    pub filter_edit: Option<crate::filters::FilterSettings>,
+
     // Guides
     pub shows_transform_controls: bool,
     pub shows_guides: bool,
@@ -450,6 +464,9 @@ impl Default for EditorSession {
             levels_layer_id: None,
             hue_saturation: None,
             hue_saturation_layer_id: None,
+            adjustment_editing_id: None,
+            adjustment_original: None,
+            filter_edit: None,
             shows_transform_controls: true,
             shows_guides: true,
             shows_rulers: false,
@@ -2191,6 +2208,116 @@ impl EditorSession {
                 layer.adjustment = Some(value);
             }
         }
+    }
+
+    // MARK: Adjustment editing (AdjustmentEditing.swift)
+
+    /// `beginAdjustmentEditing(_:)` — opens the editors on the adjustment
+    /// layer `id` (the menu passes the active layer). One undo step named
+    /// "Edit X Adjustment" folds every preview until
+    /// `finish_adjustment_editing` closes it. Refuses while an editor is
+    /// already open or the layer carries no adjustment.
+    pub fn begin_adjustment_editing(&mut self, id: Uuid) -> bool {
+        if self.adjustment_editing_id.is_some()
+            || self.adjustment_original.is_some()
+            || self.levels.is_some()
+            || self.hue_saturation.is_some()
+            || self.filter_edit.is_some()
+        {
+            return false;
+        }
+        let Some(adjustment) = self
+            .document
+            .as_ref()
+            .and_then(|document| document.layer(id))
+            .and_then(|layer| layer.adjustment.clone())
+        else {
+            return false;
+        };
+        self.adjustment_editing_id = Some(id);
+        self.adjustment_original = Some(adjustment.clone());
+        self.begin_edit(&format!("Edit {} Adjustment", adjustment.kind.label()));
+        true
+    }
+
+    /// `editedAdjustment` — the opening value overlaid with the open editors'
+    /// settings. None while no edit is open, or when the kind's editor is
+    /// missing (Invert has none: nothing to carry back).
+    pub fn edited_adjustment(&self) -> Option<crate::adjustment::LayerAdjustment> {
+        use crate::adjustment::AdjustmentKind;
+        let mut value = self.adjustment_original.clone()?;
+        match value.kind {
+            // Nothing to carry back: Invert has no settings.
+            AdjustmentKind::Invert => {}
+            AdjustmentKind::Levels => value.levels = self.levels?,
+            AdjustmentKind::Hsv => value.hsv_settings = Some(self.hue_saturation.clone()?),
+            _ => {
+                let settings = self.filter_edit.as_ref()?;
+                match value.kind {
+                    AdjustmentKind::Exposure => value.set_exposure(settings.exposure),
+                    AdjustmentKind::GradientMap => value.set_gradient_map(settings.gradient_map),
+                    AdjustmentKind::Grain => value.set_grain(settings.grain),
+                    AdjustmentKind::BlackWhite => value.set_black_white(settings.black_white),
+                    AdjustmentKind::ColorBalance => value.set_color_balance(settings.color_balance),
+                    AdjustmentKind::GaussianBlur => value.set_gaussian_radius(settings.radius),
+                    AdjustmentKind::MotionBlur => {
+                        value.set_motion_angle(settings.angle);
+                        value.set_motion_distance(settings.distance);
+                    }
+                    AdjustmentKind::AddNoise => {
+                        value.set_noise_amount(settings.amount);
+                        value.noise_gaussian = Some(settings.gaussian);
+                        value.noise_monochromatic = Some(settings.monochromatic);
+                    }
+                    // Curves (and any filter kind without a slot of its own).
+                    _ => value.curves = settings.curves.clone(),
+                }
+            }
+        }
+        Some(value)
+    }
+
+    /// `previewAdjustmentEditing(preview:)` — pushes the editors' settings
+    /// into the edited layer (or restores the opening value), which the
+    /// canvas renders live. Stays bound to the layer the edit opened on,
+    /// whatever the active layer is by now.
+    pub fn preview_adjustment_editing(&mut self, preview: bool) -> bool {
+        let Some(id) = self.adjustment_editing_id else {
+            return false;
+        };
+        let Some(original) = self.adjustment_original.clone() else {
+            return false;
+        };
+        let Some(value) = self.edited_adjustment() else {
+            return false;
+        };
+        self.update_adjustment(id, if preview { value } else { original });
+        true
+    }
+
+    /// `finishAdjustmentEditing(commit:)` — OK keeps the editors' settings;
+    /// Cancel (including the window close button) restores the opening
+    /// value. Either way the editors close and the folded undo step ends.
+    pub fn finish_adjustment_editing(&mut self, commit: bool) -> bool {
+        let Some(id) = self.adjustment_editing_id else {
+            return false;
+        };
+        let Some(original) = self.adjustment_original.clone() else {
+            return false;
+        };
+        self.update_adjustment(id, if commit {
+            self.edited_adjustment().unwrap_or_else(|| original.clone())
+        } else {
+            original.clone()
+        });
+        self.levels = None;
+        self.hue_saturation = None;
+        self.filter_edit = None;
+        self.end_edit();
+        self.adjustment_original = None;
+        self.adjustment_editing_id = None;
+        self.canvas_focus_request += 1;
+        true
     }
 
     // MARK: Clipboard (SelectionClipboard.swift)
@@ -7691,5 +7818,185 @@ mod tests {
         assert_eq!(w.tolerance, 32);
         assert!(w.contiguous);
         assert_eq!(w.sample_radius, 0);
+    }
+
+    /// A session whose active layer is a fresh Levels adjustment layer.
+    fn levels_adjustment_session() -> (EditorSession, Uuid) {
+        let mut s = session();
+        s.add_adjustment(crate::adjustment::AdjustmentKind::Levels);
+        let id = s.active_layer_id.unwrap();
+        (s, id)
+    }
+
+    fn adjustment_of(s: &EditorSession, id: Uuid) -> crate::adjustment::LayerAdjustment {
+        s.document
+            .as_ref()
+            .unwrap()
+            .layer(id)
+            .and_then(|layer| layer.adjustment.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn adjustment_editing_previews_and_commits_as_one_undo_step() {
+        let (mut s, id) = levels_adjustment_session();
+        let original = adjustment_of(&s, id);
+
+        assert!(s.begin_adjustment_editing(id));
+        assert_eq!(s.adjustment_editing_id, Some(id));
+        assert_eq!(s.adjustment_original.as_ref(), Some(&original));
+
+        let mut settings = crate::adjust::LevelsSettings::default();
+        settings.ranges[0].black = 20.0;
+        s.levels = Some(settings.clone());
+        // Preview writes the editor's settings into the layer's metadata.
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).levels, settings);
+        // Unchecking preview restores the opening value.
+        assert!(s.preview_adjustment_editing(false));
+        assert_eq!(adjustment_of(&s, id), original);
+        assert!(s.preview_adjustment_editing(true));
+
+        // OK keeps the settings; the whole session folded into one step.
+        assert!(s.finish_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).levels, settings);
+        assert_eq!(s.history.undo_name(), "Edit Levels Adjustment");
+        assert_eq!(s.adjustment_editing_id, None);
+        assert_eq!(s.adjustment_original, None);
+        assert_eq!(s.levels, None);
+
+        s.undo();
+        assert_eq!(adjustment_of(&s, id), original, "undo reverts the edit");
+    }
+
+    #[test]
+    fn adjustment_editing_cancel_restores_exactly() {
+        let (mut s, id) = levels_adjustment_session();
+        let original = adjustment_of(&s, id);
+        assert!(s.begin_adjustment_editing(id));
+
+        let mut settings = crate::adjust::LevelsSettings::default();
+        settings.ranges[0].white = 200.0;
+        s.levels = Some(settings);
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).levels.ranges[0].white, 200.0);
+
+        assert!(s.finish_adjustment_editing(false));
+        assert_eq!(adjustment_of(&s, id), original, "Cancel restores the opening value");
+        // The preview and the cancel never became an undo step.
+        assert_eq!(s.history.undo_name(), "New Levels Adjustment");
+        assert_eq!(s.adjustment_editing_id, None);
+        assert_eq!(s.adjustment_original, None);
+        assert_eq!(s.levels, None);
+    }
+
+    #[test]
+    fn adjustment_editing_stays_bound_across_layer_switches() {
+        let (mut s, id) = levels_adjustment_session();
+        let pixel = s.document.as_ref().unwrap().layers[0].id;
+        assert!(s.begin_adjustment_editing(id));
+        // The user clicks another layer while the panel is open.
+        s.select_layer(Some(pixel));
+        assert_eq!(s.active_layer_id, Some(pixel));
+
+        let mut settings = crate::adjust::LevelsSettings::default();
+        settings.ranges[0].gamma = 2.0;
+        s.levels = Some(settings.clone());
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).levels, settings, "the edited layer follows");
+        assert!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(pixel)
+                .and_then(|layer| layer.adjustment.clone())
+                .is_none(),
+            "the selected layer is untouched"
+        );
+        assert!(s.finish_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).levels, settings);
+    }
+
+    #[test]
+    fn adjustment_editing_refuses_conflicts() {
+        let (mut s, id) = levels_adjustment_session();
+        let blank = s.document.as_ref().unwrap().layers[0].id;
+
+        // No adjustment on the layer, or the id unknown.
+        assert!(!s.begin_adjustment_editing(blank));
+        assert!(!s.begin_adjustment_editing(Uuid::new_v4()));
+
+        // Open, and already open.
+        assert!(s.begin_adjustment_editing(id));
+        assert!(!s.begin_adjustment_editing(id));
+        s.finish_adjustment_editing(true);
+
+        // An open editor (Levels) blocks a new editing session.
+        s.levels = Some(crate::adjust::LevelsSettings::default());
+        assert!(!s.begin_adjustment_editing(id));
+    }
+
+    #[test]
+    fn adjustment_editing_carries_filter_settings_back() {
+        let mut s = session();
+        s.add_adjustment(crate::adjustment::AdjustmentKind::Exposure);
+        let id = s.active_layer_id.unwrap();
+        assert!(s.begin_adjustment_editing(id));
+
+        s.filter_edit = Some(crate::filters::FilterSettings {
+            exposure: crate::adjust::ExposureSettings { exposure: 1.5, offset: 0.0, gamma: 1.0 },
+            ..Default::default()
+        });
+        assert_eq!(
+            s.edited_adjustment().unwrap().exposure().exposure,
+            1.5,
+            "the edited exposure rides on the opening value"
+        );
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).exposure().exposure, 1.5);
+        assert!(s.finish_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id).exposure().exposure, 1.5);
+        assert_eq!(s.history.undo_name(), "Edit Exposure Adjustment");
+        assert_eq!(s.filter_edit, None);
+
+        // A blur adjustment takes the radius; Hue/Saturation its settings.
+        s.add_adjustment(crate::adjustment::AdjustmentKind::GaussianBlur);
+        let blur = s.active_layer_id.unwrap();
+        assert!(s.begin_adjustment_editing(blur));
+        s.filter_edit = Some(crate::filters::FilterSettings {
+            radius: 25.0,
+            ..Default::default()
+        });
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, blur).gaussian_radius(), 25.0);
+        assert!(s.finish_adjustment_editing(true));
+
+        s.add_adjustment(crate::adjustment::AdjustmentKind::Hsv);
+        let hsv = s.active_layer_id.unwrap();
+        assert!(s.begin_adjustment_editing(hsv));
+        s.hue_saturation = Some(crate::adjust::HueSaturationSettings::new(30.0, 10.0, 0.0, false));
+        assert_eq!(s.edited_adjustment().unwrap().resolved_hsv().hue(), 30.0);
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, hsv).resolved_hsv().hue(), 30.0);
+        assert!(s.finish_adjustment_editing(true));
+        assert_eq!(s.history.undo_name(), "Edit Hue/Saturation Adjustment");
+    }
+
+    #[test]
+    fn adjustment_editing_needs_an_open_edit() {
+        let mut s = session();
+        assert!(!s.preview_adjustment_editing(true));
+        assert!(!s.finish_adjustment_editing(true));
+        assert!(s.edited_adjustment().is_none());
+
+        // Invert has no settings: the opening value is all there is.
+        s.add_adjustment(crate::adjustment::AdjustmentKind::Invert);
+        let id = s.active_layer_id.unwrap();
+        assert!(s.begin_adjustment_editing(id));
+        let original = adjustment_of(&s, id);
+        assert_eq!(s.edited_adjustment().as_ref(), Some(&original));
+        assert!(s.preview_adjustment_editing(true));
+        assert_eq!(adjustment_of(&s, id), original);
+        assert!(s.finish_adjustment_editing(true));
     }
 }

@@ -15,7 +15,6 @@ use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::{FilterKind, FilterSettings};
 use compositor_core::geometry::CGAffineTransform;
 use compositor_core::raster::Bitmap;
-use compositor_core::selection::SelectionClip;
 use compositor_core::transform::LayerTransform;
 
 use crate::state::{AppState, SheetKind, SheetState};
@@ -164,7 +163,7 @@ impl AppState {
                     // Levels.swift:90-96).
                     let coverage = histogram_coverage(
                         self.preview_base_transform,
-                        self.selection_clip(),
+                        self.session.selection().cloned(),
                         pixels.width,
                         pixels.height,
                     );
@@ -365,6 +364,13 @@ impl AppState {
             | SliderRole::LevelsOutBlack
             | SliderRole::LevelsOutWhite => {
                 let preview = sheet.checkbox_a;
+                // Editing an adjustment layer: sliders feed the session's
+                // Levels editor, which previews through the live composite.
+                if self.session.adjustment_editing_id.is_some() {
+                    self.session.levels = Some(self.levels_settings_from_sheet(cx));
+                    self.session.preview_adjustment_editing(preview);
+                    return;
+                }
                 if let Some(base) = self.preview_base.clone() {
                     if preview {
                         let settings = self.levels_settings_from_sheet(cx);
@@ -400,6 +406,12 @@ impl AppState {
                         },
                     );
                 }
+                // The adjustment-layer editor previews through the session.
+                if self.session.adjustment_editing_id.is_some() {
+                    self.session.hue_saturation = Some(settings);
+                    self.session.preview_adjustment_editing(true);
+                    return;
+                }
                 if let Some(base) = self.preview_base.clone() {
                     let mut adjusted = base.as_ref().clone();
                     hue_saturation_apply(&mut adjusted, &settings);
@@ -434,10 +446,17 @@ impl AppState {
     /// Rebuilds the Levels preview after the Preview checkbox flips: unchecked
     /// shows the untouched pixels, exactly as Swift's `edit.preview` does.
     pub fn refresh_levels_preview(&mut self, cx: &mut Context<Self>) {
+        let preview = self.sheet.as_ref().map(|s| s.checkbox_a).unwrap_or(true);
+        if self.session.adjustment_editing_id.is_some() {
+            self.session.levels = Some(self.levels_settings_from_sheet(cx));
+            self.session.preview_adjustment_editing(preview);
+            self.revision += 1;
+            cx.notify();
+            return;
+        }
         let Some(base) = self.preview_base.clone() else {
             return;
         };
-        let preview = self.sheet.as_ref().map(|s| s.checkbox_a).unwrap_or(true);
         if preview {
             let settings = self.levels_settings_from_sheet(cx);
             let mut adjusted = base.as_ref().clone();
@@ -556,7 +575,7 @@ impl AppState {
         let Some(base) = self.preview_base.as_deref() else {
             return adjusted;
         };
-        blend_through_selection(base, adjusted, self.preview_base_transform, self.selection_clip())
+        blend_through_selection(base, adjusted, self.preview_base_transform, self.session.selection().cloned())
     }
 
     /// Re-runs the noise filters when their checkboxes change.
@@ -675,20 +694,18 @@ fn levels_auto_slider_values(settings: &LevelsSettings, channel: usize) -> [f32;
     ]
 }
 
-/// The placement transform `adjust::pixel::coverage` samples by: it maps each
-/// pixel center through `mapping⁻¹` before reading the selection, so the
-/// `pixel_to_document` placement has to be handed to it inverted — then every
-/// pixel is sampled at its own document position (`PixelAdjust.coverage`,
+/// The placement transform `adjust::pixel::coverage` samples by: every pixel
+/// center is mapped through it into the document before reading the
+/// selection (`PixelAdjust.coverage`'s `concatenate(pixelToDocument.inverted())`,
 /// Levels.swift:90-96).
 fn coverage_mapping(
     transform: Option<LayerTransform>,
     width: usize,
     height: usize,
 ) -> CGAffineTransform {
-    let mapping = transform
+    transform
         .map(|t| compositor_core::raster::pixel_to_document(&t, width as f64, height as f64))
-        .unwrap_or(CGAffineTransform::IDENTITY);
-    mapping.inverted()
+        .unwrap_or(CGAffineTransform::IDENTITY)
 }
 
 /// `PixelAdjust.blend(over:through:)`: coverage × adjusted + (1 − coverage) ×
@@ -698,13 +715,13 @@ fn blend_through_selection(
     base: &Bitmap,
     adjusted: Bitmap,
     transform: Option<LayerTransform>,
-    clip: Option<SelectionClip>,
+    selection: Option<compositor_core::selection::DocumentSelection>,
 ) -> Bitmap {
-    let Some(clip) = clip else {
+    let Some(selection) = selection else {
         return adjusted;
     };
     let mapping = coverage_mapping(transform, base.width, base.height);
-    compositor_core::adjust::pixel::blend(&adjusted, base, &clip, &mapping)
+    compositor_core::adjust::pixel::blend_path(&adjusted, base, &selection, &mapping)
 }
 
 /// The Levels histogram's per-pixel weights: the selection's coverage on the
@@ -712,14 +729,17 @@ fn blend_through_selection(
 /// `LevelsFilter.histogram`, Levels.swift:90-96).
 fn histogram_coverage(
     transform: Option<LayerTransform>,
-    clip: Option<SelectionClip>,
+    selection: Option<compositor_core::selection::DocumentSelection>,
     width: usize,
     height: usize,
 ) -> Option<compositor_core::raster::GrayMask> {
-    let clip = clip?;
+    let selection = selection?;
     let mapping = coverage_mapping(transform, width, height);
-    Some(compositor_core::adjust::pixel::coverage(
-        &clip, width, height, &mapping,
+    Some(compositor_core::adjust::pixel::coverage_path(
+        &selection,
+        width,
+        height,
+        &mapping,
     ))
 }
 
@@ -734,9 +754,8 @@ mod tests {
     use compositor_core::transform::LayerTransform;
 
     /// A selection covering document x 2…6 in a 10×1 canvas.
-    fn strip_clip() -> compositor_core::selection::SelectionClip {
-        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.0, 0.0, 4.0, 1.0)));
-        selection.clip(CGSize::new(10.0, 1.0))
+    fn strip_selection() -> compositor_core::selection::DocumentSelection {
+        DocumentSelection::new(SelectionPath::rect(CGRect::new(2.0, 0.0, 4.0, 1.0)))
     }
 
     fn solid(width: usize, value: [u8; 4]) -> Bitmap {
@@ -751,27 +770,32 @@ mod tests {
     fn blend_through_selection_limits_the_adjustment() {
         let base = solid(10, [0, 0, 0, 255]);
         let adjusted = solid(10, [255, 255, 255, 255]);
-        let blended = blend_through_selection(&base, adjusted, None, Some(strip_clip()));
-        // Fully inside the selection the adjustment wins; outside, the base.
-        assert_eq!(blended.pixel(3, 0), [255, 255, 255, 255]);
-        assert_eq!(blended.pixel(8, 0), [0, 0, 0, 255]);
-        assert_eq!(blended.pixel(0, 0), [0, 0, 0, 255]);
+        let blended = blend_through_selection(&base, adjusted, None, Some(strip_selection()));
+        // Fully inside the selection the adjustment wins; outside — right up
+        // against the boundary — the base.
+        for x in 2..6 {
+            assert_eq!(blended.pixel(x, 0), [255, 255, 255, 255], "column {x}");
+        }
+        for x in [0, 1, 6, 8] {
+            assert_eq!(blended.pixel(x, 0), [0, 0, 0, 255], "column {x}");
+        }
     }
 
     #[test]
     fn blend_through_selection_follows_the_layer_placement() {
         let base = solid(10, [0, 0, 0, 255]);
         let adjusted = solid(10, [255, 255, 255, 255]);
-        // The same selection over a layer shifted two pixels right: the
-        // layer's pixels sitting under document x 2…6 are the ones adjusted,
-        // with the selection's soft edge falling at the rim.
+        // Document x 2.5…6.5 over a layer shifted two pixels right: the
+        // layer's pixels sitting under the selection adjust, and each rim
+        // pixel blends at exactly half coverage.
         let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
-        let blended = blend_through_selection(&base, adjusted, Some(transform), Some(strip_clip()));
-        assert_eq!(blended.pixel(0, 0), [255, 255, 255, 255]);
+        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
+        let blended = blend_through_selection(&base, adjusted, Some(transform), Some(selection));
+        assert_eq!(blended.pixel(0, 0), [128, 128, 128, 255]);
         assert_eq!(blended.pixel(2, 0), [255, 255, 255, 255]);
-        let rim = blended.pixel(3, 0)[0];
-        assert!((100..=155).contains(&rim), "rim {rim}");
-        assert_eq!(blended.pixel(4, 0), [0, 0, 0, 255]);
+        assert_eq!(blended.pixel(3, 0), [255, 255, 255, 255]);
+        assert_eq!(blended.pixel(4, 0), [128, 128, 128, 255]);
+        assert_eq!(blended.pixel(5, 0), [0, 0, 0, 255]);
         assert_eq!(blended.pixel(8, 0), [0, 0, 0, 255]);
     }
 
@@ -788,13 +812,13 @@ mod tests {
     #[test]
     fn histogram_coverage_places_the_selection_on_the_layer_grid() {
         assert!(histogram_coverage(None, None, 10, 1).is_none());
-        let coverage = histogram_coverage(None, Some(strip_clip()), 10, 1).unwrap();
+        let coverage = histogram_coverage(None, Some(strip_selection()), 10, 1).unwrap();
         assert_eq!(coverage.value(3, 0), 255);
         assert_eq!(coverage.value(8, 0), 0);
         // A layer shifted two pixels right reads the selection from the grid
         // positions that actually sit under it.
         let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
-        let shifted = histogram_coverage(Some(transform), Some(strip_clip()), 10, 1).unwrap();
+        let shifted = histogram_coverage(Some(transform), Some(strip_selection()), 10, 1).unwrap();
         assert_eq!(shifted.value(1, 0), 255);
         assert_eq!(shifted.value(4, 0), 0);
         assert_eq!(shifted.value(6, 0), 0);
