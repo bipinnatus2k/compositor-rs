@@ -1013,6 +1013,8 @@ dependencies = [
  "compositor-core",
  "gpui-kit",
  "image",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

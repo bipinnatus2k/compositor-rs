@@ -202,6 +202,20 @@ fn color_bytes(color: compositor_core::document::PaletteColor) -> [u8; 4] {
 }
 
 impl AppState {
+    // MARK: Shortcut registry
+
+    /// The live shortcut registry (KeyboardShortcuts.swift:129-213). It is
+    /// loaded from `%APPDATA%/compositor/shortcuts.json` — or the platform
+    /// equivalent — when the app starts (`keys::bindings()` reads it before
+    /// the window opens, so custom chords and menu hints are in effect from
+    /// the first frame). The shortcut settings sheet reads this for its
+    /// draft, assigns overrides with `set_override`, and persists with
+    /// `save`; a new launch (or a rebind of `keys::bindings_with`) applies
+    /// the change.
+    pub fn shortcuts(&self) -> std::sync::MutexGuard<'static, crate::shortcuts::ShortcutRegistry> {
+        crate::shortcuts::lock_global()
+    }
+
     // MARK: Tools
 
     fn on_tool_move(&mut self, _: &keys::ToolMove, w: &mut Window, cx: &mut Context<Self>) {

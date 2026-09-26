@@ -1,4 +1,6 @@
-//! Actions and keyboard shortcuts (KeyboardShortcuts.swift).
+//! Actions and keyboard shortcuts (KeyboardShortcuts.swift). The default
+//! chords and any user overrides live in `shortcuts.rs`; `bindings()`
+//! assembles the gpui keymap from that registry.
 
 use gpui_kit::KeyBinding;
 use gpui_kit::actions;
@@ -59,122 +61,149 @@ actions!(compositor, [
 /// Every key binding, bound globally so menus show hints and canvas keys work
 /// as soon as the workspace has focus. Handlers ignore most actions while a
 /// text input owns the keyboard.
+///
+/// The bindings come from the shortcut registry
+/// (KeyboardShortcuts.swift:129-213): the catalog in `shortcuts.rs` holds the
+/// default chord of every action and any user override loaded from
+/// `shortcuts.json`, so custom chords take effect here (and in the menu bar's
+/// key hints, which read the same keymap).
 pub fn bindings() -> Vec<KeyBinding> {
-    vec![
-        // Tools
-        KeyBinding::new("v", ToolMove, None),
-        KeyBinding::new("m", ToolMarquee, None),
-        KeyBinding::new("l", ToolLasso, None),
-        KeyBinding::new("w", ToolWand, None),
-        KeyBinding::new("c", ToolCrop, None),
-        KeyBinding::new("b", ToolBrush, None),
-        KeyBinding::new("e", ToolEraser, None),
-        KeyBinding::new("j", ToolHealing, None),
-        KeyBinding::new("s", ToolClone, None),
-        KeyBinding::new("r", ToolSmear, None),
-        KeyBinding::new("g", ToolGradient, None),
-        KeyBinding::new("u", ToolShape, None),
-        KeyBinding::new("t", ToolType, None),
-        KeyBinding::new("i", ToolEyedropper, None),
-        KeyBinding::new("h", ToolHand, None),
-        KeyBinding::new("z", ToolZoom, None),
-        // Palette
-        KeyBinding::new("x", SwapColors, None),
-        KeyBinding::new("d", DefaultColors, None),
-        KeyBinding::new("tab", CycleToolMode, Some("Compositor")),
-        // File
-        KeyBinding::new("ctrl-n", NewCanvas, None),
-        KeyBinding::new("ctrl-o", OpenDocument, None),
-        KeyBinding::new("ctrl-s", SaveDocument, None),
-        KeyBinding::new("ctrl-shift-s", SaveAs, None),
-        // Export PNG ⇧⌘E, Export JPEG ⌥⇧⌘S
-        KeyBinding::new("ctrl-shift-e", ExportPng, None),
-        KeyBinding::new("ctrl-alt-shift-s", ExportJpeg, None),
-        KeyBinding::new("ctrl-w", CloseDocument, None),
-        // Edit
-        KeyBinding::new("ctrl-z", Undo, None),
-        KeyBinding::new("ctrl-shift-z", Redo, None),
-        KeyBinding::new("ctrl-t", FreeTransform, None),
-        // Clipboard (Cmd-X/C/V and Copy Merged Cmd-Shift-C)
-        KeyBinding::new("ctrl-x", Cut, None),
-        KeyBinding::new("ctrl-c", CopyPixels, None),
-        KeyBinding::new("ctrl-shift-c", CopyMerged, None),
-        KeyBinding::new("ctrl-v", PastePixels, None),
-        // Photoshop's fill shortcuts: Option-Delete, Cmd-Delete, Shift-Delete
-        KeyBinding::new("alt-delete", FillForeground, None),
-        KeyBinding::new("alt-backspace", FillForeground, None),
-        KeyBinding::new("ctrl-delete", FillBackground, None),
-        KeyBinding::new("ctrl-backspace", FillBackground, None),
-        KeyBinding::new("shift-delete", ContentAwareFill, None),
-        KeyBinding::new("shift-backspace", ContentAwareFill, None),
-        // Transform controls toggle (Cmd-H) and Invert pixels (Cmd-I)
-        KeyBinding::new("ctrl-h", ShowTransformControls, None),
-        KeyBinding::new("ctrl-i", InvertPixels, None),
-        // Curves (Cmd-M) and clipping mask toggle (Cmd-Alt-G)
-        KeyBinding::new("ctrl-m", CurvesSheet, None),
-        KeyBinding::new("alt-ctrl-g", ToggleClippingMask, None),
-        // Layer stacking (Cmd-[ / Cmd-])
-        KeyBinding::new("ctrl-[", MoveLayerDown, None),
-        KeyBinding::new("ctrl-]", MoveLayerUp, None),
-        // Show guides ⌘;, show grid ⌘', snap master ⇧⌘;, lock guides ⌥⌘;
-        KeyBinding::new("ctrl-;", ToggleGuides, None),
-        KeyBinding::new("ctrl-shift-;", SnapToggle, None),
-        KeyBinding::new("alt-ctrl-;", LockGuides, None),
-        // Image adjustments
-        KeyBinding::new("ctrl-l", LevelsSheet, None),
-        KeyBinding::new("ctrl-u", HueSaturationSheet, None),
-        // Image
-        KeyBinding::new("ctrl-alt-i", ImageSize, None),
-        KeyBinding::new("ctrl-alt-c", CanvasSize, None),
-        // Layer
-        KeyBinding::new("ctrl-shift-n", NewLayer, None),
-        KeyBinding::new("ctrl-j", DuplicateLayer, None),
-        KeyBinding::new("ctrl-e", MergeDown, None),
-        // Group Selected Layers (Cmd-G); New Group stays available via the panel.
-        KeyBinding::new("ctrl-g", GroupSelectedLayers, None),
-        KeyBinding::new("delete", DeleteLayer, None),
-        KeyBinding::new("backspace", DeleteLayer, None),
-        // Select
-        KeyBinding::new("ctrl-a", SelectAllAction, None),
-        KeyBinding::new("ctrl-d", DeselectAction, None),
-        KeyBinding::new("ctrl-shift-i", InvertSelection, None),
-        KeyBinding::new("alt-ctrl-d", FeatherSheet, None),
-        KeyBinding::new("alt-ctrl-e", ExpandSheet, None),
-        KeyBinding::new("alt-ctrl-c", ContractSheet, None),
-        // View
-        KeyBinding::new("ctrl-r", ToggleRulers, None),
-        KeyBinding::new("ctrl-'", ToggleGrid, None),
-        KeyBinding::new("ctrl-shift-r", ToggleGuides, None),
-        KeyBinding::new("ctrl-=", ZoomIn, None),
-        KeyBinding::new("ctrl-+", ZoomIn, None),
-        KeyBinding::new("ctrl--", ZoomOut, None),
-        KeyBinding::new("ctrl-0", ZoomFit, None),
-        KeyBinding::new("ctrl-1", Zoom100, None),
-        // Nudge
-        KeyBinding::new("left", NudgeLeft, None),
-        KeyBinding::new("right", NudgeRight, None),
-        KeyBinding::new("up", NudgeUp, None),
-        KeyBinding::new("down", NudgeDown, None),
-        KeyBinding::new("shift-left", NudgeLeftMore, None),
-        KeyBinding::new("shift-right", NudgeRightMore, None),
-        KeyBinding::new("shift-up", NudgeUpMore, None),
-        KeyBinding::new("shift-down", NudgeDownMore, None),
-        // Brush size
-        KeyBinding::new("[", BrushSmaller, None),
-        KeyBinding::new("]", BrushLarger, None),
-        // Brush hardness (Swift Shift-[ / Shift-])
-        KeyBinding::new("shift-[", BrushSofter, None),
-        KeyBinding::new("shift-]", BrushHarder, None),
-        // Blend mode stepping (Swift Shift-- / Shift-=)
-        KeyBinding::new("shift--", BlendModePrevious, None),
-        KeyBinding::new("shift-=", BlendModeNext, None),
-        // Cycle shape kind (Swift Shift-U)
-        KeyBinding::new("shift-u", CycleShapeKind, None),
-        // Levels preview toggle (Swift Alt-P)
-        KeyBinding::new("alt-p", ToggleLevelsPreview, None),
-        // Finish a polygonal lasso
-        KeyBinding::new("enter", FinishLasso, Some("Compositor")),
-        // Escape cancels the active canvas edit or sheet.
-        KeyBinding::new("escape", CancelAction, Some("Compositor")),
-    ]
+    bindings_with(&crate::shortcuts::lock_global())
+}
+
+/// Builds the keymap from an explicit registry (the injection point for
+/// tests and for a live rebind after the settings sheet saves).
+pub fn bindings_with(registry: &crate::shortcuts::ShortcutRegistry) -> Vec<KeyBinding> {
+    bindings_tracked(registry, None)
+}
+
+/// Same as [`bindings_with`], optionally recording the shortcut id behind
+/// every emitted binding so tests can prove the binding table and the
+/// shortcut catalog never drift apart.
+pub(crate) fn bindings_tracked(
+    registry: &crate::shortcuts::ShortcutRegistry,
+    mut ids: Option<&mut Vec<&'static str>>,
+) -> Vec<KeyBinding> {
+    /// Binds every effective chord of one catalog entry (the override chord
+    /// if the user customized the action, otherwise all default aliases).
+    macro_rules! bind {
+        ($out:expr, $ids:expr, $registry:expr, $id:literal, $action:ident) => {{
+            if let Some(record) = $ids.as_mut() {
+                record.push($id);
+            }
+            for keystroke in $registry.keystrokes_for($id) {
+                $out.push(KeyBinding::new(&keystroke, $action, $registry.context_for($id)));
+            }
+        }};
+    }
+
+    let mut out = Vec::with_capacity(96);
+    bind!(out, ids, registry, "tool.move", ToolMove);
+    bind!(out, ids, registry, "tool.marquee", ToolMarquee);
+    bind!(out, ids, registry, "tool.lasso", ToolLasso);
+    bind!(out, ids, registry, "tool.wand", ToolWand);
+    bind!(out, ids, registry, "tool.crop", ToolCrop);
+    bind!(out, ids, registry, "tool.brush", ToolBrush);
+    bind!(out, ids, registry, "tool.eraser", ToolEraser);
+    bind!(out, ids, registry, "tool.healing", ToolHealing);
+    bind!(out, ids, registry, "tool.clone", ToolClone);
+    bind!(out, ids, registry, "tool.smear", ToolSmear);
+    bind!(out, ids, registry, "tool.gradient", ToolGradient);
+    bind!(out, ids, registry, "tool.shape", ToolShape);
+    bind!(out, ids, registry, "tool.type", ToolType);
+    bind!(out, ids, registry, "tool.eyedropper", ToolEyedropper);
+    bind!(out, ids, registry, "tool.hand", ToolHand);
+    bind!(out, ids, registry, "tool.zoom", ToolZoom);
+    // Palette
+    bind!(out, ids, registry, "palette.swap", SwapColors);
+    bind!(out, ids, registry, "palette.reset", DefaultColors);
+    bind!(out, ids, registry, "tool.cycle-mode", CycleToolMode);
+    // File
+    bind!(out, ids, registry, "file.new", NewCanvas);
+    bind!(out, ids, registry, "file.open", OpenDocument);
+    bind!(out, ids, registry, "file.save", SaveDocument);
+    bind!(out, ids, registry, "file.save-as", SaveAs);
+    // Export PNG ⇧⌘E, Export JPEG ⌥⇧⌘S
+    bind!(out, ids, registry, "file.export-png", ExportPng);
+    bind!(out, ids, registry, "file.export-jpeg", ExportJpeg);
+    bind!(out, ids, registry, "file.close", CloseDocument);
+    // Edit
+    bind!(out, ids, registry, "edit.undo", Undo);
+    bind!(out, ids, registry, "edit.redo", Redo);
+    bind!(out, ids, registry, "edit.free-transform", FreeTransform);
+    // Clipboard (Cmd-X/C/V and Copy Merged Cmd-Shift-C)
+    bind!(out, ids, registry, "edit.cut", Cut);
+    bind!(out, ids, registry, "edit.copy", CopyPixels);
+    bind!(out, ids, registry, "edit.copy-merged", CopyMerged);
+    bind!(out, ids, registry, "edit.paste", PastePixels);
+    // Photoshop's fill shortcuts: Option-Delete, Cmd-Delete, Shift-Delete
+    bind!(out, ids, registry, "edit.fill-foreground", FillForeground);
+    bind!(out, ids, registry, "edit.fill-background", FillBackground);
+    bind!(out, ids, registry, "edit.content-aware-fill", ContentAwareFill);
+    // Transform controls toggle (Cmd-H) and Invert pixels (Cmd-I)
+    bind!(out, ids, registry, "view.transform-controls", ShowTransformControls);
+    bind!(out, ids, registry, "image.invert", InvertPixels);
+    // Curves (Cmd-M) and clipping mask toggle (Cmd-Alt-G)
+    bind!(out, ids, registry, "image.curves", CurvesSheet);
+    bind!(out, ids, registry, "layer.clipping", ToggleClippingMask);
+    // Layer stacking (Cmd-[ / Cmd-])
+    bind!(out, ids, registry, "layer.move-down", MoveLayerDown);
+    bind!(out, ids, registry, "layer.move-up", MoveLayerUp);
+    // Show guides ⌘;, snap master ⇧⌘;, lock guides ⌥⌘; (ctrl-shift-r is a
+    // Rust alias of "Show Guides")
+    bind!(out, ids, registry, "view.guides", ToggleGuides);
+    bind!(out, ids, registry, "view.snap", SnapToggle);
+    bind!(out, ids, registry, "view.lock-guides", LockGuides);
+    // Image adjustments
+    bind!(out, ids, registry, "image.levels", LevelsSheet);
+    bind!(out, ids, registry, "image.hue-saturation", HueSaturationSheet);
+    // Image
+    bind!(out, ids, registry, "image.image-size", ImageSize);
+    bind!(out, ids, registry, "image.canvas-size", CanvasSize);
+    // Layer
+    // New Blank Layer (Cmd-Shift-N); New Group stays available via the panel.
+    bind!(out, ids, registry, "layer.new", NewLayer);
+    bind!(out, ids, registry, "layer.duplicate", DuplicateLayer);
+    bind!(out, ids, registry, "layer.merge", MergeDown);
+    // Group Selected Layers (Cmd-G)
+    bind!(out, ids, registry, "layer.group", GroupSelectedLayers);
+    bind!(out, ids, registry, "layer.delete", DeleteLayer);
+    // Select
+    bind!(out, ids, registry, "select.all", SelectAllAction);
+    bind!(out, ids, registry, "select.deselect", DeselectAction);
+    bind!(out, ids, registry, "select.invert", InvertSelection);
+    bind!(out, ids, registry, "select.feather", FeatherSheet);
+    bind!(out, ids, registry, "select.expand", ExpandSheet);
+    bind!(out, ids, registry, "select.contract", ContractSheet);
+    // View
+    bind!(out, ids, registry, "view.rulers", ToggleRulers);
+    bind!(out, ids, registry, "view.grid", ToggleGrid);
+    bind!(out, ids, registry, "view.zoom-in", ZoomIn);
+    bind!(out, ids, registry, "view.zoom-out", ZoomOut);
+    bind!(out, ids, registry, "view.zoom-fit", ZoomFit);
+    bind!(out, ids, registry, "view.zoom-100", Zoom100);
+    // Nudge
+    bind!(out, ids, registry, "nudge.left", NudgeLeft);
+    bind!(out, ids, registry, "nudge.right", NudgeRight);
+    bind!(out, ids, registry, "nudge.up", NudgeUp);
+    bind!(out, ids, registry, "nudge.down", NudgeDown);
+    bind!(out, ids, registry, "nudge.left-10", NudgeLeftMore);
+    bind!(out, ids, registry, "nudge.right-10", NudgeRightMore);
+    bind!(out, ids, registry, "nudge.up-10", NudgeUpMore);
+    bind!(out, ids, registry, "nudge.down-10", NudgeDownMore);
+    // Brush size / hardness
+    bind!(out, ids, registry, "brush.smaller", BrushSmaller);
+    bind!(out, ids, registry, "brush.larger", BrushLarger);
+    bind!(out, ids, registry, "brush.softer", BrushSofter);
+    bind!(out, ids, registry, "brush.harder", BrushHarder);
+    // Blend mode stepping and shape kind
+    bind!(out, ids, registry, "blend.previous", BlendModePrevious);
+    bind!(out, ids, registry, "blend.next", BlendModeNext);
+    bind!(out, ids, registry, "shape.cycle", CycleShapeKind);
+    // Levels preview toggle (Alt-P)
+    bind!(out, ids, registry, "view.levels-preview", ToggleLevelsPreview);
+    // Finish a polygonal lasso / cancel the active canvas edit or sheet.
+    bind!(out, ids, registry, "canvas.apply", FinishLasso);
+    bind!(out, ids, registry, "canvas.cancel", CancelAction);
+    out
 }

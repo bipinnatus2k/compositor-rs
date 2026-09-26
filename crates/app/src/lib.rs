@@ -10,6 +10,7 @@ pub mod layers_panel;
 pub mod menu;
 pub mod sheets;
 pub mod sheets_ui;
+pub mod shortcuts;
 pub mod state;
 pub mod tools;
 pub mod ui;
