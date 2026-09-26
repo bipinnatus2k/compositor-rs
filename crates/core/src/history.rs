@@ -442,11 +442,29 @@ mod tests {
     }
 
     #[test]
-    fn transform_not_saved_blocks_nothing() {
-        // The revision system only tracks edits, not restores.
+    fn save_revision_tracks_the_modified_flag() {
+        // mark_saved pins the revision: edits set the modified flag and
+        // undoing back to the saved revision clears it again
+        // (HistoryTests.navigationNoOpsAndSaveRevisionPreserveHistory).
         let mut history = DocumentHistory::default();
-        let t = LayerTransform::new(CGPoint::ZERO, CGSize::new(10.0, 10.0));
-        assert!(t.is_valid());
-        let _ = CGPoint::ZERO;
+        let a = CanvasDocument::new(10, 10);
+        history.begin("Paint", &Some(a.clone()), None);
+        let mut current = a.clone();
+        current.resolution = 144.0;
+        history.end(&Some(current), None);
+        assert!(history.is_modified());
+        history.mark_saved();
+        assert!(!history.is_modified());
+        let mut changed = a.clone();
+        changed.resolution = 300.0;
+        history.begin("Paint", &Some(a.clone()), None);
+        history.end(&Some(changed), None);
+        assert!(history.is_modified());
+        // Undoing past the edit returns to the saved revision.
+        history.undo();
+        assert!(!history.is_modified());
+        assert!(history.can_redo());
+        history.redo();
+        assert!(history.is_modified());
     }
 }

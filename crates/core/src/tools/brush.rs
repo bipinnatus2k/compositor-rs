@@ -209,9 +209,31 @@ impl RasterEdit {
         }
     }
 
-    /// The brush tip as grayscale coverage: white at full strength, fading to
-    /// black at the rim (`tip(diameter:hardness:falloff:)`).
+    /// The brush tip as grayscale coverage, memoized per (diameter,
+    /// hardness): rendering the analytic falloff for every dab is the hot
+    /// path, and a stroke reuses one tip throughout (Swift's stamp/gridTip
+    /// caches).
     pub fn tip(diameter: CGFloat, hardness: CGFloat) -> GrayMask {
+        thread_local! {
+            static TIP_CACHE: std::cell::RefCell<std::collections::HashMap<(u64, u64), GrayMask>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        let key = (diameter.to_bits(), hardness.to_bits());
+        TIP_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() > 32 {
+                // Settings change rarely; a full clear keeps the bound.
+                cache.clear();
+            }
+            cache
+                .entry(key)
+                .or_insert_with(|| Self::render_tip(diameter, hardness))
+                .clone()
+        })
+    }
+
+    /// The analytic tip render (`tip(diameter:hardness:falloff:)`).
+    fn render_tip(diameter: CGFloat, hardness: CGFloat) -> GrayMask {
         let size = (diameter.ceil() as usize).max(1);
         let mut tip = GrayMask::new(size, size);
         let radius = size as f64 / 2.0;

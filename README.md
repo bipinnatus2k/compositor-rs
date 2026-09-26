@@ -5,7 +5,7 @@ Photoshop-style image editor for macOS — aiming for a 1:1 restoration of the
 original program's logic, data model, algorithms and UI, verified by tests
 ported from the original XCTest suite.
 
-The original is ~37,000 lines of Swift/SwiftUI/Metal plus C pixel kernels.
+The original is ~39,000 lines of Swift/SwiftUI/Metal plus C pixel kernels.
 This workspace ports that program to pure Rust: `compositor-core` holds the
 whole engine (document model, rendering, tools, adjustments, filters, file
 formats), `compositor` (crates/app) is the desktop application built on
@@ -19,7 +19,7 @@ gpui-kit, the Rust UI framework.
 | `LayerTransform.swift` | `core::transform` | exact formulas: `point/contains/placing/following/rounded`, `TransformDrag`, `TransformSnap` |
 | `BrushRaster`, CGContext bitmaps, `DownsampleCache` | `core::raster` | premultiplied RGBA8 bitmaps, gray masks, affine resample, halving, Gaussian blur, `falloff`, `pixel_to_document` |
 | `LayerAppearance.swift` + Core Image blend modes | `core::blend` | all 24 modes with the PDF/Photoshop formulas CI implements (including the 10 that needed a CI surface) |
-| `Selection.swift` (CGPath + CIBlending) | `core::selection` | polygon boolean engine (geo), antialiased scanline coverage, feather = σ/2 Gaussian, expand/contract via round-join stroke bands |
+| `Selection.swift` (CGPath + CIBlending) | `core::selection` | polygon boolean engine (geo), analytic area coverage (sub-pixel exact), feather = σ/2 Gaussian, expand/contract via round-join stroke bands |
 | `Levels.swift` + `LevelsPixels.c` | `core::adjust::levels` | exact tables, `levels_apply`, `levels_histogram`, display scaling |
 | `Curves.swift` | `core::adjust::curves` | shape-preserving Hermite spline, exact |
 | `HueSaturation.swift` | `core::adjust::hue_saturation` | bands, colorize, the exact HSL adjust |
@@ -35,9 +35,13 @@ gpui-kit, the Rust UI framework.
 | `ContentFill.c` | `core::tools::content_fill` | coherent-offset patch synthesis, kernel-exact |
 | `WandPixels.c`, `MagicWand.swift` | `core::tools::wand` + `session` | same hash/flood-fill/outline trace |
 | `CanvasResizer`, `ImageResizer`, `Crop`, `ImageTrim`, `LayerFlip` | `core::canvas` | anchors, units, trim, mirror math |
-| `LayerRenderer`/`TiledLayerRenderer` semantics | `core::render` | compositing: blend, opacity, masks, folder masks, clipping masks, effects, adjustment layers |
+| `LayerRenderer`/`TiledLayerRenderer` semantics | `core::render` | compositing: blend, opacity, masks, folder masks, clipping masks, effects, adjustment layers, canvas-shaped panel thumbnails |
+| `LevelsAutomatic.swift` | `core::adjust::levels_auto` | Contrast/Color/Neutral auto levels, 256-bin histograms, clip 0.001, neutral gamma |
+| `AdjustmentEditing.swift` | `core::session` | the adjustment-layer editing session (preview/commit/cancel, bound to its layer) |
+| `SelectionEdits.swift` | `core::session` | fill/clear/invert selected pixels, mask from selection, adjustment creation |
+| `KeyboardShortcuts.swift` | `app::shortcuts` | action catalog with per-action overrides, conflict validation, persisted customizations |
 | `EditorSession` + extensions | `core::session` | the operation state machine with the original undo names and guards |
-| `IO/ProjectStore.swift` (`.comp` package) | `core::project` | manifest JSON v1–8 semantics, validation limits, atomic save |
+| `IO/ProjectStore.swift` (`.comp` package) | `core::project` | manifest JSON v1–9 semantics, validation limits, atomic save |
 | `IO/PSD/*` | `core::psd` | PSD reader/writer, RLE, layer records, vector paths |
 | SwiftUI UI | `crates/app` (gpui-kit) | tool rail, per-tool options header, canvas viewport with rulers/guides/grid/selection ants/crop overlay, layers panel (blend/opacity/thumbnails/rename), sheets (New/Image Size/Canvas Size/Levels with histogram/Hue-Saturation/Filters/Camera Raw with 14 sliders/Trim/Export), menus, Photoshop-style shortcuts |
 | `SmudgeLiquify.swift` (`WarpStroke`) | `core::tools::warp` + UI | Smudge pickup/paint, Liquify forward warp; the finished stroke paints back into the layer along its path (`finishWarp`) |
@@ -58,7 +62,7 @@ editor window (Windows/macOS/Linux via gpui).
 ## Project format and PSD
 
 `.comp` packages (manifest.json + PNG assets) are read and written with the
-version 1–8 semantics documented in
+version 1–9 semantics documented in
 [`Compositor/docs/project-format.md`](./Compositor/docs/project-format.md).
 Photoshop PSD files (8-bit RGB) are imported with the same feature subset the
 original supports.
