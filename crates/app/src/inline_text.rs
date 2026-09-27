@@ -16,9 +16,9 @@ use gpui_kit::{Context, Entity, Window};
 
 use compositor_core::document::LayerTextStyle;
 use compositor_core::geometry::{CGPoint, CGSize};
-use compositor_core::transform::LayerTransform;
+use compositor_core::transform::{LayerTransform, HANDLES};
 
-use crate::state::AppState;
+use crate::state::{AppState, CanvasDrag};
 
 /// The overlay input's cap, mirroring Swift's
 /// `shouldChangeTextIn` guard (100,000 characters).
@@ -64,6 +64,161 @@ pub fn inline_text_box(
 pub fn inline_text_measured_size(style: &LayerTextStyle) -> CGSize {
     let size = compositor_core::tools::text::text_box_size(style);
     CGSize::new(size.width.max(16.0), size.height.max(16.0))
+}
+
+/// The editor box's four screen corners (TL, TR, BR, BL in `HANDLES` corner
+/// order) after rotating the box about its center by `rotation_degrees`.
+/// Swift rotates the whole editor with `frameRotation = transform.rotation`,
+/// pinning the rotated top-left corner to the frame's anchor; because the
+/// screen transform is zoom and pan only, that is exactly this rotation of
+/// the axis-aligned frame about its center (InlineTextEditor.swift:124-134).
+pub fn inline_text_box_corners(
+    origin: (f32, f32),
+    size: (f32, f32),
+    rotation_degrees: f64,
+) -> [(f32, f32); 4] {
+    let radians = (rotation_degrees % 360.0) * std::f64::consts::PI / 180.0;
+    let (sr, cr) = radians.sin_cos();
+    let (sr, cr) = (sr as f32, cr as f32);
+    let (cx, cy) = (origin.0 + size.0 / 2.0, origin.1 + size.1 / 2.0);
+    let (hw, hh) = (size.0 / 2.0, size.1 / 2.0);
+    // Clockwise on the y-down screen, like a layer's own rotation.
+    let corner = |ox: f32, oy: f32| (cx + ox * cr - oy * sr, cy + ox * sr + oy * cr);
+    [corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)]
+}
+
+/// A press's point in the editor's own logical units: out of the document,
+/// undoing the transform's rotation about the box center, then from the box's
+/// placement pixels into the logical size the text is laid out at
+/// (`convert(event.locationInWindow, from: nil)` through `frameRotation`).
+pub fn inline_text_local_point(
+    transform: &LayerTransform,
+    logical: CGSize,
+    doc: CGPoint,
+) -> CGPoint {
+    let center = transform.center();
+    let dx = doc.x - center.x;
+    let dy = doc.y - center.y;
+    let (sr, cr) = transform.radians().sin_cos();
+    // The inverse of the transform's clockwise rotation.
+    let ux = dx * cr + dy * sr;
+    let uy = -dx * sr + dy * cr;
+    CGPoint::new(
+        (ux + transform.size.width / 2.0) * logical.width / transform.size.width,
+        (uy + transform.size.height / 2.0) * logical.height / transform.size.height,
+    )
+}
+
+/// The resize handle's size in the box's own logical units
+/// (`handleSize = max(2, 6 / max(0.01, scale * transform.width / logical.width))`,
+/// InlineTextEditor.swift:141) — 6 screen points divided by the screen
+/// pixels per logical pixel.
+pub fn inline_text_handle_size(transform: &LayerTransform, logical: CGSize, zoom: f64) -> f64 {
+    (6.0 / (zoom * transform.size.width / logical.width).max(0.01)).max(2.0)
+}
+
+/// Which resize handle is at a point in the box's own logical units, in
+/// `HANDLES` order (0, 2, 4, 6 the corners; 1, 3, 5, 7 the edge midpoints).
+/// A band `edgeReach` wide along each edge counts as that edge
+/// (`handle(at:)`, InlineTextEditor.swift:276-293), capped so a small box
+/// keeps a middle to type in; nil anywhere else, which is the text.
+pub fn inline_text_handle_at(local: CGPoint, bounds: CGSize, handle_size: f64) -> Option<usize> {
+    let reach = (handle_size * 10.0 / 6.0).min(bounds.width.min(bounds.height) / 3.0);
+    if !(local.x >= -reach
+        && local.x <= bounds.width + reach
+        && local.y >= -reach
+        && local.y <= bounds.height + reach)
+    {
+        return None;
+    }
+    let left = local.x <= reach;
+    let right = local.x >= bounds.width - reach;
+    let top = local.y <= reach;
+    let bottom = local.y >= bounds.height - reach;
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(0),
+        (_, true, true, _) => Some(2),
+        (_, true, _, true) => Some(4),
+        (true, _, _, true) => Some(6),
+        (_, _, true, _) => Some(1),
+        (_, true, _, _) => Some(3),
+        (_, _, _, true) => Some(5),
+        (true, _, _, _) => Some(7),
+        _ => None,
+    }
+}
+
+/// What dragging a handle leaves behind: the draft's new `boxSize` and the
+/// transform that keeps the dragged edge anchored.
+pub struct InlineTextResize {
+    pub box_size: CGSize,
+    pub transform: LayerTransform,
+}
+
+/// The drag's resize math (`mouseDragged`, InlineTextEditor.swift:344-375):
+/// the pointer's document-space move is rotated into the box's own axes, the
+/// dragged edges follow it clamped to a 16-logical-px minimum, and the new
+/// box size (rounded) scales the transform so the opposite edge stays put.
+/// None when the result would leave an invalid box or transform.
+pub fn inline_text_resize(
+    old: &LayerTransform,
+    source: CGSize,
+    handle: usize,
+    start: CGPoint,
+    current: CGPoint,
+) -> Option<InlineTextResize> {
+    let unit = HANDLES.get(handle)?;
+    let (sr, cr) = old.radians().sin_cos();
+    let dx = current.x - start.x;
+    let dy = current.y - start.y;
+    let local_x = dx * cr + dy * sr;
+    let local_y = -dx * sr + dy * cr;
+    let (mut left, mut top) = (0.0f64, 0.0f64);
+    let (mut right, mut bottom) = (old.size.width, old.size.height);
+    let (min_w, min_h) = (
+        16.0 * old.size.width / source.width,
+        16.0 * old.size.height / source.height,
+    );
+    if unit.x == 0.0 {
+        left = local_x.min(right - min_w);
+    }
+    if unit.x == 1.0 {
+        right = (left + min_w).max(right + local_x);
+    }
+    if unit.y == 0.0 {
+        top = local_y.min(bottom - min_h);
+    }
+    if unit.y == 1.0 {
+        bottom = (top + min_h).max(bottom + local_y);
+    }
+    let box_size = CGSize::new(
+        ((right - left) * source.width / old.size.width).round(),
+        ((bottom - top) * source.height / old.size.height).round(),
+    );
+    // `draft.style.boxIsValid` (LayerTextStyle.boxIsValid).
+    let probe = LayerTextStyle {
+        box_size: Some(box_size),
+        ..LayerTextStyle::default()
+    };
+    if !probe.box_is_valid() {
+        return None;
+    }
+    let mut transform = *old;
+    transform.size = CGSize::new(
+        box_size.width * old.size.width / source.width,
+        box_size.height * old.size.height / source.height,
+    );
+    let anchor = old.point(CGPoint::new(left / old.size.width, top / old.size.height));
+    let moved = transform.point(CGPoint::ZERO);
+    transform.origin.x += anchor.x - moved.x;
+    transform.origin.y += anchor.y - moved.y;
+    if !transform.is_valid() {
+        return None;
+    }
+    Some(InlineTextResize {
+        box_size,
+        transform,
+    })
 }
 
 /// A key press while the inline editor owns the keyboard, and the action it
@@ -182,8 +337,10 @@ impl AppState {
         }
     }
 
-    /// The overlay's geometry, if a draft is open. Pure apart from reading
-    /// the session.
+    /// The overlay's geometry, if a draft is open. The input div covers the
+    /// axis-aligned bounds of the (possibly rotated) frame — gpui has no
+    /// element-level rotation, so the text itself stays upright (see the
+    /// module note on `render_inline_text_overlay`).
     pub fn inline_text_overlay(&self) -> Option<InlineTextOverlay> {
         let draft = self.current_tab().session.text_draft.as_ref()?;
         let measured = inline_text_measured_size(&draft.style);
@@ -195,21 +352,50 @@ impl AppState {
             self.zoom,
             self.pan,
         );
+        let rotation = draft.transform.map(|t| t.rotation).unwrap_or(0.0);
+        let corners = inline_text_box_corners((ox, oy), (w, h), rotation);
+        let (min_x, min_y) = corners.iter().fold((f32::MAX, f32::MAX), |(a, b), (x, y)| {
+            (a.min(*x), b.min(*y))
+        });
+        let (max_x, max_y) = corners.iter().fold((f32::MIN, f32::MIN), |(a, b), (x, y)| {
+            (a.max(*x), b.max(*y))
+        });
         let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
         Some(InlineTextOverlay {
-            origin: (ox, oy),
-            size: (w.max(24.0), h.max(24.0)),
+            origin: (min_x, min_y),
+            size: ((max_x - min_x).max(24.0), (max_y - min_y).max(24.0)),
             font_px: (draft.style.font_size * self.zoom).max(6.0) as f32,
             color: (rgb(draft.style.red) << 16) | (rgb(draft.style.green) << 8) | rgb(draft.style.blue),
         })
     }
 
-    /// The overlay element: a bordered box over the canvas, holding the
-    /// multi-line input. Mouse presses inside it stop propagating so the
-    /// canvas never sees them as Type-tool clicks.
-    pub fn render_inline_text_overlay(&self) -> Option<gpui_kit::AnyElement> {
+    /// The overlay element: the multi-line input over the canvas. The frame
+    /// outline and the eight resize handles are painted by the canvas's paint
+    /// pass (through `CanvasScene::inline_text_frame`), rotated about the box
+    /// center like Swift's `frameRotation`; gpui's divs have no element-level
+    /// rotation, so the text itself stays axis-aligned — the one place this
+    /// port visibly deviates from the Swift editor. Mouse presses inside the
+    /// div stop propagating so the canvas never sees them as Type-tool
+    /// clicks, except on a resize handle, which starts a resize drag
+    /// (`InlineTextEditor.mouseDown`'s resize branch).
+    pub fn render_inline_text_overlay(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
         let overlay = self.inline_text_overlay()?;
         let input = self.inline_text_input.clone();
+        let on_press = cx.listener(
+            |this, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                let local = this.local_position(event.position);
+                let doc = this.screen_to_doc(local.0, local.1);
+                if this.tab().session.text_draft.is_some() {
+                    if let Some(handle) = this.inline_text_handle_hit(doc) {
+                        this.begin_inline_text_resize(doc, handle, cx);
+                    }
+                }
+                cx.stop_propagation();
+            },
+        );
         Some(
             gpui_kit::div()
                 .id("inline-text-editor")
@@ -218,11 +404,7 @@ impl AppState {
                 .top(px(overlay.origin.1))
                 .w(px(overlay.size.0))
                 .h(px(overlay.size.1))
-                .border_1()
-                .border_color(gpui_kit::rgba(0x4da6ffdd))
-                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                    cx.stop_propagation();
-                })
+                .on_mouse_down(MouseButton::Left, on_press)
                 .child(
                     Textarea::new(&input)
                         .appearance(false)
@@ -234,14 +416,67 @@ impl AppState {
                 .into_any_element(),
         )
     }
+
+    /// Which resize handle a press at `doc` lands on, if a draft is open
+    /// (`InlineTextEditor.hitTest`/`handle(at:)`).
+    pub fn inline_text_handle_hit(&self, doc: CGPoint) -> Option<usize> {
+        let draft = self.current_tab().session.text_draft.as_ref()?;
+        let measured = inline_text_measured_size(&draft.style);
+        let logical = draft.style.box_size.unwrap_or(measured);
+        let transform = draft
+            .transform
+            .unwrap_or_else(|| LayerTransform::new(draft.origin, logical));
+        let handle_size = inline_text_handle_size(&transform, logical, self.zoom);
+        let local = inline_text_local_point(&transform, logical, doc);
+        inline_text_handle_at(local, logical, handle_size)
+    }
+
+    /// Starts a resize drag from a handle
+    /// (`InlineTextEditor.mouseDown`): point text first becomes a box of the
+    /// size it has right now, which then holds and wraps the text — its
+    /// scale and rotation are whatever the draft already carried.
+    pub fn begin_inline_text_resize(
+        &mut self,
+        doc: CGPoint,
+        handle: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut draft) = self.current_tab().session.text_draft.clone() else {
+            return;
+        };
+        let measured = inline_text_measured_size(&draft.style);
+        let transform = draft
+            .transform
+            .unwrap_or_else(|| LayerTransform::new(draft.origin, measured));
+        if draft.style.box_size.is_none() {
+            draft.style.box_size = Some(measured);
+            draft.transform = Some(transform);
+            draft.origin = transform.origin;
+            self.tab().session.text_draft = Some(draft.clone());
+        }
+        let source = draft.style.box_size.unwrap_or(measured);
+        self.set_drag(Some(CanvasDrag::TextResize {
+            handle,
+            start: doc,
+            old: transform,
+            source,
+            draft,
+        }));
+        self.touch(cx);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{inline_text_box, inline_text_key, inline_text_measured_size, InlineTextKey};
+    use super::{
+        inline_text_box, inline_text_box_corners, inline_text_handle_at, inline_text_handle_size,
+        inline_text_key, inline_text_local_point, inline_text_measured_size, inline_text_resize,
+        InlineTextKey,
+    };
+    use crate::state::doc_to_screen_at;
     use compositor_core::document::LayerTextStyle;
     use compositor_core::geometry::{CGPoint, CGSize};
-    use compositor_core::transform::LayerTransform;
+    use compositor_core::transform::{LayerTransform, HANDLES};
 
     #[test]
     fn boxed_text_uses_the_draft_transform_through_the_view_transform() {
@@ -332,5 +567,199 @@ mod tests {
         );
         // Plain arrows move the caret instead.
         assert_eq!(inline_text_key("left", false, false, false, false), None);
+    }
+
+    #[test]
+    fn rotated_corners_land_where_the_transform_puts_them() {
+        // The rotated frame's corners are the transform's own corner points
+        // mapped to the screen (Swift pins the rotated top-left to the
+        // anchor; InlineTextEditor.swift:124-134). Try a few angles.
+        for rotation in [0.0, 90.0, -37.5, 415.0] {
+            let mut transform = LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
+            transform.rotation = rotation;
+            let zoom = 2.0;
+            let pan = (5.0, 7.0);
+            let ((ox, oy), (w, h)) = inline_text_box(
+                transform.origin,
+                Some(transform),
+                Some(transform.size),
+                CGSize::new(999.0, 999.0),
+                zoom,
+                pan,
+            );
+            let corners = inline_text_box_corners((ox, oy), (w, h), rotation);
+            let units = [
+                CGPoint::new(0.0, 0.0),
+                CGPoint::new(1.0, 0.0),
+                CGPoint::new(1.0, 1.0),
+                CGPoint::new(0.0, 1.0),
+            ];
+            for (corner, unit) in corners.iter().zip(units) {
+                let doc = transform.point(unit);
+                let (sx, sy) = doc_to_screen_at(zoom, pan, doc.x, doc.y);
+                assert!((corner.0 - sx).abs() < 0.001, "rotation {rotation}");
+                assert!((corner.1 - sy).abs() < 0.001, "rotation {rotation}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_point_undoes_the_rotation_and_the_layer_scale() {
+        // A 90-degree box half the logical size: a press on the document
+        // lands at the logical spot the editor's own coordinates say.
+        let mut transform = LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 50.0));
+        transform.rotation = 90.0;
+        let logical = CGSize::new(200.0, 100.0);
+        // The logical top-left corner is the transform's own top-left corner.
+        let corner = transform.point(CGPoint::ZERO);
+        let local = inline_text_local_point(&transform, logical, corner);
+        assert!((local.x - 0.0).abs() < 0.001 && (local.y - 0.0).abs() < 0.001);
+        // The logical bottom-right corner likewise.
+        let corner = transform.point(CGPoint::new(1.0, 1.0));
+        let local = inline_text_local_point(&transform, logical, corner);
+        assert!((local.x - logical.width).abs() < 0.001);
+        assert!((local.y - logical.height).abs() < 0.001);
+        // Round trip through the rotation for a point in between.
+        let doc = transform.point(CGPoint::new(0.25, 0.75));
+        let local = inline_text_local_point(&transform, logical, doc);
+        assert!((local.x - 50.0).abs() < 0.001 && (local.y - 75.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn handle_hits_follow_the_edge_bands() {
+        // handle(at:): a band along each edge counts as that edge
+        // (InlineTextEditor.swift:276-293); the reach is handleSize * 10/6.
+        let bounds = CGSize::new(300.0, 200.0);
+        let handle_size = 6.0;
+        let reach = handle_size * 10.0 / 6.0; // 10
+        // Corners.
+        assert_eq!(inline_text_handle_at(CGPoint::new(2.0, 3.0), bounds, handle_size), Some(0));
+        assert_eq!(inline_text_handle_at(CGPoint::new(295.0, 1.0), bounds, handle_size), Some(2));
+        assert_eq!(inline_text_handle_at(CGPoint::new(298.0, 198.0), bounds, handle_size), Some(4));
+        assert_eq!(inline_text_handle_at(CGPoint::new(1.0, 195.0), bounds, handle_size), Some(6));
+        // Edge midpoints.
+        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 5.0), bounds, handle_size), Some(1));
+        assert_eq!(inline_text_handle_at(CGPoint::new(295.0, 100.0), bounds, handle_size), Some(3));
+        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 195.0), bounds, handle_size), Some(5));
+        assert_eq!(inline_text_handle_at(CGPoint::new(5.0, 100.0), bounds, handle_size), Some(7));
+        // The middle is the text, not a handle.
+        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 100.0), bounds, handle_size), None);
+        // Beyond the bands — even outside the box — nothing hits.
+        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 50.0), bounds, handle_size), None);
+        assert_eq!(inline_text_handle_at(CGPoint::new(320.0, 100.0), bounds, handle_size), None);
+        // A small box caps the reach at a third of the shorter side, so the
+        // middle stays typable.
+        let small = CGSize::new(24.0, 24.0);
+        assert_eq!(inline_text_handle_at(CGPoint::new(12.0, 1.0), small, handle_size), Some(1));
+        assert_eq!(inline_text_handle_at(CGPoint::new(12.0, 12.0), small, handle_size), None);
+    }
+
+    #[test]
+    fn handle_size_is_six_screen_points_over_the_zoom() {
+        // handleSize = max(2, 6 / max(0.01, zoom * transform.width / logical.width)).
+        let transform = LayerTransform::new(CGPoint::ZERO, CGSize::new(200.0, 80.0));
+        let logical = CGSize::new(200.0, 80.0);
+        // At 1:1 the handle is 6 logical points.
+        assert_eq!(inline_text_handle_size(&transform, logical, 1.0), 6.0);
+        // Deeper zoom shrinks it toward the 2-point floor.
+        assert_eq!(inline_text_handle_size(&transform, logical, 4.0), 2.0);
+        // A scaled-up layer divides by the layer's own scale too.
+        let scaled = LayerTransform::new(CGPoint::ZERO, CGSize::new(400.0, 160.0));
+        assert_eq!(inline_text_handle_size(&scaled, logical, 1.0), 3.0);
+    }
+
+    #[test]
+    fn corner_drag_moves_the_dragged_corner_and_keeps_the_opposite() {
+        // Drag the top-left handle up-left: the corner follows the pointer
+        // and the bottom-right corner stays put (InlineTextEditor.swift:344-375).
+        let old = LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
+        let source = CGSize::new(200.0, 80.0);
+        let resized = inline_text_resize(
+            &old,
+            source,
+            0,
+            CGPoint::new(50.0, 50.0),
+            CGPoint::new(30.0, 40.0),
+        )
+        .unwrap();
+        // The corner moved by (-20, -10): new box 220 x 90.
+        assert_eq!(resized.box_size, CGSize::new(220.0, 90.0));
+        assert_eq!(resized.transform.size, CGSize::new(220.0, 90.0));
+        // The new top-left corner is the dragged position.
+        assert_eq!(resized.transform.origin, CGPoint::new(-10.0, 10.0));
+        let moved = resized.transform.point(CGPoint::ZERO);
+        assert!((moved.x - (-10.0)).abs() < 0.001 && (moved.y - 10.0).abs() < 0.001);
+        // The opposite corner stayed at the old bottom-right.
+        let br = resized.transform.point(CGPoint::new(1.0, 1.0));
+        assert!((br.x - 210.0).abs() < 0.001 && (br.y - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn edge_drag_changes_one_axis_only() {
+        // The right-edge midpoint handle grows the width alone; origin (the
+        // top-left corner) and height stay.
+        let old = LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
+        let resized = inline_text_resize(
+            &old,
+            CGSize::new(200.0, 80.0),
+            3,
+            CGPoint::new(210.0, 60.0),
+            CGPoint::new(240.0, 100.0),
+        )
+        .unwrap();
+        assert_eq!(resized.box_size, CGSize::new(230.0, 80.0));
+        assert_eq!(resized.transform.origin, CGPoint::new(10.0, 20.0));
+        let tr = resized.transform.point(CGPoint::new(1.0, 0.0));
+        assert!((tr.x - 240.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn drag_past_the_opposite_edge_clamps_at_sixteen_logical_pixels() {
+        // Dragging a corner across the box stops at the 16-logical-pixel
+        // minimum (minW/minH), both in the box size and the transform.
+        let old = LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 80.0));
+        let resized = inline_text_resize(
+            &old,
+            CGSize::new(200.0, 80.0),
+            0,
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(2000.0, 2000.0),
+        )
+        .unwrap();
+        assert_eq!(resized.box_size, CGSize::new(16.0, 16.0));
+        assert_eq!(resized.transform.size, CGSize::new(16.0, 16.0));
+        // A degenerate box size (a zero-size source poisons the math) fails
+        // `boxIsValid` and leaves the draft alone.
+        assert!(inline_text_resize(
+            &old,
+            CGSize::new(0.0, 80.0),
+            0,
+            CGPoint::ZERO,
+            CGPoint::new(10.0, 0.0)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resize_drags_follow_the_box_rotation() {
+        // A 90-degree box: a downward drag is along the box's own x axis, so
+        // it narrows the width, not the height.
+        let mut old = LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 50.0));
+        old.rotation = 90.0;
+        let resized = inline_text_resize(
+            &old,
+            CGSize::new(100.0, 50.0),
+            0,
+            CGPoint::ZERO,
+            CGPoint::new(0.0, 10.0),
+        )
+        .unwrap();
+        assert_eq!(resized.box_size, CGSize::new(90.0, 50.0));
+        assert_eq!(resized.transform.size, CGSize::new(90.0, 50.0));
+        // The handle order is the one the drag math uses: corners first.
+        assert_eq!(HANDLES[0], CGPoint::new(0.0, 0.0));
+        assert_eq!(HANDLES[2], CGPoint::new(1.0, 0.0));
+        assert_eq!(HANDLES[4], CGPoint::new(1.0, 1.0));
+        assert_eq!(HANDLES[6], CGPoint::new(0.0, 1.0));
     }
 }

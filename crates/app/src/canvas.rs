@@ -22,6 +22,7 @@ use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::tools::brush::{GradientShape, RasterEdit};
 
+use crate::inline_text::{inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_resize};
 use crate::state::{AppState, CanvasDrag, RULER_SIZE};
 
 /// `guideHitDistance` (Guides.swift): how close a Move press must land to a
@@ -46,6 +47,10 @@ pub struct CanvasScene {
     pub crop: Option<((f32, f32), (f32, f32))>,
     pub transform: Option<Vec<(f32, f32)>>,
     pub text_box: Option<((f32, f32), (f32, f32))>,
+    /// The inline text editor's frame, rotated with the draft
+    /// (`InlineTextEditor.draw`): four screen corners plus the edge
+    /// midpoints painted as handles.
+    pub inline_text_frame: Option<[(f32, f32); 4]>,
 }
 
 impl AppState {
@@ -57,7 +62,7 @@ impl AppState {
         // (InlineTextEditor.synchronize runs on every display sync in Swift;
         // here the overlay re-renders with the scene, so zoom and pan keep
         // it anchored).
-        let inline_overlay = self.render_inline_text_overlay();
+        let inline_overlay = self.render_inline_text_overlay(cx);
         let app_move = cx.entity().downgrade();
         let app_up = cx.entity().downgrade();
         let app_prepaint = cx.entity().downgrade();
@@ -126,6 +131,7 @@ impl AppState {
         let mut crop = None;
         let mut transform = None;
         let mut text_box = None;
+        let mut inline_text_frame = None;
 
         if let Some(document) = self.current_tab().session.document.as_ref() {
             // `displayedGuides`: a drag in progress replaces its own guide's
@@ -223,6 +229,21 @@ impl AppState {
                     self.doc_to_screen(rect.max_x(), rect.max_y()),
                 ));
             }
+            // The inline text editor's frame and handles: the draft's frame
+            // rotated about its center (`frameRotation`).
+            if let Some(draft) = &self.current_tab().session.text_draft {
+                let measured = inline_text_measured_size(&draft.style);
+                let ((ox, oy), (w, h)) = inline_text_box(
+                    draft.origin,
+                    draft.transform,
+                    draft.style.box_size,
+                    measured,
+                    self.zoom,
+                    self.pan,
+                );
+                let rotation = draft.transform.map(|t| t.rotation).unwrap_or(0.0);
+                inline_text_frame = Some(inline_text_box_corners((ox, oy), (w, h), rotation));
+            }
         }
 
         CanvasScene {
@@ -239,6 +260,7 @@ impl AppState {
             crop,
             transform,
             text_box,
+            inline_text_frame,
         }
     }
 
@@ -275,6 +297,16 @@ impl AppState {
         let doc = self.screen_to_doc(local.0, local.1);
         let alt = event.modifiers.alt;
         let shift = event.modifiers.shift;
+
+        // The inline text editor's resize handles take a press before any
+        // tool (`InlineTextEditor.hitTest`/`mouseDown`); the editor itself
+        // swallows presses inside the overlay, so only these reach us.
+        if self.tab().session.text_draft.is_some() {
+            if let Some(handle) = self.inline_text_handle_hit(doc) {
+                self.begin_inline_text_resize(doc, handle, cx);
+                return;
+            }
+        }
 
         // A press on a ruler strip starts a guide at the pointer's document
         // coordinate, whatever the tool (`CanvasRulerNSView.mouseDown`); the
@@ -454,6 +486,19 @@ impl AppState {
                 let rect = compositor_core::selection::drag_box_rect(*start, doc, false, false);
                 self.text_box_rect = Some(rect);
             }
+            Some(CanvasDrag::TextResize { handle, start, old, source, draft }) => {
+                // The handle drag resizes the draft's box live
+                // (`InlineTextEditor.mouseDragged`).
+                let (handle, start) = (*handle, *start);
+                let (old, source, draft) = (*old, *source, draft.clone());
+                if let Some(resized) = inline_text_resize(&old, source, handle, start, doc) {
+                    let mut draft = draft;
+                    draft.style.box_size = Some(resized.box_size);
+                    draft.origin = resized.transform.origin;
+                    draft.transform = Some(resized.transform);
+                    self.workspace.current_mut().session.text_draft = Some(draft);
+                }
+            }
             Some(CanvasDrag::MoveLayer { start_origin, start }) => {
                 let delta = CGPoint::new(doc.x - start.x, doc.y - start.y);
                 let mut value = *start_origin;
@@ -553,6 +598,9 @@ impl AppState {
                 CanvasDrag::Pan { .. } => {}
                 // The box lays its text after the match (`finishTextGesture`).
                 CanvasDrag::TextBox { .. } => {}
+                // The resize ends with the draft as it stands; the input
+                // keeps the focus (`mouseUp` returns it to the text view).
+                CanvasDrag::TextResize { .. } => {}
             }
             self.gradient_cursor = None;
             self.touch(cx);
@@ -607,7 +655,7 @@ impl AppState {
         );
     }
 
-    fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
+    pub(crate) fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
         (
             f32::from(position.x) - f32::from(self.viewport.origin.x),
             f32::from(position.y) - f32::from(self.viewport.origin.y),
@@ -751,33 +799,35 @@ impl AppState {
         }
         // The active layer as the canvas displays it: drawn through its
         // displayed transform at document size (CloneStamp.swift:39-48).
+        // Swift's `cloneSample` does not multiply the sample by the layer's
+        // mask coverage — a stamped stroke clones the layer's own pixels even
+        // where the mask hides them — so neither do we (this used to darken
+        // the sample under an enabled mask).
         let layer = self.current_tab().session.active_layer()?;
         let image = layer.asset.as_ref()?.image.as_ref().clone();
         let transform = self.current_tab().session.displayed_transform(layer);
-        let mut canvas = Bitmap::new(document.width, document.height);
-        compositor_core::render::draw_layer_pixels(&image, &transform, &mut canvas);
-        // An enabled mask shows through: the sampled content is multiplied by
-        // the mask coverage (the canvas displays the masked result).
-        if let Some(mask) = layer.mask.as_ref().filter(|m| m.is_enabled) {
-            if let Some(coverage) = compositor_core::render::mask_clip_image(
-                mask,
-                &layer.mask_transform(),
-                document.width,
-                document.height,
-            ) {
-                for y in 0..canvas.height {
-                    for x in 0..canvas.width {
-                        let o = (y * canvas.width + x) * 4;
-                        let m = coverage.pixel(x, y)[0] as f32 / 255.0;
-                        for c in 0..4 {
-                            canvas.data[o + c] = (canvas.data[o + c] as f32 * m) as u8;
-                        }
-                    }
-                }
-            }
-        }
-        Some(canvas)
+        Some(clone_layer_sample(
+            &image,
+            &transform,
+            document.width,
+            document.height,
+        ))
     }
+}
+
+/// The Clone Stamp's layer sample (`cloneSample`'s active-layer half,
+/// CloneStamp.swift:39-48): the layer's own pixels drawn through the given
+/// transform at document size. The layer's mask does not darken the sample —
+/// Swift copies the layer's pixels, masked or not.
+pub(crate) fn clone_layer_sample(
+    image: &Bitmap,
+    transform: &compositor_core::transform::LayerTransform,
+    width: usize,
+    height: usize,
+) -> Bitmap {
+    let mut canvas = Bitmap::new(width, height);
+    compositor_core::render::draw_layer_pixels(image, transform, &mut canvas);
+    canvas
 }
 
 /// The blur strength for a brush diameter: `min(30, max(1.5, diameter / 10))`
@@ -1560,6 +1610,21 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         paint_rect_outline(window, rect, rgba(0x4da6ffdd));
     }
 
+    // The inline text editor's frame and its eight resize handles
+    // (`InlineTextEditor.draw`): an accent outline plus white squares with
+    // accent borders at the corners and the edge midpoints.
+    if let Some(corners) = &scene.inline_text_frame {
+        paint_polygon(window, corners, rgba(0x4da6ffdd), false);
+        for index in 0..4 {
+            let a = corners[index];
+            let b = corners[(index + 1) % 4];
+            paint_handle(window, point(px((a.0 + b.0) / 2.0), px((a.1 + b.1) / 2.0)));
+        }
+        for corner in corners {
+            paint_handle(window, point(px(corner.0), px(corner.1)));
+        }
+    }
+
     // Rulers on top.
     if scene.rulers {
         paint_rulers(window, bounds, &scene);
@@ -1611,6 +1676,16 @@ impl CanvasScene {
         out.text_box = self
             .text_box
             .map(|((x0, y0), (x1, y1))| ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)));
+        out.inline_text_frame = self
+            .inline_text_frame
+            .map(|corners| -> [(f32, f32); 4] {
+                let mut shifted = corners;
+                for (x, y) in &mut shifted {
+                    *x += ox;
+                    *y += oy;
+                }
+                shifted
+            });
         out
     }
 }
@@ -1824,14 +1899,15 @@ fn ruler_label(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, guide_axis_position,
-        guide_release_deletes, handle_at, nice_tick, ruler_axis_at, ruler_label, shape_drag_rect,
-        transform_press_layer,
+        blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, clone_layer_sample,
+        guide_axis_position, guide_release_deletes, handle_at, nice_tick, ruler_axis_at,
+        ruler_label, shape_drag_rect, transform_press_layer,
     };
     use crate::state::RULER_SIZE;
     use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, LayerMask, ShapeKind};
-    use compositor_core::geometry::{CGPoint, CGRect};
+    use compositor_core::geometry::{CGPoint, CGRect, CGSize};
     use compositor_core::raster::{Bitmap, ImportedImage};
+    use compositor_core::transform::LayerTransform;
 
     fn opaque_layer(width: usize, height: usize, rgba: [u8; 4], origin: CGPoint) -> ImageLayer {
         let mut image = Bitmap::new(width, height);
@@ -1914,6 +1990,24 @@ mod tests {
         // The center dimmed: the blur pulled the surrounding emptiness in.
         assert!(small.pixel(20, 20)[0] < 255);
         assert!(large.pixel(20, 20)[0] < small.pixel(20, 20)[0]);
+    }
+
+    #[test]
+    fn clone_layer_sample_does_not_darken_under_a_mask() {
+        // cloneSample's active-layer half: the layer's pixels as displayed,
+        // NOT multiplied by the mask coverage (CloneStamp.swift:39-48 — a
+        // masked-over area still clones at full strength).
+        let mut image = Bitmap::new(20, 20);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let transform = LayerTransform::new(CGPoint::new(10.0, 10.0), CGSize::new(20.0, 20.0));
+        let sample = clone_layer_sample(&image, &transform, 40, 40);
+        // Inside the layer: full-strength pixels; an earlier version of this
+        // port multiplied the sample by an enabled mask and dimmed them.
+        assert_eq!(sample.pixel(15, 15), [255, 0, 0, 255]);
+        // Outside the layer the sample is empty.
+        assert_eq!(sample.pixel(5, 5), [0, 0, 0, 0]);
     }
 
     #[test]

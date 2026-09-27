@@ -85,6 +85,17 @@ pub enum CanvasDrag {
     /// The Type tool dragging a paragraph box out (`textBoxRect`); the rect
     /// lives app-side in `text_box_rect`.
     TextBox { start: CGPoint },
+    /// An inline text editor resize-handle drag (`InlineTextEditor.mouseDown`
+    /// /`mouseDragged`'s resize branch): which handle, where the drag began,
+    /// the transform the box showed when it began and the box size the
+    /// resize divides by; the draft itself lives in the session.
+    TextResize {
+        handle: usize,
+        start: CGPoint,
+        old: LayerTransform,
+        source: CGSize,
+        draft: compositor_core::session::TextDraft,
+    },
 }
 
 /// Which modal sheet is open. The floating panels that replaced the tool
