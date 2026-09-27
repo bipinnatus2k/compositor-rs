@@ -25,6 +25,7 @@ use compositor_core::raster::Bitmap;
 use compositor_core::session::SelectionAmountOperation;
 use compositor_core::tools::brush::RasterEdit;
 
+use crate::project::UnsavedChoice;
 use crate::sheets::SliderRole;
 use crate::state::{AppState, SheetKind};
 use crate::ui::{dropdown, labeled_checkbox, text_label, MenuEntry};
@@ -68,6 +69,9 @@ fn sheet_title(kind: SheetKind) -> &'static str {
         SheetKind::Trim => "Trim",
         SheetKind::About => "About Compositor",
         SheetKind::Shortcuts => "Keyboard Shortcuts",
+        // Confirm/Alert titles come from the presenting flow at render time.
+        SheetKind::Confirm => "Compositor",
+        SheetKind::Alert => "Compositor",
     }
 }
 
@@ -136,7 +140,61 @@ impl AppState {
                 .as_ref()
                 .map(|sheet| sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset)))
                 .unwrap_or(false);
-        let footer = if kind == SheetKind::Shortcuts {
+        let footer = if kind == SheetKind::Confirm {
+            // `confirmReplacement` (:257-259): Save / Cancel / Don't Save.
+            gpui_kit::div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .child(
+                    Button::new("confirm-save")
+                        .label("Save")
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.resolve_confirm_choice(UnsavedChoice::Save, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("confirm-cancel")
+                        .label("Cancel")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.resolve_confirm_cancel(cx);
+                        })),
+                )
+                .child(
+                    Button::new("confirm-dont-save")
+                        .label("Don't Save")
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.resolve_confirm_choice(UnsavedChoice::DontSave, window, cx);
+                        })),
+                )
+        } else if kind == SheetKind::Alert {
+            gpui_kit::div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .child(
+                    Button::new("alert-ok")
+                        .label("OK")
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.dismiss_error_alert(cx);
+                        })),
+                )
+        } else if kind == SheetKind::Shortcuts {
             let done_disabled = Self::shortcuts_recording_id().is_some()
                 || self.shortcuts().validate().is_err();
             gpui_kit::div()
@@ -557,7 +615,7 @@ impl AppState {
                     .unwrap_or(LayerEffectKind::Stroke);
                 let inside = sheet.checkbox_a;
                 let sliders = sheet.sliders.clone();
-                let color = self.session.editing_effects().color(kind);
+                let color = self.tab().session.editing_effects().color(kind);
                 body = body.child(text_label(kind.label(), false).text_size(px(13.0)).mb_1());
                 match kind {
                     // Position is the segmented Outside/Inside picker in
@@ -1011,6 +1069,15 @@ impl AppState {
             SheetKind::Shortcuts => {
                 body = body.child(self.shortcuts_sheet_body(cx));
             }
+            SheetKind::Confirm | SheetKind::Alert => {
+                let message = self.sheet.as_ref().map(|s| s.message.clone()).unwrap_or_default();
+                for line in message.lines() {
+                    body = body.child(text_label(line.to_string(), false));
+                }
+                if kind == SheetKind::Confirm {
+                    body = body.child(text_label(crate::project::UNSAVED_CHANGES_INFO, true));
+                }
+            }
         }
         body.into_any_element()
     }
@@ -1020,7 +1087,7 @@ impl AppState {
         // the edited effect returns to its opening state (Swift's
         // finishEffectsEditing(commit: false)).
         if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Effects) {
-            self.session.finish_effects_editing(false);
+            self.tab().session.finish_effects_editing(false);
         }
         // The Shortcuts sheet's Cancel drops the draft: the overrides return
         // to their state when the sheet opened (Swift's `draft` is simply
@@ -1028,9 +1095,35 @@ impl AppState {
         if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Shortcuts) {
             Self::shortcuts_cancel_draft();
         }
+        // The Confirm sheet's Cancel aborts the close/quit flow; the
+        // Alert's Cancel is just OK; the controller-driven panels release
+        // their pending (with no answer).
+        match self.sheet.as_ref().map(|sheet| sheet.kind) {
+            Some(SheetKind::Confirm) => {
+                self.resolve_confirm_cancel(cx);
+                return;
+            }
+            Some(SheetKind::Alert) => {
+                self.dismiss_error_alert(cx);
+                return;
+            }
+            Some(
+                SheetKind::Open
+                | SheetKind::SaveComp
+                | SheetKind::ExportPng
+                | SheetKind::ExportJpeg
+                | SheetKind::ImageSize
+                | SheetKind::CanvasSize
+                | SheetKind::Trim,
+            ) => {
+                self.cancel_pending_sheet(cx);
+                return;
+            }
+            _ => {}
+        }
         // An adjustment editing session restores the opening settings.
-        if self.session.adjustment_editing_id.is_some() {
-            self.session.finish_adjustment_editing(false);
+        if self.tab().session.adjustment_editing_id.is_some() {
+            self.tab().session.finish_adjustment_editing(false);
         }
         self.close_sheet(cx);
     }
@@ -1151,11 +1244,14 @@ impl AppState {
 
     // MARK: OK
 
-    pub fn confirm_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A finish step may open an Alert (a controller error) in place of
+        // this sheet; only close when the sheet is still the one confirmed.
+        let kind_before = self.sheet.as_ref().map(|sheet| sheet.kind);
         // Editing an adjustment layer: the settings previewed live, OK keeps
         // them as one undo step and skips the layer-pixel commit paths.
-        if self.session.adjustment_editing_id.is_some() {
-            self.session.finish_adjustment_editing(true);
+        if self.tab().session.adjustment_editing_id.is_some() {
+            self.tab().session.finish_adjustment_editing(true);
             self.close_sheet(cx);
             return;
         }
@@ -1174,7 +1270,7 @@ impl AppState {
                         sheet.background,
                     )
                 };
-                self.session.create_document(width.max(1), height.max(1), true);
+                self.tab().session.create_document(width.max(1), height.max(1), true);
                 match background {
                     0 => self.fill_active([255, 255, 255, 255], "Fill White", cx),
                     1 => self.fill_active([0, 0, 0, 255], "Fill Black", cx),
@@ -1198,13 +1294,17 @@ impl AppState {
                     width = ((w * width as f64) / 100.0).round() as usize;
                     height = ((h * height as f64) / 100.0).round() as usize;
                 }
-                self.session.resize_image_to(
-                    width,
-                    height,
-                    Some(resolution),
-                    compositor_core::transform::LayerSampling::High,
-                );
-                self.fit_for = (0, 0);
+                self.with_current_tab(|controller, session, busy| {
+                    controller.finish_image_size(
+                        session,
+                        busy,
+                        Some(width),
+                        Some(height),
+                        Some(resolution),
+                        compositor_core::transform::LayerSampling::High,
+                    );
+                });
+                self.request_refit();
             }
             SheetKind::CanvasSize => {
                 let (mut width, mut height, relative, anchor) = {
@@ -1224,15 +1324,17 @@ impl AppState {
                 }
                 let mut options = CanvasSizeOptions::new(width.max(1), height.max(1));
                 options.anchor = anchor.min(8);
-                self.session.resize_canvas_to(&options);
-                self.fit_for = (0, 0);
+                self.with_current_tab(|controller, session, busy| {
+                    controller.finish_canvas_size(session, busy, Some(&options));
+                });
+                self.request_refit();
             }
             SheetKind::Levels => self.commit_preview("Levels", cx),
             SheetKind::HueSaturation => self.commit_preview("Hue/Saturation", cx),
             SheetKind::Effects => {
                 // Every change was already a committed undo step; OK just
                 // ends the editing session and keeps the effects.
-                self.session.finish_effects_editing(true);
+                self.tab().session.finish_effects_editing(true);
             }
             SheetKind::Filter(filter) => self.commit_preview(filter.label(), cx),
             SheetKind::Amount(_) => {
@@ -1241,11 +1343,11 @@ impl AppState {
                     let sheet = self.sheet.as_ref().unwrap();
                     parse_input_usize(&sheet.tolerance, cx_app).unwrap_or(0)
                 } as i64;
-                self.session.confirm_selection_amount(amount);
+                self.tab().session.confirm_selection_amount(amount);
             }
             SheetKind::ExportPng => {
-                let path = self.sheet_path(cx);
-                self.export_png(path, cx);
+                let url = path_or_none(&self.sheet_path(cx));
+                self.finish_pending_export_png(url, window, cx);
             }
             SheetKind::ExportJpeg => {
                 let (path, quality, matte) = {
@@ -1271,7 +1373,42 @@ impl AppState {
                         _ => None,
                     }
                 };
-                self.export_jpeg(path, quality, matte, data, cx);
+                let data = match data {
+                    Some(data) => data,
+                    None => {
+                        let Some(document) = self.current_tab().session.document.clone() else {
+                            self.set_status("Nothing to export", cx);
+                            return;
+                        };
+                        let composite = compositor_core::render::draw_live_composite(&document);
+                        if let Err(error) = compositor_core::export::check_export_size(
+                            composite.width,
+                            composite.height,
+                        ) {
+                            self.set_status(format!("Export failed: {}", error), cx);
+                            return;
+                        }
+                        let options = compositor_core::export::JpegOptions {
+                            quality,
+                            red: if matte == 1 { 0.0 } else { 1.0 },
+                            green: if matte == 1 { 0.0 } else { 1.0 },
+                            blue: if matte == 1 { 0.0 } else { 1.0 },
+                        };
+                        match compositor_core::export::jpeg_data_with_dpi(
+                            &composite,
+                            &options,
+                            document.resolution,
+                        ) {
+                            Some(encoded) => encoded,
+                            None => {
+                                self.set_status("Export failed: the image could not be encoded.", cx);
+                                return;
+                            }
+                        }
+                    }
+                };
+                let url = path_or_none(&path);
+                self.finish_pending_export_jpeg(url, &data, window, cx);
             }
             SheetKind::Import => {
                 let path = self.sheet_path(cx);
@@ -1281,7 +1418,7 @@ impl AppState {
                     .filter(|part| !part.is_empty())
                     .map(std::path::PathBuf::from)
                     .collect();
-                let failures = self.session.import_images(&paths, None);
+                let failures = self.tab().session.import_images(&paths, None);
                 if failures.is_empty() {
                     if !paths.is_empty() {
                         self.set_status(format!("Imported {}", path), cx);
@@ -1292,12 +1429,31 @@ impl AppState {
                 self.fit_for = (0, 0);
             }
             SheetKind::SaveComp => {
-                let path = self.sheet_path(cx);
-                self.save_comp(path, cx);
+                let url = path_or_none(&self.sheet_path(cx));
+                self.finish_pending_save(url, window, cx);
             }
             SheetKind::Open => {
                 let path = self.sheet_path(cx);
-                self.open_document(&path, cx);
+                let paths: Vec<std::path::PathBuf> = path
+                    .split(';')
+                    .map(|part| part.trim())
+                    .filter(|part| !part.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                // `.comp` paths go through the workspace's open flow
+                // (two-phase finish); anything else keeps the legacy image /
+                // Photoshop import into the current tab.
+                let (projects, others): (Vec<_>, Vec<_>) = paths
+                    .into_iter()
+                    .partition(|p| crate::project::is_project_file(p));
+                let opened = self.workspace.finish_open(projects);
+                if opened {
+                    self.request_refit();
+                }
+                for other in others {
+                    self.open_document(&other.to_string_lossy(), cx);
+                }
+                self.touch(cx);
             }
             SheetKind::Trim => {
                 let (based_on, sides, tolerance) = {
@@ -1321,14 +1477,16 @@ impl AppState {
                     right: sides[3],
                     tolerance,
                 };
-                if !self.session.trim(&options) {
-                    self.set_status("Nothing to trim", cx);
-                }
-                self.fit_for = (0, 0);
+                self.with_current_tab(|controller, session, busy| {
+                    controller.finish_trim(session, busy, Some(&options));
+                });
+                self.request_refit();
             }
-            SheetKind::About | SheetKind::Shortcuts => {}
+            SheetKind::About | SheetKind::Shortcuts | SheetKind::Confirm | SheetKind::Alert => {}
         }
-        self.close_sheet(cx);
+        if self.sheet.as_ref().map(|sheet| sheet.kind) == kind_before {
+            self.close_sheet(cx);
+        }
     }
 
     fn sheet_path(&self, cx: &Context<Self>) -> String {
@@ -1340,8 +1498,8 @@ impl AppState {
 
     /// Fills the active layer with one color, honoring the selection.
     pub fn fill_active(&mut self, color: [u8; 4], name: &str, cx: &mut Context<Self>) {
-        let Some(document) = self.session.document.clone() else { return };
-        let Some(id) = self.session.active_layer_id else { return };
+        let Some(document) = self.tab().session.document.clone() else { return };
+        let Some(id) = self.tab().session.active_layer_id else { return };
         let Some(layer) = document.layer(id) else { return };
         if layer.is_group {
             return;
@@ -1361,94 +1519,6 @@ impl AppState {
 
     // MARK: File operations
 
-    pub fn export_png(&mut self, path: String, cx: &mut Context<Self>) {
-        let Some(document) = self.session.document.clone() else {
-            self.set_status("Nothing to export", cx);
-            return;
-        };
-        let composite = compositor_core::render::draw_live_composite(&document);
-        // The export carries the document's resolution as a pHYs chunk.
-        let Some(data) =
-            compositor_core::export::png_data_with_dpi(&composite, document.resolution)
-        else {
-            self.set_status("Export failed: the image could not be encoded.", cx);
-            return;
-        };
-        match std::fs::write(&path, data) {
-            Ok(()) => self.set_status(format!("Exported {}", path), cx),
-            Err(error) => self.set_status(format!("Export failed: {}", error), cx),
-        }
-    }
-
-    /// `ImageExporter.jpeg` + `write`: the composite flattens onto the matte
-    /// and encodes at `quality` (0…1). `matte`: 0 = white, 1 = black.
-    pub fn export_jpeg(
-        &mut self,
-        path: String,
-        quality: f64,
-        matte: usize,
-        data: Option<Vec<u8>>,
-        cx: &mut Context<Self>,
-    ) {
-        // The ready preview's own bytes are the export (`finish(result?.data)`);
-        // a stale preview encodes fresh.
-        let data = if let Some(data) = data {
-            data
-        } else {
-            let Some(document) = self.session.document.clone() else {
-                self.set_status("Nothing to export", cx);
-                return;
-            };
-            let composite = compositor_core::render::draw_live_composite(&document);
-            if let Err(error) =
-                compositor_core::export::check_export_size(composite.width, composite.height)
-            {
-                self.set_status(format!("Export failed: {}", error), cx);
-                return;
-            }
-            let options = compositor_core::export::JpegOptions {
-                quality,
-                red: if matte == 1 { 0.0 } else { 1.0 },
-                green: if matte == 1 { 0.0 } else { 1.0 },
-                blue: if matte == 1 { 0.0 } else { 1.0 },
-            };
-            // The export carries the document's resolution (Swift's DPI
-            // properties on both encoders).
-            let Some(encoded) = compositor_core::export::jpeg_data_with_dpi(
-                &composite,
-                &options,
-                document.resolution,
-            ) else {
-                self.set_status("Export failed: the image could not be encoded.", cx);
-                return;
-            };
-            encoded
-        };
-        match std::fs::write(&path, data) {
-            Ok(()) => self.set_status(format!("Exported {}", path), cx),
-            Err(error) => self.set_status(format!("Export failed: {}", error), cx),
-        }
-    }
-
-    pub fn save_comp(&mut self, path: String, cx: &mut Context<Self>) {
-        let Some(document) = self.session.document.clone() else {
-            self.set_status("Nothing to save", cx);
-            return;
-        };
-        let dir = std::path::PathBuf::from(path);
-        let data = compositor_core::project::project_from_document(&document);
-        match std::fs::create_dir_all(&dir) {
-            Ok(()) => match compositor_core::project::save(&dir, &data) {
-                Ok(()) => {
-                    self.set_status(format!("Saved {}", dir.display()), cx);
-                    self.session.mark_saved();
-                }
-                Err(error) => self.set_status(format!("Save failed: {}", error), cx),
-            },
-            Err(error) => self.set_status(format!("Save failed: {}", error), cx),
-        }
-    }
-
     /// Opens an image (PNG/JPEG) as a new layer, or a .comp package folder.
     pub fn open_document(&mut self, path: &str, cx: &mut Context<Self>) {
         let dir = std::path::PathBuf::from(path);
@@ -1456,17 +1526,17 @@ impl AppState {
             match compositor_core::project::load(&dir) {
                 Ok(data) => match compositor_core::project::document_from_project(&data) {
                     Ok((document, active)) => {
-                        self.session.active_layer_id = active.or_else(|| {
+                        self.tab().session.active_layer_id = active.or_else(|| {
                             document.layers.last().map(|layer| layer.id)
                         });
-                        self.session.selected_layer_ids = self
-                            .session
+                        self.tab().session.selected_layer_ids = self
+                            .tab().session
                             .active_layer_id
                             .map(|id| vec![id])
                             .unwrap_or_default();
-                        self.session.document = Some(document);
-                        self.session.history.reset();
-                        self.session.mark_saved();
+                        self.tab().session.document = Some(document);
+                        self.tab().session.history.reset();
+                        self.tab().session.mark_saved();
                         self.fit_for = (0, 0);
                         self.set_status(format!("Opened {}", dir.display()), cx);
                     }
@@ -1491,7 +1561,7 @@ impl AppState {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Photoshop".to_string());
-            match self.session.import_photoshop_data(&name, &data) {
+            match self.tab().session.import_photoshop_data(&name, &data) {
                 Ok(notes) => {
                     self.fit_for = (0, 0);
                     self.set_status(
@@ -1528,27 +1598,21 @@ impl AppState {
                     .file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Image".to_string());
-                if self.session.document.is_none() {
-                    self.session.create_document(width, height, true);
+                if self.tab().session.document.is_none() {
+                    self.tab().session.create_document(width, height, true);
                 }
                 let layer = compositor_core::document::ImageLayer::with_asset(
                     compositor_core::raster::ImportedImage::new(bitmap, name),
                     CGPoint::ZERO,
                 );
-                self.session.history.begin(
-                    "Open",
-                    &self.session.document,
-                    self.session.active_layer_id,
-                );
                 let id = layer.id;
-                if let Some(document) = self.session.document.as_mut() {
-                    let slot = document.layers.len();
-                    document.layers.insert(slot, layer);
-                }
-                self.session.select_layer(Some(id));
-                self.session
-                    .history
-                    .end(&self.session.document, self.session.active_layer_id);
+                self.history_edit("Open", move |session| {
+                    if let Some(document) = session.document.as_mut() {
+                        let slot = document.layers.len();
+                        document.layers.insert(slot, layer);
+                    }
+                    session.select_layer(Some(id));
+                });
                 self.fit_for = (0, 0);
                 self.set_status(format!("Opened {}", path), cx);
             }
@@ -2120,7 +2184,7 @@ fn set_channel(state: &mut AppState, channel: usize, cx: &mut Context<AppState>)
 /// change goes through the session like every slider, so the canvas and the
 /// undo trail follow.
 fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppState>) {
-    state.session.change_effects(|effects| {
+    state.tab().session.change_effects(|effects| {
         if let Some(stroke) = effects.stroke.as_mut() {
             stroke.inside = inside;
         }
@@ -2486,5 +2550,15 @@ mod tests {
         assert_eq!(display_chord("v"), "V");
         // Unparsable stored chords print raw instead of failing the sheet.
         assert_eq!(display_chord("???"), "???");
+    }
+}
+
+/// A sheet path field's value as an optional save target (empty = Cancel).
+fn path_or_none(path: &str) -> Option<std::path::PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(trimmed))
     }
 }

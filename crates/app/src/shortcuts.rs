@@ -97,6 +97,7 @@ pub const CATALOG: &[ShortcutSpec] = &[
     ShortcutSpec { id: "file.export-png", title: "Export PNG", group: Group::Menus, context: None, defaults: &["ctrl-shift-e"] },
     ShortcutSpec { id: "file.export-jpeg", title: "Export JPEG", group: Group::Menus, context: None, defaults: &["ctrl-alt-shift-s"] },
     ShortcutSpec { id: "file.close", title: "Close Project", group: Group::Menus, context: None, defaults: &["ctrl-w"] },
+    ShortcutSpec { id: "file.quit", title: "Quit Compositor", group: Group::Menus, context: None, defaults: &["ctrl-q"] },
     // Edit
     ShortcutSpec { id: "edit.undo", title: "Undo", group: Group::Menus, context: None, defaults: &["ctrl-z"] },
     ShortcutSpec { id: "edit.redo", title: "Redo", group: Group::Menus, context: None, defaults: &["ctrl-shift-z"] },
@@ -693,7 +694,7 @@ mod tests {
     #[test]
     fn catalog_ids_are_unique_and_defaults_parse() {
         let mut ids = CATALOG.iter().map(|entry| entry.id).collect::<Vec<_>>();
-        assert_eq!(ids.len(), 92, "expected the full customizable catalog");
+        assert_eq!(ids.len(), 93, "expected the full customizable catalog");
         ids.sort_unstable();
         let unique = ids.len();
         ids.dedup();
@@ -823,6 +824,7 @@ mod tests {
             ("ctrl-shift-e", "compositor::ExportPng", ""),
             ("ctrl-alt-shift-s", "compositor::ExportJpeg", ""),
             ("ctrl-w", "compositor::CloseDocument", ""),
+            ("ctrl-q", "compositor::Quit", ""),
             // Edit
             ("ctrl-z", "compositor::Undo", ""),
             ("ctrl-shift-z", "compositor::Redo", ""),

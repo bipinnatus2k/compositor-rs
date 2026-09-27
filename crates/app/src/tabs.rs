@@ -734,6 +734,33 @@ impl ProjectWorkspace {
             _ => true,
         }
     }
+
+    // MARK: App-layer flow hooks (Wave 3 wiring)
+    //
+    // Small read-only accessors the app's two-phase dialog plumbing needs:
+    // the pending dialog's owner tab and whether the running quit flow is a
+    // window close (so the app knows to close the window once it resolves).
+
+    /// The tab whose close flow is awaiting an answer.
+    pub fn close_pending_tab(&self) -> Option<TabId> {
+        self.pending_close
+    }
+
+    /// The tab the quit flow is currently asking (already the one on screen).
+    pub fn quit_asked_tab(&self) -> Option<TabId> {
+        self.quit_run
+            .as_ref()
+            .map(|run| run.order[run.index.min(run.order.len() - 1)])
+    }
+
+    /// Whether the running quit flow came from `close_window` (the app then
+    /// closes the window once it resolves to `Done(true)`).
+    pub fn quit_closes_window(&self) -> bool {
+        self.quit_run
+            .as_ref()
+            .map(|run| run.close_window)
+            .unwrap_or(false)
+    }
 }
 
 // MARK: Tests

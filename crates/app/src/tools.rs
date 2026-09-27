@@ -116,26 +116,26 @@ mod tests {
 impl AppState {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
         if tool == NavigationTool::Brush {
-            self.session.brush_mode = BrushToolMode::Paint;
+            self.tab().session.brush_mode = BrushToolMode::Paint;
         }
-        self.session.tool = tool;
-        self.session.cancel_lasso();
+        self.tab().session.tool = tool;
+        self.tab().session.cancel_lasso();
         self.touch(cx);
     }
 
     pub fn set_tool_eraser(&mut self, cx: &mut Context<Self>) {
-        self.session.tool = NavigationTool::Brush;
-        self.session.brush_mode = BrushToolMode::Erase;
-        self.session.cancel_lasso();
+        self.tab().session.tool = NavigationTool::Brush;
+        self.tab().session.brush_mode = BrushToolMode::Erase;
+        self.tab().session.cancel_lasso();
         self.touch(cx);
     }
 
     // MARK: Tool rail
 
     pub fn render_tool_rail(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let active = self.session.tool;
-        let eraser_active = self.session.tool == NavigationTool::Brush
-            && self.session.brush_mode == BrushToolMode::Erase;
+        let active = self.tab().session.tool;
+        let eraser_active = self.tab().session.tool == NavigationTool::Brush
+            && self.tab().session.brush_mode == BrushToolMode::Erase;
 
         let mut rail = gpui_kit::div()
             .flex()
@@ -157,8 +157,8 @@ impl AppState {
 
         // Foreground / background swatches: clicking either opens the color
         // picker on it (ColorPalette.swift:60; the X key still swaps).
-        let foreground = self.session.palette_color(false);
-        let background = self.session.palette_color(true);
+        let foreground = self.tab().session.palette_color(false);
+        let background = self.tab().session.palette_color(true);
         rail = rail.child(
             gpui_kit::div()
                 .mt_2()
@@ -189,9 +189,9 @@ impl AppState {
 
     pub fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let app = cx.entity().downgrade();
-        let brush = self.session.brush_settings;
-        let tool = self.session.tool;
-        let erasing = self.session.brush_mode == BrushToolMode::Erase;
+        let brush = self.tab().session.brush_settings;
+        let tool = self.tab().session.tool;
+        let erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
 
         let mut header = gpui_kit::div()
             .flex()
@@ -250,12 +250,12 @@ impl AppState {
                         px(80.0),
                         vec![
                             crate::ui::MenuEntry::new("Paint", |state, _, cx| {
-                                state.session.brush_mode = BrushToolMode::Paint;
+                                state.tab().session.brush_mode = BrushToolMode::Paint;
                                 state.touch(cx);
                             })
                             .checked(!erasing),
                             crate::ui::MenuEntry::new("Erase", |state, _, cx| {
-                                state.session.brush_mode = BrushToolMode::Erase;
+                                state.tab().session.brush_mode = BrushToolMode::Erase;
                                 state.touch(cx);
                             })
                             .checked(erasing),
@@ -263,7 +263,7 @@ impl AppState {
                     ));
                 }
                 if tool == NavigationTool::SpotHealing {
-                    let mode = self.session.spot_healing_mode;
+                    let mode = self.tab().session.spot_healing_mode;
                     let label = |mode: SpotHealingMode| match mode {
                         SpotHealingMode::ContentAware => "Content Aware",
                         SpotHealingMode::CreateTexture => "Create Texture",
@@ -283,7 +283,7 @@ impl AppState {
                         .map(|(value, name)| {
                             let value = *value;
                             crate::ui::MenuEntry::new(*name, move |state, _, cx| {
-                                state.session.spot_healing_mode = value;
+                                state.tab().session.spot_healing_mode = value;
                                 state.touch(cx);
                             })
                             .checked(mode == value)
@@ -292,7 +292,7 @@ impl AppState {
                     ));
                 }
                 if tool == NavigationTool::Blur {
-                    let mode = self.session.blur_mode;
+                    let mode = self.tab().session.blur_mode;
                     let label = |mode: BlurToolMode| match mode {
                         BlurToolMode::Liquify => "Liquify",
                         BlurToolMode::Blur => "Blur",
@@ -312,7 +312,7 @@ impl AppState {
                         .map(|(value, name)| {
                             let value = *value;
                             crate::ui::MenuEntry::new(*name, move |state, _, cx| {
-                                state.session.blur_mode = value;
+                                state.tab().session.blur_mode = value;
                                 state.touch(cx);
                             })
                             .checked(mode == value)
@@ -321,8 +321,8 @@ impl AppState {
                     ));
                 }
                 if tool == NavigationTool::CloneStamp {
-                    let aligned = self.session.clone_settings.aligned;
-                    let all_layers = self.session.clone_settings.sample_all_layers;
+                    let aligned = self.tab().session.clone_settings.aligned;
+                    let all_layers = self.tab().session.clone_settings.sample_all_layers;
                     header = header
                         .child(checkbox(
                             &app,
@@ -330,7 +330,7 @@ impl AppState {
                             "Aligned",
                             aligned,
                             |state, checked, _, cx| {
-                                state.session.clone_settings.aligned = checked;
+                                state.tab().session.clone_settings.aligned = checked;
                                 state.touch(cx);
                             },
                         ))
@@ -340,7 +340,7 @@ impl AppState {
                             "Sample All Layers",
                             all_layers,
                             |state, checked, _, cx| {
-                                state.session.clone_settings.sample_all_layers = checked;
+                                state.tab().session.clone_settings.sample_all_layers = checked;
                                 state.touch(cx);
                             },
                         ))
@@ -348,7 +348,7 @@ impl AppState {
                 }
             }
             NavigationTool::Marquee => {
-                let kind = self.session.marquee_kind;
+                let kind = self.tab().session.marquee_kind;
                 header = header.child(dropdown(
                     &app,
                     "marquee-kind",
@@ -360,12 +360,12 @@ impl AppState {
                     px(100.0),
                     vec![
                         crate::ui::MenuEntry::new("Rectangle", |state, _, cx| {
-                            state.session.marquee_kind = LassoKind::Rectangle;
+                            state.tab().session.marquee_kind = LassoKind::Rectangle;
                             state.touch(cx);
                         })
                         .checked(kind == LassoKind::Rectangle),
                         crate::ui::MenuEntry::new("Ellipse", |state, _, cx| {
-                            state.session.marquee_kind = LassoKind::Ellipse;
+                            state.tab().session.marquee_kind = LassoKind::Ellipse;
                             state.touch(cx);
                         })
                         .checked(kind == LassoKind::Ellipse),
@@ -373,7 +373,7 @@ impl AppState {
                 ));
             }
             NavigationTool::Lasso => {
-                let kind = self.session.lasso_kind;
+                let kind = self.tab().session.lasso_kind;
                 header = header.child(dropdown(
                     &app,
                     "lasso-kind",
@@ -385,12 +385,12 @@ impl AppState {
                     px(100.0),
                     vec![
                         crate::ui::MenuEntry::new("Freehand", |state, _, cx| {
-                            state.session.lasso_kind = LassoKind::Freehand;
+                            state.tab().session.lasso_kind = LassoKind::Freehand;
                             state.touch(cx);
                         })
                         .checked(kind == LassoKind::Freehand),
                         crate::ui::MenuEntry::new("Polygonal", |state, _, cx| {
-                            state.session.lasso_kind = LassoKind::Polygonal;
+                            state.tab().session.lasso_kind = LassoKind::Polygonal;
                             state.touch(cx);
                         })
                         .checked(kind == LassoKind::Polygonal),
@@ -398,8 +398,8 @@ impl AppState {
                 ));
             }
             NavigationTool::Wand => {
-                let mode = self.session.wand_mode;
-                let settings = self.session.wand_settings;
+                let mode = self.tab().session.wand_mode;
+                let settings = self.tab().session.wand_settings;
                 header = header
                     .child(dropdown(
                         &app,
@@ -411,12 +411,12 @@ impl AppState {
                         px(84.0),
                         vec![
                             crate::ui::MenuEntry::new("Wand", |state, _, cx| {
-                                state.session.wand_mode = WandMode::Wand;
+                                state.tab().session.wand_mode = WandMode::Wand;
                                 state.touch(cx);
                             })
                             .checked(mode == WandMode::Wand),
                             crate::ui::MenuEntry::new("Object", |state, _, cx| {
-                                state.session.wand_mode = WandMode::Object;
+                                state.tab().session.wand_mode = WandMode::Object;
                                 state.touch(cx);
                             })
                             .checked(mode == WandMode::Object),
@@ -434,7 +434,7 @@ impl AppState {
                         "Contiguous",
                         settings.contiguous,
                         |state, checked, _, cx| {
-                            state.session.wand_settings.contiguous = checked;
+                            state.tab().session.wand_settings.contiguous = checked;
                             state.touch(cx);
                         },
                     ))
@@ -444,13 +444,13 @@ impl AppState {
                         "Sample All Layers",
                         settings.sample_all_layers,
                         |state, checked, _, cx| {
-                            state.session.wand_settings.sample_all_layers = checked;
+                            state.tab().session.wand_settings.sample_all_layers = checked;
                             state.touch(cx);
                         },
                     ));
             }
             NavigationTool::Gradient => {
-                let settings = self.session.gradient_settings;
+                let settings = self.tab().session.gradient_settings;
                 header = header
                     .child(dropdown(
                         &app,
@@ -462,12 +462,12 @@ impl AppState {
                         px(84.0),
                         vec![
                             crate::ui::MenuEntry::new("Linear", |state, _, cx| {
-                                state.session.gradient_settings.shape = GradientShape::Linear;
+                                state.tab().session.gradient_settings.shape = GradientShape::Linear;
                                 state.touch(cx);
                             })
                             .checked(settings.shape == GradientShape::Linear),
                             crate::ui::MenuEntry::new("Radial", |state, _, cx| {
-                                state.session.gradient_settings.shape = GradientShape::Radial;
+                                state.tab().session.gradient_settings.shape = GradientShape::Radial;
                                 state.touch(cx);
                             })
                             .checked(settings.shape == GradientShape::Radial),
@@ -479,7 +479,7 @@ impl AppState {
                         "Foreground to Background",
                         settings.foreground_to_background,
                         |state, checked, _, cx| {
-                            state.session.gradient_settings.foreground_to_background = checked;
+                            state.tab().session.gradient_settings.foreground_to_background = checked;
                             state.touch(cx);
                         },
                     ))
@@ -489,7 +489,7 @@ impl AppState {
                         "Reverse",
                         settings.reversed,
                         |state, checked, _, cx| {
-                            state.session.gradient_settings.reversed = checked;
+                            state.tab().session.gradient_settings.reversed = checked;
                             state.touch(cx);
                         },
                     ))
@@ -508,8 +508,8 @@ impl AppState {
                     .child(zoom_button(&app, "zoom-out", "-"));
             }
             NavigationTool::Crop => {
-                let choice = self.session.crop_ratio_choice.clone();
-                let has_crop = self.session.crop_rect.is_some();
+                let choice = self.tab().session.crop_ratio_choice.clone();
+                let has_crop = self.tab().session.crop_rect.is_some();
                 let entries = [
                     ("Free", "Free"),
                     ("Original", "Original"),
@@ -522,7 +522,7 @@ impl AppState {
                     let checked = choice == *value;
                     let value = value.to_string();
                     crate::ui::MenuEntry::new(*label, move |state, _, cx| {
-                        state.session.crop_ratio_choice = value.clone();
+                        state.tab().session.crop_ratio_choice = value.clone();
                         state.touch(cx);
                     })
                     .checked(checked)
@@ -537,7 +537,7 @@ impl AppState {
                             .primary()
                             .disabled(!has_crop)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.session.commit_crop();
+                                this.tab().session.commit_crop();
                                 this.touch(cx);
                             })),
                     )
@@ -547,7 +547,7 @@ impl AppState {
                             .small()
                             .disabled(!has_crop)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.session.cancel_crop();
+                                this.tab().session.cancel_crop();
                                 this.touch(cx);
                             })),
                     );
@@ -558,13 +558,13 @@ impl AppState {
         if tool == NavigationTool::Move {
             // TransformInspector.swift: toggles, the numeric fields, flip,
             // sampling, then Cancel/Apply.
-            let edit = self.session.transform_edit.as_ref();
+            let edit = self.tab().session.transform_edit.as_ref();
             let has_edit = edit.is_some();
             let corners = edit.map(|edit| edit.corners.is_some()).unwrap_or(false);
             let mask = edit.map(|edit| edit.mask).unwrap_or_else(|| {
-                self.session.is_mask_selected
+                self.tab().session.is_mask_selected
                     && self
-                        .session
+                        .tab().session
                         .active_layer()
                         .and_then(|layer| {
                             layer.mask.as_ref().map(|mask| !mask.is_linked)
@@ -573,7 +573,7 @@ impl AppState {
             });
             // The fields gray out while nothing can transform, or while a
             // corner distort owns the edit (the handles are the controls).
-            let fields_enabled = (self.session.can_transform() || has_edit) && !corners;
+            let fields_enabled = (self.tab().session.can_transform() || has_edit) && !corners;
             header = header
                 .child(
                     text_label(if mask { "Transform Mask" } else { "Transform" }, false)
@@ -597,9 +597,9 @@ impl AppState {
                     &app,
                     "transform-show-controls",
                     "Show Controls",
-                    self.session.shows_transform_controls,
+                    self.tab().session.shows_transform_controls,
                     |state, checked, _, cx| {
-                        state.session.shows_transform_controls = checked;
+                        state.tab().session.shows_transform_controls = checked;
                         state.touch(cx);
                     },
                 ))
@@ -611,9 +611,9 @@ impl AppState {
                     &app,
                     "transform-lock-ratio",
                     "Lock",
-                    self.session.locks_transform_ratio,
+                    self.tab().session.locks_transform_ratio,
                     |state, checked, _, cx| {
-                        state.session.locks_transform_ratio = checked;
+                        state.tab().session.locks_transform_ratio = checked;
                         state.touch(cx);
                     },
                 ))
@@ -656,7 +656,7 @@ impl AppState {
                         .small()
                         .disabled(!has_edit)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.session.cancel_transform();
+                            this.tab().session.cancel_transform();
                             this.sync_transform_inputs(window, cx);
                             this.touch(cx);
                         })),
@@ -668,7 +668,7 @@ impl AppState {
                         .primary()
                         .disabled(!has_edit)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.session.commit_transform();
+                            this.tab().session.commit_transform();
                             this.sync_transform_inputs(window, cx);
                             this.touch(cx);
                         })),
@@ -680,7 +680,7 @@ impl AppState {
         if tool == NavigationTool::Type {
             // TypeControls.swift: font, size, color, alignment, tracking,
             // leading, and the draft buttons.
-            let style = self.session.current_text_style();
+            let style = self.tab().session.current_text_style();
             let font = style.font_name.clone();
             let names = font_menu_names(&font, available_font_names(), FONT_MENU_CAP);
             let entries = names
@@ -689,7 +689,7 @@ impl AppState {
                     let chosen = name.clone();
                     MenuEntry::new(name.clone(), move |state, _, cx| {
                         let chosen = chosen.clone();
-                        state.session.change_text_style(move |style| {
+                        state.tab().session.change_text_style(move |style| {
                             style.font_name = chosen;
                         });
                         state.touch(cx);
@@ -698,13 +698,13 @@ impl AppState {
                 })
                 .collect();
             let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-            let color = self.session.type_color();
+            let color = self.tab().session.type_color();
             let color_rgb =
                 (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
-            let has_document = self.session.document.is_some();
-            let has_draft = self.session.text_draft.is_some();
+            let has_document = self.tab().session.document.is_some();
+            let has_draft = self.tab().session.text_draft.is_some();
             let active_is_text = self
-                .session
+                .tab().session
                 .active_layer()
                 .and_then(|layer| layer.live_text())
                 .is_some();
@@ -757,7 +757,7 @@ impl AppState {
                             .small()
                             .disabled(!has_document)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.session.cancel_text();
+                                this.tab().session.cancel_text();
                                 this.sync_text_style_inputs(window, cx);
                                 this.touch(cx);
                             })),
@@ -769,7 +769,7 @@ impl AppState {
                             .primary()
                             .disabled(!has_document)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.session.finish_text();
+                                this.tab().session.finish_text();
                                 this.sync_text_style_inputs(window, cx);
                                 this.touch(cx);
                             })),
@@ -781,7 +781,7 @@ impl AppState {
                         .small()
                         .disabled(!has_document || !active_is_text)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.session.edit_active_text();
+                            this.tab().session.edit_active_text();
                             this.sync_text_style_inputs(window, cx);
                             this.touch(cx);
                         })),
@@ -789,7 +789,7 @@ impl AppState {
             }
         }
         if tool == NavigationTool::Shape {
-            let kind = self.session.shape_kind;
+            let kind = self.tab().session.shape_kind;
             let label = |kind: compositor_core::document::ShapeKind| match kind {
                 compositor_core::document::ShapeKind::Rectangle => "Rectangle",
                 compositor_core::document::ShapeKind::RoundedRectangle => "Rounded Rectangle",
@@ -804,25 +804,25 @@ impl AppState {
                     px(150.0),
                     vec![
                         crate::ui::MenuEntry::new("Rectangle", |state, _, cx| {
-                            state.session.shape_kind =
+                            state.tab().session.shape_kind =
                                 compositor_core::document::ShapeKind::Rectangle;
                             state.touch(cx);
                         })
                         .checked(kind == compositor_core::document::ShapeKind::Rectangle),
                         crate::ui::MenuEntry::new("Rounded Rectangle", |state, _, cx| {
-                            state.session.shape_kind =
+                            state.tab().session.shape_kind =
                                 compositor_core::document::ShapeKind::RoundedRectangle;
                             state.touch(cx);
                         })
                         .checked(kind == compositor_core::document::ShapeKind::RoundedRectangle),
                         crate::ui::MenuEntry::new("Ellipse", |state, _, cx| {
-                            state.session.shape_kind =
+                            state.tab().session.shape_kind =
                                 compositor_core::document::ShapeKind::Ellipse;
                             state.touch(cx);
                         })
                         .checked(kind == compositor_core::document::ShapeKind::Ellipse),
                         crate::ui::MenuEntry::new("Line", |state, _, cx| {
-                            state.session.shape_kind = compositor_core::document::ShapeKind::Line;
+                            state.tab().session.shape_kind = compositor_core::document::ShapeKind::Line;
                             state.touch(cx);
                         })
                         .checked(kind == compositor_core::document::ShapeKind::Line),
@@ -961,7 +961,7 @@ fn alignment_buttons(
                     let app = app.clone();
                     move |_, _, cx| {
                         app.update(cx, |state, cx| {
-                            state.session.change_text_style(move |style| {
+                            state.tab().session.change_text_style(move |style| {
                                 style.alignment = alignment;
                             });
                             state.touch(cx);

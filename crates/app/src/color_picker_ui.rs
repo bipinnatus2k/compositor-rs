@@ -68,11 +68,11 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.color_picker.is_some() || !self.session.can_edit_palette() {
+        if self.tab().session.color_picker.is_some() || !self.tab().session.can_edit_palette() {
             return;
         }
-        self.session.open_color_picker(background);
-        let Some(picker) = self.session.color_picker.as_ref() else {
+        self.tab().session.open_color_picker(background);
+        let Some(picker) = self.tab().session.color_picker.as_ref() else {
             return;
         };
         let hsb = picker.hsb;
@@ -125,13 +125,13 @@ impl AppState {
             // A well-formed hex entry overrides the field (Swift's
             // commitHex on submit).
             if let Some(color) = PaletteColor::from_hex(&text) {
-                if let Some(picker) = self.session.color_picker.as_mut() {
+                if let Some(picker) = self.tab().session.color_picker.as_mut() {
                     picker.hsb = PickerHSB::from_rgb(color);
                 }
             }
-            self.session.close_color_picker(true);
+            self.tab().session.close_color_picker(true);
         } else {
-            self.session.close_color_picker(false);
+            self.tab().session.close_color_picker(false);
         }
         self.picker_ui = None;
         cx.default_global::<PickerFieldState>().drag = None;
@@ -217,19 +217,19 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         {
-            let Some(picker) = self.session.color_picker.as_mut() else {
+            let Some(picker) = self.tab().session.color_picker.as_mut() else {
                 return;
             };
             apply(&mut picker.hsb);
         }
         if matches!(
-            self.session.color_picker.as_ref().map(|picker| &picker.target),
+            self.tab().session.color_picker.as_ref().map(|picker| &picker.target),
             Some(ColorPickerTarget::Effect { .. })
         ) {
-            self.session.preview_effect_color();
+            self.tab().session.preview_effect_color();
         }
         let text = self
-            .session
+            .tab().session
             .color_picker
             .as_ref()
             .map(|picker| picker.color().hex())
@@ -249,7 +249,7 @@ pub fn render_color_picker(
     state: &mut AppState,
     cx: &mut Context<AppState>,
 ) -> Option<AnyElement> {
-    let picker = state.session.color_picker.as_ref()?;
+    let picker = state.tab().session.color_picker.as_ref()?;
     let title = picker.target.title();
     let color = picker.color();
     let hsb = picker.hsb;

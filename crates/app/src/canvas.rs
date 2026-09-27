@@ -14,7 +14,7 @@ use gpui_kit::Styled;
 
 use compositor_core::canvas::CropDragMode;
 use compositor_core::document::LayoutGrid;
-use compositor_core::document::{GuideAxis, ImageLayer, NavigationTool};
+use compositor_core::document::{GuideAxis, NavigationTool};
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::raster::Bitmap;
 use compositor_core::selection::LassoKind;
@@ -82,7 +82,16 @@ impl AppState {
                                     let (w, h) = state.doc_size();
                                     (w as usize, h as usize)
                                 };
-                                if dims != state.fit_for && dims.0 > 0 && vw > 10.0 && vh > 10.0 {
+                                // Swift rebuilds the view per tab
+                                // (`.id(tab.id)`), so a tab switch refits
+                                // just like a document size change.
+                                let tab_changed =
+                                    state.fit_tab != state.workspace.selected_id();
+                                if (dims != state.fit_for || tab_changed)
+                                    && dims.0 > 0
+                                    && vw > 10.0
+                                    && vh > 10.0
+                                {
                                     state.zoom_fit((vw, vh));
                                     cx.notify();
                                 }
@@ -110,17 +119,17 @@ impl AppState {
         let mut crop = None;
         let mut transform = None;
 
-        if let Some(document) = self.session.document.as_ref() {
+        if let Some(document) = self.current_tab().session.document.as_ref() {
             // `displayedGuides`: a drag in progress replaces its own guide's
             // position live; a new guide joins the list while it is pulled
             // from the ruler.
             let mut drag_drawn = false;
             for guide in &document.guides {
-                let (axis, position) = match &self.session.guide_drag {
+                let (axis, position) = match &self.current_tab().session.guide_drag {
                     Some(drag) if drag.id == guide.id => (drag.axis, drag.position),
                     _ => (guide.axis, guide.position),
                 };
-                drag_drawn |= self.session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
+                drag_drawn |= self.current_tab().session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
                 let vertical = axis == GuideAxis::Vertical;
                 let position = if vertical {
                     self.doc_to_screen(position, 0.0).0
@@ -129,7 +138,7 @@ impl AppState {
                 };
                 guides.push((vertical, position));
             }
-            if let Some(drag) = &self.session.guide_drag {
+            if let Some(drag) = &self.current_tab().session.guide_drag {
                 if drag.is_new || !drag_drawn {
                     let vertical = drag.axis == GuideAxis::Vertical;
                     let position = if vertical {
@@ -140,7 +149,7 @@ impl AppState {
                     guides.push((vertical, position));
                 }
             }
-            if self.session.shows_grid {
+            if self.current_tab().session.shows_grid {
                 for x in LayoutGrid::lines(document.width as f64) {
                     grid.push((self.doc_to_screen(x, 0.0).0, LayoutGrid::is_major(x), true));
                 }
@@ -149,7 +158,7 @@ impl AppState {
                 }
             }
             // The ants follow a pixel move or outline drag (`displayedSelection`).
-            if let Some(selection_state) = self.session.displayed_selection() {
+            if let Some(selection_state) = self.current_tab().session.displayed_selection() {
                 for ring in &selection_state.path.rings {
                     selection.push(
                         ring.iter()
@@ -166,7 +175,7 @@ impl AppState {
                     );
                 }
             }
-            if let Some(draft) = &self.session.lasso_draft {
+            if let Some(draft) = &self.current_tab().session.lasso_draft {
                 let mut rings = vec![draft
                     .points
                     .iter()
@@ -180,15 +189,15 @@ impl AppState {
                 }
                 lasso = Some(rings);
             }
-            if let Some(rect) = self.session.crop_rect {
+            if let Some(rect) = self.current_tab().session.crop_rect {
                 let min = self.doc_to_screen(rect.min_x(), rect.min_y());
                 let max = self.doc_to_screen(rect.max_x(), rect.max_y());
                 crop = Some((min, max));
             }
-            if let Some(edit) = &self.session.transform_edit {
+            if let Some(edit) = &self.current_tab().session.transform_edit {
                 // TransformOverlay.swift: handles hide with ⌘H unless an edit must stay visible.
                 if edit.draft.is_valid()
-                    && (self.session.shows_transform_controls || edit.persistent)
+                    && (self.current_tab().session.shows_transform_controls || edit.persistent)
                 {
                     transform = Some(
                         edit.draft
@@ -204,7 +213,7 @@ impl AppState {
         CanvasScene {
             image,
             image_rect,
-            rulers: self.session.shows_rulers,
+            rulers: self.current_tab().session.shows_rulers,
             zoom: self.zoom,
             pan: self.pan,
             doc: self.doc_size(),
@@ -237,11 +246,11 @@ impl AppState {
         }
         if event.click_count > 1 {
             // Double click closes a polygonal lasso instead of starting a drag.
-            if self.session.tool == NavigationTool::Lasso
-                && self.session.lasso_kind == LassoKind::Polygonal
-                && self.session.lasso_draft.is_some()
+            if self.tab().session.tool == NavigationTool::Lasso
+                && self.tab().session.lasso_kind == LassoKind::Polygonal
+                && self.tab().session.lasso_draft.is_some()
             {
-                self.session.finish_lasso();
+                self.tab().session.finish_lasso();
                 self.touch(cx);
             }
             return;
@@ -256,33 +265,33 @@ impl AppState {
         // corner square is inert. On the canvas itself, only a Move press that
         // lands on a guide takes it — before any layer drag
         // (EditorCanvas.mouseDown's `beginGuideDrag`).
-        if self.session.shows_rulers {
+        if self.tab().session.shows_rulers {
             if let Some(axis) = ruler_axis_at(local) {
-                self.session
+                self.tab().session
                     .begin_guide_creation(axis, guide_axis_position(axis, doc));
-                self.drag = Some(CanvasDrag::Guide);
+                self.set_drag(Some(CanvasDrag::Guide));
                 self.touch(cx);
                 return;
             }
         }
-        if self.session.tool == NavigationTool::Move {
+        if self.tab().session.tool == NavigationTool::Move {
             // `guideHitDistance` is 5 screen points; the core measures in
             // document pixels.
             let tolerance = GUIDE_HIT_DISTANCE / self.zoom.max(0.0001);
-            if let Some(guide_id) = self.session.hit_guide(doc, tolerance) {
-                self.session.begin_guide_move(guide_id);
-                self.drag = Some(CanvasDrag::Guide);
+            if let Some(guide_id) = self.tab().session.hit_guide(doc, tolerance) {
+                self.tab().session.begin_guide_move(guide_id);
+                self.set_drag(Some(CanvasDrag::Guide));
                 self.touch(cx);
                 return;
             }
         }
 
-        match self.session.tool {
+        match self.tab().session.tool {
             NavigationTool::Hand => {
-                self.drag = Some(CanvasDrag::Pan {
+                self.set_drag(Some(CanvasDrag::Pan {
                     start: event.position,
                     start_pan: self.pan,
-                });
+                }));
             }
             NavigationTool::Zoom => {
                 if alt {
@@ -294,10 +303,10 @@ impl AppState {
             NavigationTool::Marquee | NavigationTool::Lasso => {
                 // The polygonal lasso accumulates one point per click; Enter
                 // (or double click) closes the outline.
-                let polygonal = self.session.tool == NavigationTool::Lasso
-                    && self.session.lasso_kind == LassoKind::Polygonal;
-                if polygonal && self.session.lasso_draft.is_some() {
-                    self.session.extend_lasso(doc);
+                let polygonal = self.tab().session.tool == NavigationTool::Lasso
+                    && self.tab().session.lasso_kind == LassoKind::Polygonal;
+                if polygonal && self.tab().session.lasso_draft.is_some() {
+                    self.tab().session.extend_lasso(doc);
                     self.touch(cx);
                     return;
                 }
@@ -307,36 +316,36 @@ impl AppState {
                 // (EditorCanvas.lassoMouseDown).
                 let ctrl = event.modifiers.control;
                 let inside = self
-                    .session
+                    .tab().session
                     .selection()
                     .map(|s| s.path.contains(doc))
                     .unwrap_or(false);
                 if ctrl && inside {
-                    if self.session.begin_pixel_move(alt) {
-                        self.drag = Some(CanvasDrag::PixelMove { start: doc });
+                    if self.tab().session.begin_pixel_move(alt) {
+                        self.set_drag(Some(CanvasDrag::PixelMove { start: doc }));
                         self.touch(cx);
                     }
                     return;
                 }
-                if !ctrl && !shift && !alt && inside && self.session.begin_selection_move() {
-                    self.drag = Some(CanvasDrag::SelectionMove { start: doc });
+                if !ctrl && !shift && !alt && inside && self.tab().session.begin_selection_move() {
+                    self.set_drag(Some(CanvasDrag::SelectionMove { start: doc }));
                     self.touch(cx);
                     return;
                 }
-                let mode = self.session.selection_mode(shift, alt);
-                self.session.begin_lasso(doc, mode);
-                self.drag = Some(CanvasDrag::MarqueeLasso);
+                let mode = self.tab().session.selection_mode(shift, alt);
+                self.tab().session.begin_lasso(doc, mode);
+                self.set_drag(Some(CanvasDrag::MarqueeLasso));
             }
             NavigationTool::Wand => {
-                let mode = self.session.selection_mode(shift, alt);
-                self.session.magic_wand(doc, mode);
+                let mode = self.tab().session.selection_mode(shift, alt);
+                self.tab().session.magic_wand(doc, mode);
             }
             NavigationTool::Brush
             | NavigationTool::SpotHealing
             | NavigationTool::CloneStamp
             | NavigationTool::Blur => {
-                if self.session.tool == NavigationTool::Blur {
-                    match self.session.blur_mode {
+                if self.tab().session.tool == NavigationTool::Blur {
+                    match self.tab().session.blur_mode {
                         BlurToolMode::Smudge | BlurToolMode::Liquify => {
                             self.begin_warp(doc);
                         }
@@ -358,13 +367,13 @@ impl AppState {
                 self.begin_crop(doc, cx);
             }
             NavigationTool::Eyedropper => {
-                if let Some(document) = self.session.document.as_ref() {
+                if let Some(document) = self.tab().session.document.as_ref() {
                     if let Some(color) =
                         compositor_core::render::sample_composite_color(document, doc)
                     {
-                        self.session.brush_settings.red = color.red;
-                        self.session.brush_settings.green = color.green;
-                        self.session.brush_settings.blue = color.blue;
+                        self.tab().session.brush_settings.red = color.red;
+                        self.tab().session.brush_settings.green = color.green;
+                        self.tab().session.brush_settings.blue = color.blue;
                         self.set_status(format!("Foreground #{}", color.hex()), cx);
                     }
                 }
@@ -408,7 +417,7 @@ impl AppState {
                 stroke.append(doc);
             }
             Some(CanvasDrag::Shape { start }) => {
-                let rect = shape_drag_rect(self.session.shape_kind, *start, doc, shift, alt);
+                let rect = shape_drag_rect(self.workspace.current_mut().session.shape_kind, *start, doc, shift, alt);
                 let shape = self.build_shape_for_drag(rect);
                 self.shape_rect = Some(rect);
                 self.shape_shape = Some(shape);
@@ -417,11 +426,11 @@ impl AppState {
                 self.gradient_cursor = Some(doc);
             }
             Some(CanvasDrag::MarqueeLasso) => {
-                let kind = self.session.lasso_draft.as_ref().map(|d| d.kind);
+                let kind = self.workspace.current_mut().session.lasso_draft.as_ref().map(|d| d.kind);
                 if matches!(kind, Some(LassoKind::Rectangle) | Some(LassoKind::Ellipse)) {
-                    self.session.drag_marquee(doc, shift, false);
+                    self.workspace.current_mut().session.drag_marquee(doc, shift, false);
                 } else {
-                    self.session.extend_lasso(doc);
+                    self.workspace.current_mut().session.extend_lasso(doc);
                 }
             }
             Some(CanvasDrag::MoveLayer { start_origin, start }) => {
@@ -431,35 +440,36 @@ impl AppState {
                 value.origin.y += delta.y;
                 // Moving snaps to the canvas and the other layers; resizing
                 // and rotating are left alone (EditorCanvas.dragTransform).
-                let moving: Vec<uuid::Uuid> = self
-                    .session
-                    .transform_edit
-                    .as_ref()
-                    .map(|edit| match &edit.group {
-                        Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
-                        None => vec![edit.layer_id],
-                    })
-                    .unwrap_or_default();
-                let value = self.session.snapped_move(value, &moving, 10.0);
-                self.session.preview_transform(value);
+                let moving: Vec<uuid::Uuid> = {
+                    let session = self.workspace.current_mut();
+                    session.session.transform_edit.as_ref()
+                        .map(|edit| match &edit.group {
+                            Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
+                            None => vec![edit.layer_id],
+                        })
+                        .unwrap_or_default()
+                };
+                let session = self.workspace.current_mut();
+                let value = session.session.snapped_move(value, &moving, 10.0);
+                session.session.preview_transform(value);
             }
             Some(CanvasDrag::PixelMove { start }) => {
-                self.session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
+                self.workspace.current_mut().session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
             }
             Some(CanvasDrag::SelectionMove { start }) => {
-                self.session
+                self.workspace.current_mut().session
                     .move_selection_outline(CGSize::new(doc.x - start.x, doc.y - start.y));
             }
             Some(CanvasDrag::Crop) => {
-                let ratio = self.session.crop_ratio();
-                self.session.drag_crop(doc, ratio, false);
+                let ratio = self.workspace.current_mut().session.crop_ratio();
+                self.workspace.current_mut().session.drag_crop(doc, ratio, false);
             }
             Some(CanvasDrag::Guide) => {
                 // The guide follows the pointer's document coordinate on its
                 // own axis (EditorCanvas.mouseDragged's guideDragging branch).
-                if let Some(drag) = self.session.guide_drag.as_ref() {
+                if let Some(drag) = self.workspace.current_mut().session.guide_drag.as_ref() {
                     let axis = drag.axis;
-                    self.session.move_guide_drag(guide_axis_position(axis, doc));
+                    self.workspace.current_mut().session.move_guide_drag(guide_axis_position(axis, doc));
                 }
             }
             None => return,
@@ -473,7 +483,9 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(drag) = self.drag.take() {
+        let drag = self.drag.take();
+        self.workspace.current_mut().busy.has_brush_stroke = false;
+        if let Some(drag) = drag {
             match drag {
                 CanvasDrag::Stroke(mut edit) => {
                     edit.flush();
@@ -492,26 +504,26 @@ impl AppState {
                     self.finish_shape(cx);
                 }
                 CanvasDrag::MarqueeLasso => {
-                    self.session.finish_lasso();
+                    self.tab().session.finish_lasso();
                 }
                 CanvasDrag::PixelMove { .. } => {
-                    self.session.end_pixel_move();
+                    self.tab().session.end_pixel_move();
                 }
                 CanvasDrag::SelectionMove { .. } => {
-                    self.session.end_selection_move();
+                    self.tab().session.end_selection_move();
                 }
                 CanvasDrag::Crop => {
-                    self.session.end_crop_drag();
+                    self.tab().session.end_crop_drag();
                 }
                 CanvasDrag::MoveLayer { .. } => {
-                    self.session.commit_transform();
+                    self.tab().session.commit_transform();
                 }
                 CanvasDrag::Guide => {
                     // Releasing on a ruler cancels a new guide or deletes an
                     // existing one (`finishGuideDrag(delete:)`).
                     let local = self.local_position(event.position);
-                    let delete = guide_release_deletes(self.session.shows_rulers, local);
-                    self.session.finish_guide_drag(delete);
+                    let delete = guide_release_deletes(self.tab().session.shows_rulers, local);
+                    self.tab().session.finish_guide_drag(delete);
                 }
                 CanvasDrag::Pan { .. } => {}
             }
@@ -548,6 +560,21 @@ impl AppState {
         }
     }
 
+    /// Starts/ends a canvas drag, keeping the tab's `has_brush_stroke` busy
+    /// flag in step (Swift keeps `brushStroke`/`warpStroke` on the session;
+    /// the port mirrors it app-side so `can_switch` blocks tab changes
+    /// mid-stroke).
+    pub(crate) fn set_drag(&mut self, drag: Option<CanvasDrag>) {
+        self.drag = drag;
+        self.workspace.current_mut().busy.has_brush_stroke = matches!(
+            self.drag,
+            Some(CanvasDrag::Stroke(_))
+                | Some(CanvasDrag::Warp(_))
+                | Some(CanvasDrag::Gradient(_, _))
+                | Some(CanvasDrag::Shape { .. })
+        );
+    }
+
     fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
         (
             f32::from(position.x) - f32::from(self.viewport.origin.x),
@@ -558,10 +585,10 @@ impl AppState {
     // MARK: Strokes
 
     fn begin_stroke(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
-        let Some(document) = self.session.document.clone() else {
+        let Some(document) = self.tab().session.document.clone() else {
             return;
         };
-        let Some(id) = self.session.active_layer_id else {
+        let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {
@@ -571,31 +598,31 @@ impl AppState {
             return;
         }
         // Clone Stamp: option-click sets the source; strokes copy from it.
-        if self.session.tool == NavigationTool::CloneStamp {
+        if self.tab().session.tool == NavigationTool::CloneStamp {
             if alt {
-                self.session.clone_source = Some(doc);
+                self.tab().session.clone_source = Some(doc);
                 self.set_status(format!("Clone source set at {:.0}, {:.0}", doc.x, doc.y), cx);
                 return;
             }
-            if self.session.clone_source.is_none() {
+            if self.tab().session.clone_source.is_none() {
                 self.set_status("Option-click to set a clone source first", cx);
                 return;
             }
         }
-        let mut settings = self.session.brush_settings;
-        settings.erasing = self.session.brush_mode == BrushToolMode::Erase;
-        settings.healing = self.session.tool == NavigationTool::SpotHealing;
+        let mut settings = self.tab().session.brush_settings;
+        settings.erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
+        settings.healing = self.tab().session.tool == NavigationTool::SpotHealing;
         // Smoothing trails the pointer on a string of `smoothing` screen
         // points — in document pixels the radius divides by the zoom. Only
         // the Brush tool smooths (EditorSession+Brush.swift:78).
-        if self.session.tool == NavigationTool::Brush {
+        if self.tab().session.tool == NavigationTool::Brush {
             settings.smoothing /= self.zoom.max(0.0001);
         } else {
             settings.smoothing = 0.0;
         }
         // canPaint: a mask stroke needs an enabled mask and paints its grid;
         // layer strokes skip adjustment layers; an empty selection blocks.
-        let mask_target = self.session.is_mask_selected
+        let mask_target = self.tab().session.is_mask_selected
             && layer
                 .mask
                 .as_ref()
@@ -605,7 +632,7 @@ impl AppState {
         // nothing to do on a mask (EditorSession+Brush.swift:31).
         if mask_target
             && matches!(
-                self.session.tool,
+                self.tab().session.tool,
                 NavigationTool::SpotHealing | NavigationTool::CloneStamp
             )
         {
@@ -625,7 +652,7 @@ impl AppState {
         let (source, base_transform, mask) = if mask_target {
             let m = layer.mask.as_ref().unwrap();
             // A mask stroke paints white (reveal) or black (hide).
-            let v = if self.session.mask_paint_white { 1.0 } else { 0.0 };
+            let v = if self.tab().session.mask_paint_white { 1.0 } else { 0.0 };
             settings.red = v;
             settings.green = v;
             settings.blue = v;
@@ -651,9 +678,9 @@ impl AppState {
             clip,
         );
         if let (Some(source_point), Some(sample)) =
-            (self.session.clone_source, self.sample_for_clone())
+            (self.tab().session.clone_source, self.sample_for_clone())
         {
-            if self.session.tool == NavigationTool::CloneStamp {
+            if self.tab().session.tool == NavigationTool::CloneStamp {
                 let offset = CGSize::new(source_point.x - doc.x, source_point.y - doc.y);
                 edit.clone = Some((sample, offset));
             }
@@ -661,29 +688,29 @@ impl AppState {
         // The Blur brush: the canvas as shown (displayed transform, mask
         // applied), softened by an amount that follows the brush size,
         // painted in place through the tip (BlurTool.swift:8-40).
-        if self.session.tool == NavigationTool::Blur {
+        if self.tab().session.tool == NavigationTool::Blur {
             if let Some(sample) = self.sample_for_clone() {
-                let diameter = self.session.brush_settings.diameter;
+                let diameter = self.tab().session.brush_settings.diameter;
                 let sigma = (diameter / 10.0).clamp(1.5, 30.0);
                 let blurred = compositor_core::raster::gaussian_blur_rgba(&sample, sigma);
                 edit.clone = Some((blurred, CGSize::ZERO));
             }
         }
         edit.append_smoothed(doc);
-        self.drag = Some(CanvasDrag::Stroke(edit));
+        self.set_drag(Some(CanvasDrag::Stroke(edit)));
     }
 
     /// What the Clone Stamp samples: the composite or the active layer.
     fn sample_for_clone(&self) -> Option<Bitmap> {
-        let document = self.session.document.as_ref()?;
-        if self.session.clone_settings.sample_all_layers {
+        let document = self.current_tab().session.document.as_ref()?;
+        if self.current_tab().session.clone_settings.sample_all_layers {
             return Some(compositor_core::render::draw_live_composite(document));
         }
         // The active layer as the canvas displays it: drawn through its
         // displayed transform at document size (CloneStamp.swift:39-48).
-        let layer = self.session.active_layer()?;
+        let layer = self.current_tab().session.active_layer()?;
         let image = layer.asset.as_ref()?.image.as_ref().clone();
-        let transform = self.session.displayed_transform(layer);
+        let transform = self.current_tab().session.displayed_transform(layer);
         let mut canvas = Bitmap::new(document.width, document.height);
         compositor_core::render::draw_layer_pixels(&image, &transform, &mut canvas);
         // An enabled mask shows through: the sampled content is multiplied by
@@ -716,7 +743,7 @@ impl AppState {
         // Spot Healing: the wash was only ever a preview; the stroke ends by
         // rebuilding the painted area from nearby texture (HealPixels.c).
         if edit.settings.healing {
-            let mode = match self.session.spot_healing_mode {
+            let mode = match self.tab().session.spot_healing_mode {
                 SpotHealingMode::ContentAware => 0,
                 SpotHealingMode::CreateTexture => 1,
                 SpotHealingMode::ProximityMatch => 2,
@@ -739,9 +766,9 @@ impl AppState {
             "Paint Mask"
         } else if erasing {
             "Erase"
-        } else if self.session.tool == NavigationTool::Blur {
+        } else if self.tab().session.tool == NavigationTool::Blur {
             "Blur"
-        } else if self.session.tool == NavigationTool::CloneStamp {
+        } else if self.tab().session.tool == NavigationTool::CloneStamp {
             "Clone Stamp"
         } else {
             "Brush Stroke"
@@ -755,10 +782,10 @@ impl AppState {
     /// `beginWarp`: the stroke works on the active layer as the canvas shows
     /// it, at document size.
     fn begin_warp(&mut self, doc: CGPoint) {
-        let Some(document) = self.session.document.clone() else {
+        let Some(document) = self.tab().session.document.clone() else {
             return;
         };
-        let Some(id) = self.session.active_layer_id else {
+        let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {
@@ -770,11 +797,11 @@ impl AppState {
         let mut surface = Bitmap::new(document.width.max(1), document.height.max(1));
         compositor_core::render::draw_layer_pixels(&image, &layer.transform, &mut surface);
         let mut stroke =
-            WarpStroke::new(surface, self.session.blur_mode, &self.session.brush_settings);
+            WarpStroke::new(surface, self.tab().session.blur_mode, &self.tab().session.brush_settings);
         stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
         stroke.layer_transform = layer.transform;
         stroke.append(doc);
-        self.drag = Some(CanvasDrag::Warp(stroke));
+        self.set_drag(Some(CanvasDrag::Warp(stroke)));
     }
 
     /// `finishWarp`: paints the finished result into the layer's own pixels
@@ -785,10 +812,10 @@ impl AppState {
             BlurToolMode::Liquify => "Liquify",
             BlurToolMode::Blur => "Blur",
         };
-        let Some(document) = self.session.document.clone() else {
+        let Some(document) = self.tab().session.document.clone() else {
             return;
         };
-        let Some(id) = self.session.active_layer_id else {
+        let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {
@@ -828,12 +855,12 @@ impl AppState {
 
     /// The shape the current drag places, from the tool's settings.
     fn build_shape_for_drag(&self, rect: CGRect) -> compositor_core::document::LayerShape {
-        let kind = self.session.shape_kind;
-        let color = self.session.palette_color(false);
+        let kind = self.current_tab().session.shape_kind;
+        let color = self.current_tab().session.palette_color(false);
         compositor_core::document::LayerShape {
             kind,
-            corner_radius: self.session.shape_corner_radius,
-            line_width: self.session.shape_line_width,
+            corner_radius: self.current_tab().session.shape_corner_radius,
+            line_width: self.current_tab().session.shape_line_width,
             red: color.red,
             green: color.green,
             blue: color.blue,
@@ -844,7 +871,7 @@ impl AppState {
     }
 
     fn begin_shape(&mut self, doc: CGPoint) {
-        self.drag = Some(CanvasDrag::Shape { start: doc });
+        self.set_drag(Some(CanvasDrag::Shape { start: doc }));
         self.shape_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
         self.shape_shape = Some(self.build_shape_for_drag(CGRect::new(doc.x, doc.y, 0.0, 0.0)));
     }
@@ -858,12 +885,12 @@ impl AppState {
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
         }
-        let kind = self.session.shape_kind;
-        let color = self.session.palette_color(false);
+        let kind = self.tab().session.shape_kind;
+        let color = self.tab().session.palette_color(false);
         let shape = compositor_core::document::LayerShape {
             kind,
-            corner_radius: self.session.shape_corner_radius,
-            line_width: self.session.shape_line_width,
+            corner_radius: self.tab().session.shape_corner_radius,
+            line_width: self.tab().session.shape_line_width,
             red: color.red,
             green: color.green,
             blue: color.blue,
@@ -871,8 +898,8 @@ impl AppState {
             start: CGPoint::ZERO,
             end: CGPoint::new(1.0, 1.0),
         };
-        let name = self.session.next_shape_name(kind);
-        self.session.add_shape_layer(shape, rect, name);
+        let name = self.tab().session.next_shape_name(kind);
+        self.tab().session.add_shape_layer(shape, rect, name);
         self.touch(cx);
     }
 
@@ -888,30 +915,26 @@ impl AppState {
         mask: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.session.active_layer_id else {
-            return;
-        };
-        self.session
-            .history
-            .begin(name, &self.session.document, self.session.active_layer_id);
-        if let Some(doc) = self.session.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(id) {
-                let mut image = image;
-                if mask {
-                    if let Some(m) = layer.mask.as_mut() {
-                        image.name = m.asset.name.clone();
-                        m.asset = image;
+        self.history_edit(name, move |session| {
+            let Some(id) = session.active_layer_id else {
+                return;
+            };
+            if let Some(doc) = session.document.as_mut() {
+                if let Some(layer) = doc.layer_mut(id) {
+                    let mut image = image;
+                    if mask {
+                        if let Some(m) = layer.mask.as_mut() {
+                            image.name = m.asset.name.clone();
+                            m.asset = image;
+                        }
+                    } else {
+                        image.name = layer.name.clone();
+                        layer.asset = Some(image);
+                        layer.transform = transform;
                     }
-                } else {
-                    image.name = layer.name.clone();
-                    layer.asset = Some(image);
-                    layer.transform = transform;
                 }
             }
-        }
-        self.session
-            .history
-            .end(&self.session.document, self.session.active_layer_id);
+        });
         self.touch(cx);
     }
 
@@ -935,10 +958,10 @@ impl AppState {
     // MARK: Gradient
 
     fn begin_gradient(&mut self, doc: CGPoint) {
-        let Some(document) = self.session.document.clone() else {
+        let Some(document) = self.tab().session.document.clone() else {
             return;
         };
-        let Some(id) = self.session.active_layer_id else {
+        let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {
@@ -953,57 +976,65 @@ impl AppState {
             source,
             layer.transform,
             false,
-            self.session.brush_settings,
+            self.tab().session.brush_settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
         );
         self.gradient_cursor = Some(doc);
-        self.drag = Some(CanvasDrag::Gradient(edit, doc));
+        self.set_drag(Some(CanvasDrag::Gradient(edit, doc)));
     }
 
     // MARK: Move
 
     fn begin_move(&mut self, doc: CGPoint, command: bool, cx: &mut Context<Self>) {
         // A picked layer becomes the transform target before the drag starts.
-        if self.session.transform_edit.is_none() {
-            if let Some(document) = self.session.document.as_ref() {
+        if self.tab().session.transform_edit.is_none() {
+            let active_id = self.tab().session.active_layer_id;
+            let auto_select = self.transform_auto_select;
+            if let Some(document) = self.tab().session.document.as_ref() {
                 if let Some((id, picked)) = transform_press_layer(
                     document,
-                    self.session.active_layer_id,
-                    self.transform_auto_select,
+                    active_id,
+                    auto_select,
                     command,
                     true,
                     doc,
                 ) {
                     if picked {
-                        self.session.select_layer(Some(id));
+                        self.tab().session.select_layer(Some(id));
                     }
                 }
             }
         }
-        if self.session.transform_edit.is_none() {
-            if self.session.can_transform() {
+        if self.tab().session.transform_edit.is_none() {
+            if self.tab().session.can_transform() {
                 // The drag begins a transient transform (persistent false,
                 // EditorCanvas.swift:2129).
-                self.session.begin_transform_persistent(false);
+                self.tab().session.begin_transform_persistent(false);
             } else {
                 return;
             }
         }
-        let Some(edit) = self.session.transform_edit.as_ref() else {
+        let Some(draft) = self
+            .tab()
+            .session
+            .transform_edit
+            .as_ref()
+            .map(|edit| edit.draft)
+        else {
             return;
         };
-        self.drag = Some(CanvasDrag::MoveLayer {
-            start_origin: edit.draft,
+        self.set_drag(Some(CanvasDrag::MoveLayer {
+            start_origin: draft,
             start: doc,
-        });
+        }));
         self.touch(cx);
     }
 
     // MARK: Crop
 
     fn begin_crop(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        let mode = if let Some(rect) = self.session.crop_rect {
+        let mode = if let Some(rect) = self.tab().session.crop_rect {
             match handle_at(rect, doc) {
                 Some(index) => CropDragMode::Resize(index),
                 None if rect.contains_point(doc) => CropDragMode::Move,
@@ -1012,8 +1043,8 @@ impl AppState {
         } else {
             CropDragMode::Create
         };
-        self.session.begin_crop_drag(doc, mode);
-        self.drag = Some(CanvasDrag::Crop);
+        self.tab().session.begin_crop_drag(doc, mode);
+        self.set_drag(Some(CanvasDrag::Crop));
         self.touch(cx);
     }
 
@@ -1023,18 +1054,18 @@ impl AppState {
         // The session's beginText/applyText flow, with real-font typesetting
         // (TypeTool.swift). Without a text input UI a click lays down the
         // default sample content, editable through the same live-text path.
-        if self.session.document.is_none() {
+        if self.tab().session.document.is_none() {
             return;
         }
-        self.session.begin_text(doc, true);
-        let mut draft = match self.session.text_draft.clone() {
+        self.tab().session.begin_text(doc, true);
+        let mut draft = match self.tab().session.text_draft.clone() {
             Some(draft) => draft,
             None => return,
         };
         if draft.style.content.is_empty() {
-            draft.style.content = self.session.text_defaults.content.clone();
+            draft.style.content = self.tab().session.text_defaults.content.clone();
         }
-        self.session.apply_text(draft);
+        self.tab().session.apply_text(draft);
         self.set_status(format!("Text layer at {:.0}, {:.0}", doc.x, doc.y), cx);
     }
 
@@ -1042,16 +1073,16 @@ impl AppState {
 
     /// Tab cycles the active tool's mode.
     pub fn cycle_tool_mode(&mut self, cx: &mut Context<Self>) {
-        if self.session.tool == NavigationTool::Shape {
-            self.session.toggle_shape_kind();
+        if self.tab().session.tool == NavigationTool::Shape {
+            self.tab().session.toggle_shape_kind();
             self.touch(cx);
             return;
         }
-        match self.session.tool {
-            NavigationTool::Marquee => self.session.toggle_marquee_kind(),
-            NavigationTool::Lasso => self.session.toggle_lasso_kind(),
+        match self.tab().session.tool {
+            NavigationTool::Marquee => self.tab().session.toggle_marquee_kind(),
+            NavigationTool::Lasso => self.tab().session.toggle_lasso_kind(),
             NavigationTool::Wand => {
-                self.session.wand_mode = match self.session.wand_mode {
+                self.tab().session.wand_mode = match self.tab().session.wand_mode {
                     compositor_core::selection::WandMode::Wand => {
                         compositor_core::selection::WandMode::Object
                     }
@@ -1061,13 +1092,13 @@ impl AppState {
                 };
             }
             NavigationTool::Brush => {
-                self.session.brush_mode = match self.session.brush_mode {
+                self.tab().session.brush_mode = match self.tab().session.brush_mode {
                     BrushToolMode::Paint => BrushToolMode::Erase,
                     BrushToolMode::Erase => BrushToolMode::Paint,
                 };
             }
             NavigationTool::Gradient => {
-                self.session.gradient_settings.shape = match self.session.gradient_settings.shape {
+                self.tab().session.gradient_settings.shape = match self.tab().session.gradient_settings.shape {
                     GradientShape::Linear => GradientShape::Radial,
                     GradientShape::Radial => GradientShape::Linear,
                 };
@@ -1079,7 +1110,7 @@ impl AppState {
 
     /// Escape: cancel the active edit, or close the sheet.
     pub fn cancel_active(&mut self, cx: &mut Context<Self>) {
-        if self.session.color_picker.is_some() {
+        if self.tab().session.color_picker.is_some() {
             self.close_color_picker_ui(false, cx);
             return;
         }
@@ -1089,36 +1120,36 @@ impl AppState {
             self.cancel_sheet(cx);
             return;
         }
-        if self.session.lasso_draft.take().is_some() {
+        if self.tab().session.lasso_draft.take().is_some() {
             self.touch(cx);
             return;
         }
-        if self.session.crop_drag.take().is_some() {
-            self.session.crop_rect = None;
+        if self.tab().session.crop_drag.take().is_some() {
+            self.tab().session.crop_rect = None;
             self.touch(cx);
             return;
         }
         // Escape kills a guide drag before it reaches the transform edit
         // (EditorCanvas.keyDown's `guideDrag != nil` branch).
-        if self.session.guide_drag.take().is_some() {
+        if self.tab().session.guide_drag.take().is_some() {
             self.touch(cx);
             return;
         }
-        if self.session.pixel_move.take().is_some() {
-            self.session.cancel_pixel_move();
+        if self.tab().session.pixel_move.take().is_some() {
+            self.tab().session.cancel_pixel_move();
             self.touch(cx);
             return;
         }
-        if self.session.selection_move_origin.take().is_some() {
-            self.session.end_selection_move();
+        if self.tab().session.selection_move_origin.take().is_some() {
+            self.tab().session.end_selection_move();
             self.touch(cx);
             return;
         }
-        if self.session.transform_edit.take().is_some() {
+        if self.tab().session.transform_edit.take().is_some() {
             self.touch(cx);
             return;
         }
-        if self.session.crop_rect.take().is_some() {
+        if self.tab().session.crop_rect.take().is_some() {
             self.touch(cx);
             return;
         }

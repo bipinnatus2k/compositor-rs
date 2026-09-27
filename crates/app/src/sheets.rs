@@ -128,6 +128,8 @@ impl AppState {
             jpeg_ready: None,
             jpeg_data: None,
             jpeg_size_label: String::new(),
+            message: String::new(),
+            confirm_step: None,
         };
         match kind {
             SheetKind::NewCanvas => SheetState {
@@ -136,21 +138,21 @@ impl AppState {
                 name: self.make_input("Untitled", window, cx),
                 ..base
             },
-            SheetKind::ImageSize => SheetState {
-                resolution: self.make_input(
-                    &self
-                        .session
-                        .document
-                        .as_ref()
-                        .map(|d| d.resolution as usize)
-                        .unwrap_or(72)
-                        .to_string(),
-                    window,
-                    cx,
-                ),
-                link: true,
-                ..base
-            },
+            SheetKind::ImageSize => {
+                let resolution = self
+                    .current_tab()
+                    .session
+                    .document
+                    .as_ref()
+                    .map(|d| d.resolution as usize)
+                    .unwrap_or(72)
+                    .to_string();
+                SheetState {
+                    resolution: self.make_input(&resolution, window, cx),
+                    link: true,
+                    ..base
+                }
+            }
             SheetKind::CanvasSize => base,
             SheetKind::Levels => {
                 self.begin_preview();
@@ -170,7 +172,7 @@ impl AppState {
                     // Levels.swift:90-96).
                     let coverage = histogram_coverage(
                         self.preview_base_transform,
-                        self.session.selection().cloned(),
+                        self.tab().session.selection().cloned(),
                         pixels.width,
                         pixels.height,
                     );
@@ -197,9 +199,9 @@ impl AppState {
                 // layer's effects right away (one undo step per change, as
                 // Swift's changeEffects does), and the canvas renders effects
                 // through core render.
-                let editing = self.session.editing_effects();
+                let editing = self.tab().session.editing_effects();
                 let kind = self
-                    .session
+                    .tab().session
                     .effects_editing
                     .map(|editing| editing.kind)
                     .unwrap_or(LayerEffectKind::Stroke);
@@ -344,17 +346,17 @@ impl AppState {
                 path: self.make_input("./image.png", window, cx),
                 ..base
             },
-            SheetKind::Trim | SheetKind::About | SheetKind::Shortcuts => base,
+            SheetKind::Trim | SheetKind::About | SheetKind::Shortcuts | SheetKind::Confirm | SheetKind::Alert => base,
         }
     }
 
     /// Captures the active layer's pixels so adjustment sheets can preview.
     fn begin_preview(&mut self) {
         self.preview_base = self
-            .session
+            .tab().session
             .active_layer()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
-        self.preview_base_transform = self.session.active_layer().map(|layer| layer.transform);
+        self.preview_base_transform = self.tab().session.active_layer().map(|layer| layer.transform);
         self.preview = self.preview_base.clone();
     }
 
@@ -383,9 +385,9 @@ impl AppState {
                 let preview = sheet.checkbox_a;
                 // Editing an adjustment layer: sliders feed the session's
                 // Levels editor, which previews through the live composite.
-                if self.session.adjustment_editing_id.is_some() {
-                    self.session.levels = Some(self.levels_settings_from_sheet(cx));
-                    self.session.preview_adjustment_editing(preview);
+                if self.tab().session.adjustment_editing_id.is_some() {
+                    self.tab().session.levels = Some(self.levels_settings_from_sheet(cx));
+                    self.tab().session.preview_adjustment_editing(preview);
                     return;
                 }
                 if let Some(base) = self.preview_base.clone() {
@@ -424,9 +426,9 @@ impl AppState {
                     );
                 }
                 // The adjustment-layer editor previews through the session.
-                if self.session.adjustment_editing_id.is_some() {
-                    self.session.hue_saturation = Some(settings);
-                    self.session.preview_adjustment_editing(true);
+                if self.tab().session.adjustment_editing_id.is_some() {
+                    self.tab().session.hue_saturation = Some(settings);
+                    self.tab().session.preview_adjustment_editing(true);
                     return;
                 }
                 if let Some(base) = self.preview_base.clone() {
@@ -464,9 +466,9 @@ impl AppState {
     /// shows the untouched pixels, exactly as Swift's `edit.preview` does.
     pub fn refresh_levels_preview(&mut self, cx: &mut Context<Self>) {
         let preview = self.sheet.as_ref().map(|s| s.checkbox_a).unwrap_or(true);
-        if self.session.adjustment_editing_id.is_some() {
-            self.session.levels = Some(self.levels_settings_from_sheet(cx));
-            self.session.preview_adjustment_editing(preview);
+        if self.tab().session.adjustment_editing_id.is_some() {
+            self.tab().session.levels = Some(self.levels_settings_from_sheet(cx));
+            self.tab().session.preview_adjustment_editing(preview);
             self.revision += 1;
             cx.notify();
             return;
@@ -592,7 +594,7 @@ impl AppState {
         let Some(base) = self.preview_base.as_deref() else {
             return adjusted;
         };
-        blend_through_selection(base, adjusted, self.preview_base_transform, self.session.selection().cloned())
+        blend_through_selection(base, adjusted, self.preview_base_transform, self.current_tab().session.selection().cloned())
     }
 
     /// Re-runs the noise filters when their checkboxes change.
@@ -620,8 +622,8 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session.add_effect(kind);
-        if self.session.effects_editing.map(|editing| editing.kind) == Some(kind) {
+        self.tab().session.add_effect(kind);
+        if self.tab().session.effects_editing.map(|editing| editing.kind) == Some(kind) {
             self.open_sheet(SheetKind::Effects, window, cx);
         }
         self.touch(cx);
@@ -632,7 +634,7 @@ impl AppState {
     /// and state live on the core session in `color_picker.rs`). Nothing is
     /// written into the layer until the picker closes.
     pub fn open_effect_color_picker(&mut self, kind: LayerEffectKind, cx: &mut Context<Self>) {
-        self.session.open_effect_color_picker(kind);
+        self.tab().session.open_effect_color_picker(kind);
         self.touch(cx);
     }
 
@@ -653,7 +655,7 @@ impl AppState {
             (kind, values)
         };
         let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
-        self.session.change_effects(move |effects| match kind {
+        self.tab().session.change_effects(move |effects| match kind {
             LayerEffectKind::Stroke => {
                 if let Some(stroke) = effects.stroke.as_mut() {
                     stroke.size = value(0);

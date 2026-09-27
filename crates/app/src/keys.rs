@@ -15,7 +15,7 @@ actions!(compositor, [
     BrushSofter, BrushHarder, BlendModeNext, BlendModePrevious,
     // File
     NewCanvas, OpenDocument, SaveDocument, SaveAs, ExportPng, ExportJpeg, ImportImages,
-    CloseDocument,
+    CloseDocument, Quit,
     // Edit
     Undo, Redo, FillForeground, FillBackground, FreeTransform, ShowShortcuts,
     Cut, CopyPixels, CopyMerged, PastePixels,
@@ -130,6 +130,7 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "file.export-png", ExportPng);
     bind!(out, ids, registry, "file.export-jpeg", ExportJpeg);
     bind!(out, ids, registry, "file.close", CloseDocument);
+    bind!(out, ids, registry, "file.quit", Quit);
     // Edit
     bind!(out, ids, registry, "edit.undo", Undo);
     bind!(out, ids, registry, "edit.redo", Redo);

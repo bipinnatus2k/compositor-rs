@@ -13,7 +13,7 @@ use crate::state::AppState;
 
 
 pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
-    let session = &state.session;
+    let session = &state.current_tab().session;
     let rulers = session.shows_rulers;
     let grid = session.shows_grid;
     let guides = session.shows_guides;
@@ -81,6 +81,8 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
                 .menu("Import Images…", Box::new(keys::ImportImages))
                 .separator()
                 .menu("Close", Box::new(keys::CloseDocument))
+                .separator()
+                .menu("Quit", Box::new(keys::Quit))
         }))
         .child(menu_button("menu-edit", "Edit", |menu, _, _| {
             menu.menu("Undo", Box::new(keys::Undo))

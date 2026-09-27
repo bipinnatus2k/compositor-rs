@@ -27,7 +27,7 @@ fn click_count(event: &ClickEvent) -> usize {
 impl AppState {
     /// Puts the active layer's opacity into the header slider.
     pub fn sync_opacity_slider(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        let Some(layer) = self.session.active_layer() else { return };
+        let Some(layer) = self.tab().session.active_layer() else { return };
         let value = (layer.opacity * 100.0) as f32;
         let slider = self.opacity_slider.clone();
         slider.update(cx, |state, cx| {
@@ -47,18 +47,19 @@ impl AppState {
             .border_color(gpui_kit::black().opacity(0.4));
 
         // Header: title + blend mode + opacity.
-        let can_edit = self.session.can_edit_appearance();
-        let blend_label = self
+        let can_edit = self.tab().session.can_edit_appearance();
+        let session = self.current_tab();
+        let blend_label = session
             .session
             .active_layer()
             .map(|layer| {
-                self.session
+                session.session
                     .displayed_blend_mode(layer)
                     .label()
                     .to_string()
             })
             .unwrap_or_else(|| "Normal".to_string());
-        let opacity = self
+        let opacity = session
             .session
             .active_layer()
             .map(|layer| layer.opacity)
@@ -109,8 +110,8 @@ impl AppState {
             .overflow_y_scroll()
             .flex()
             .flex_col();
-        if let Some(document) = self.session.document.clone() {
-            let active_id = self.session.active_layer_id;
+        if let Some(document) = self.tab().session.document.clone() {
+            let active_id = self.tab().session.active_layer_id;
             for layer in document.layers.iter().rev() {
                 let id = layer.id;
                 let is_active = active_id == Some(id);
@@ -141,13 +142,13 @@ impl AppState {
                 .border_color(gpui_kit::black().opacity(0.4))
                 .child(footer_button("layer-add", "+", "New Blank Layer", cx.listener(
                     |this, _, _, cx| {
-                        this.session.add_blank_layer();
+                        this.tab().session.add_blank_layer();
                         this.touch(cx);
                     },
                 )))
                 .child(footer_button("layer-mask", "Mask", "Add Reveal-All Mask", cx.listener(
                     |this, _, _, cx| {
-                        this.session.add_layer_mask(true);
+                        this.tab().session.add_layer_mask(true);
                         this.touch(cx);
                     },
                 )))
@@ -168,25 +169,25 @@ impl AppState {
                 ))
                 .child(footer_button("layer-dup", "Dup", "Duplicate Layer", cx.listener(
                     |this, _, _, cx| {
-                        this.session.duplicate_active_layer();
+                        this.tab().session.duplicate_active_layer();
                         this.touch(cx);
                     },
                 )))
                 .child(footer_button("layer-del", "Del", "Delete Layer", cx.listener(
                     |this, _, _, cx| {
-                        this.session.delete_active_layer();
+                        this.tab().session.delete_active_layer();
                         this.touch(cx);
                     },
                 )))
                 .child(footer_button("layer-up", "Up", "Move Layer Up", cx.listener(
                     |this, _, _, cx| {
-                        this.session.move_active_layer(1);
+                        this.tab().session.move_active_layer(1);
                         this.touch(cx);
                     },
                 )))
                 .child(footer_button("layer-down", "Dn", "Move Layer Down", cx.listener(
                     |this, _, _, cx| {
-                        this.session.move_active_layer(-1);
+                        this.tab().session.move_active_layer(-1);
                         this.touch(cx);
                     },
                 ))),
@@ -199,7 +200,7 @@ impl AppState {
     /// The layer-effect kinds (LayersPanel.swift's sparkles menu), disabled
     /// unless the active layer can take effects.
     fn effects_menu_entries(&self) -> Vec<MenuEntry> {
-        let enabled = self.session.can_edit_effects();
+        let enabled = self.current_tab().session.can_edit_effects();
         LayerEffectKind::ALL
             .iter()
             .map(|kind| {
@@ -215,7 +216,7 @@ impl AppState {
     /// The 24 blend modes, grouped with separators like the original menu.
     fn blend_menu_entries(&self) -> Vec<MenuEntry> {
         let current = self
-            .session
+            .current_tab().session
             .active_layer()
             .map(|layer| layer.blend_mode);
         let mut entries = Vec::new();
@@ -227,7 +228,7 @@ impl AppState {
                 let mode = *mode;
                 entries.push(
                     MenuEntry::new(mode.label(), move |state, _, cx| {
-                        state.session.set_layer_blend_mode(mode);
+                        state.tab().session.set_layer_blend_mode(mode);
                         state.touch(cx);
                     })
                     .checked(current == Some(mode)),
@@ -263,7 +264,7 @@ impl AppState {
                 if this.rename == Some(id) {
                     return;
                 }
-                this.session.select_layer(Some(id));
+                this.tab().session.select_layer(Some(id));
                 this.sync_opacity_slider(window, cx);
                 if double {
                     this.begin_rename(id, window, cx);
@@ -291,7 +292,7 @@ impl AppState {
                     gpui_kit::rgb(0x555555)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.session.toggle_layer_visibility(id);
+                    this.tab().session.toggle_layer_visibility(id);
                     this.touch(cx);
                 }))
                 .child(SharedString::from(if visible { "\u{25CF}" } else { "\u{25CB}" })),
@@ -328,10 +329,10 @@ impl AppState {
                     } else {
                         compositor_core::selection::SelectionMode::Replace
                     };
-                    if this.session.is_mask_selected {
-                        this.session.load_mask_selection(id, mode);
+                    if this.tab().session.is_mask_selected {
+                        this.tab().session.load_mask_selection(id, mode);
                     } else {
-                        this.session.load_layer_selection(id, mode);
+                        this.tab().session.load_layer_selection(id, mode);
                     }
                     this.touch(cx);
                 })),
@@ -397,7 +398,7 @@ impl AppState {
     /// New Group: a folder inserted above the active layer, which becomes
     /// its first child.
     pub fn add_group(&mut self, cx: &mut Context<Self>) {
-        self.session.add_group();
+        self.tab().session.add_group();
         self.touch(cx);
     }
 }
