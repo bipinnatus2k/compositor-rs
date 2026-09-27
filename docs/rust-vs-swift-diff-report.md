@@ -24,7 +24,7 @@
 **§10 测试扩容（+76 集成用例）**
 - SelectionEditTests（14）、SelectionClipboard+Group+GroupingSelection（15）、TransformTests 会话流（9）、BrushTests（15）、AdjustmentLayerTests（9）、Distort/ShapeTool/CloneStamp/TypeTool 会话流（14）——六个新 `crates/core/tests/` 文件。
 
-**仍缺（后续批次）**：取色器 SV 场+色相条自绘控件（滑杆组仍在）、RAW 导入（调研因配额中断）、浮动面板系统、多窗口/标签条、InlineTextEditor、TransformInspector 的 Esc/Return 与把手实时跟随、select_subject 的 Vision 替代源、快捷键即时生效（当前重启生效）、JPEG 导出预览缩略图接线、ToolDefaults 的 f64/其余键扩展。
+**仍缺（后续批次）**：取色器 SV 场+色相条自绘控件（滑杆组仍在）、RAW 导入（已调研：推荐 `rawler`，但 0.8.0 的 jxl-oxide 链与本仓 image/exr 的 rayon-core `links` 锁定冲突、rsproxy 镜像缺可解版本——待切换 registry 或 rawler 升级后按调研的 `raw_to_srgb`→`import_images` 方案接入）、浮动面板系统、多窗口/标签条、InlineTextEditor、TransformInspector 的 Esc/Return 与把手实时跟随、select_subject 的 Vision 替代源、快捷键即时生效（当前重启生效）、JPEG 导出预览缩略图接线、ToolDefaults 的 f64/其余键扩展。
 
 ---
 
