@@ -47,6 +47,8 @@
 **仍缺（本批次后续 Wave）**：~~tabs.rs/project.rs 模型层~~ ✅ Wave 2 → ~~AppState 重组 + TabBar + 菜单改投~~ ✅ Wave 3 → ~~面板迁移~~ ✅ Wave 4（全部 8 面板入 FloatingPanel 壳：Levels/ HueSaturation/ SelectionAmount/ Filter+Camera Raw Docked/ Effects/ ColorPicker/ Shortcuts；7 个 SheetKind 变体删除，pending 对话框保持模态对齐 Swift）。**批次收尾后的余项**：InlineTextEditor；TransformInspector 把手实时跟随；快捷键改键即时生效；面板内控件与 Swift 的微小形态差异（Effects Stroke 分段控件、SelectionAmount 旁滑杆）。
 
 **审计修复（2026-09-28，`docs/reports/2026-09-28/code-implementation-audit/`）**：11 高 + 21 中严重度项已修（undo 门控/渐变错层/删除活蒙版 bake/笔刷选区文档坐标/1×1 蒙版 panic/PSD 越界等，9 个新回归测试），5 项经 Swift 原文核实为误报不改，未修项留痕（Vision 依赖、app 接线、性能重构、需算法设计）。
+- **中低项与测试质量批次**（2026-09-28）：warp 增加四边形像素 coverage（Sutherland–Hodgman 解析面积，distort trim 边界与 Core Image AA 精确一致，tool_flow ±1 容差改精确断言）；change_text_style 非法回滚、hue_response 固定序求和、unpremultiply 舍入等低项；tests/ 目录对齐 Swift——clear_pixels 边缘断言部分擦除、pixel-move 三用例移植（cmd-drag 单 undo/duplicate/cmd-arrow 蒙版拒绝）、恒真断言与 let 残骸改真断言；另 5 项核实为误报（colorize 负色相/混色器归一化/Rec.601/blend_gray 舍入均与 C 内核逐字一致）。未修项维持记录（Vision/性能/需镜头档案类）。
+- **InlineTextEditor + 检查器跟随**（2026-09-28）：画布位置锚定的多行 Textarea 浮层与 textDraft 双向绑定（Return 换行/Ctrl-Return 提交/Esc 取消/Option 方向键调字距行距）；Type 手势三态（提交旧稿/编辑命中层/拖出点框文本，默认样例文本点击删除）；TransformInspector 六字段随拖拽预览实时同步。6 项 v1 偏差留痕（自绘光标/缩放把手/旋转跟随等）。
 - **平台能力缺口（明确结论，不做替代品）**：`select_subject`（Select Subject）与 `subject_removal::run`（Remove Background 底层，现为 stub）都依赖 Vision 前景分割——Swift 无点击点、全画布自动找前景，无合理 1:1 替代源（点击式 Object Selection 是不同功能且已移植）。Filter 菜单的 Remove Background 入口在底层就绪前保持现状；报告记录为平台差异。
 
 ---
