@@ -4,6 +4,30 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
+
+三个方向并行（标尺参考线+PixelMove / ToolDefaults+快捷键设置 UI / 会话测试套件），主线完成接线与收尾。测试 659 → **748** 全绿（core lib 575 + 集成 104 + app lib 69）。
+
+**§4.1-8 标尺参考线拖拽（交互闭环）**
+- 标尺条按下建参考线（轴/文档坐标换算）、拖动跟随、释放于标尺区删除（`finishGuideDrag(delete:)` 语义）、Move 工具按下 5pt 容差拾取现有线；Escape 取消链插入 guide 分支；画布按 displayedGuides 渲染拖拽中的线。4 个新测试。
+
+**§2/§3.2 像素移动 + 选区轮廓拖动（SelectionEdits 最后缺口）**
+- PixelMove 会话：Cmd 拖把选区像素 lift 出栅格，每次拖动重建"原位挖洞 + 偏移贴回"预览（文档在提交前不变），提交一步 "Move Pixels"/"Option→Duplicate Pixels" undo 同时移动轮廓；与 Cmd-T 浮动变换互斥（守卫）。蚂蚁线跟随 `displayed_selection`。
+- 选区轮廓拖动（Selection.swift:263-290 整段）：Replace 模式在选区内直接拖动只移动轮廓（整像素取整、不重裁剪、可拖出画布往返）；⌘方向键 8 条入快捷键目录（`nudge_pixels`）。
+
+**§2 ToolDefaults 持久化 + §9.3 快捷键设置 UI**
+- `settings.rs`：ToolDefaults.swift 1:1——12 个开关键（autoSelect/transformControls/pixelGrid/grid/guides/rulers/snap×4/lockGuides）版本化 JSON 持久化（平台配置目录、原子写、损坏回退），启动应用 + didSet 式即时保存（含 Auto-select 勾选）。
+- Shortcuts sheet 从静态列表升级为 KeyboardShortcuts.swift:129-319 的设置编辑器：分组行、整键捕获录制（`intercept_keystrokes`）、每行 Reset、冲突/非法以 ShortcutProblem 文案显示、Restore Defaults、Done 原子保存（生效需重启，界面注明）。
+
+**§9.1-4 导出 DPI 接线**：PNG 导出经 `png_data_with_dpi`（pHYs）、JPEG 经 `jpeg_data_with_dpi`（JFIF 密度）携带文档分辨率。
+
+**§10 测试扩容（+76 集成用例）**
+- SelectionEditTests（14）、SelectionClipboard+Group+GroupingSelection（15）、TransformTests 会话流（9）、BrushTests（15）、AdjustmentLayerTests（9）、Distort/ShapeTool/CloneStamp/TypeTool 会话流（14）——六个新 `crates/core/tests/` 文件。
+
+**仍缺（后续批次）**：取色器 SV 场+色相条自绘控件（滑杆组仍在）、RAW 导入（调研因配额中断）、浮动面板系统、多窗口/标签条、InlineTextEditor、TransformInspector 的 Esc/Return 与把手实时跟随、select_subject 的 Vision 替代源、快捷键即时生效（当前重启生效）、JPEG 导出预览缩略图接线、ToolDefaults 的 f64/其余键扩展。
+
+---
+
 ## 修复进度（2026-09-26 第十九轮：AdjustmentEditing + 面板系统 + 快捷键自定义 + 选区混合修复）
 
 三个子代理并行（AdjustmentEditing+pixel 修复 / Curves+面板 / 快捷键自定义），主线完成接线。测试 595 → 659 全绿（core lib 563 + 集成 28 + app lib 52 + bin 16）。
