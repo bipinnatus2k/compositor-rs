@@ -333,6 +333,11 @@ pub struct EditorSession {
     pub collapsed_group_ids: std::collections::HashSet<Uuid>,
     pub history: DocumentHistory,
 
+    /// The `.comp` package this project was loaded from or last saved to
+    /// (`projectURL`, EditorSession.swift:114). Written by the app's project
+    /// controller on save/open; titles and open dedup read it.
+    pub project_url: Option<std::path::PathBuf>,
+
     // Appearance preview
     pub blend_preview: Option<(Uuid, LayerBlendMode)>,
     pub opacity_edit_layer_id: Option<Uuid>,
@@ -464,6 +469,7 @@ impl Default for EditorSession {
             gradient_edit: None,
             guide_drag: None,
             history: DocumentHistory::default(),
+            project_url: None,
             blend_preview: None,
             effects_editing: None,
             effects_editing_original: None,
@@ -574,11 +580,13 @@ impl EditorSession {
 
     // MARK: Undo
 
-    fn begin_edit(&mut self, name: &str) {
+    // `pub(crate)`: `project::copy_layers_between` runs one whole copy as a
+    // single undoable edit, exactly as `ProjectWorkspace.copyLayer` does.
+    pub(crate) fn begin_edit(&mut self, name: &str) {
         self.history.begin(name, &self.document, self.active_layer_id);
     }
 
-    fn end_edit(&mut self) {
+    pub(crate) fn end_edit(&mut self) {
         self.history.end(&self.document, self.active_layer_id);
     }
 
@@ -634,6 +642,50 @@ impl EditorSession {
 
     pub fn mark_saved(&mut self) {
         self.history.mark_saved();
+    }
+
+    // MARK: Projects
+
+    /// `EditorSession.installProject(_:from:)`
+    /// (Document/EditorSession+Projects.swift:20-40). Called only after the
+    /// whole package has validated and loaded; replaces the document and all
+    /// project state in one go. The live session is untouched on error.
+    pub fn install_project(
+        &mut self,
+        data: &crate::project::ProjectData,
+        url: &std::path::Path,
+    ) -> Result<(), crate::project::ProjectError> {
+        // `document_from_project` revalidates, so a hand-built `ProjectData`
+        // cannot smuggle in damaged metadata.
+        let (document, active_layer_id) = crate::project::document_from_project(data)?;
+        self.collapsed_group_ids.clear();
+        self.is_mask_selected = false;
+        self.cancel_crop();
+        self.guide_drag = None;
+        self.transform_edit = None;
+        self.active_layer_id = active_layer_id;
+        self.selected_layer_ids =
+            active_layer_id.map(|id| vec![id]).unwrap_or_default();
+        self.document = Some(document);
+        self.project_url = Some(url.to_path_buf());
+        self.history.reset();
+        Ok(())
+    }
+
+    /// `EditorSession.clearProject` (Document/EditorSession+Projects.swift:42-53):
+    /// File > New / close without a workspace. Everything the open project
+    /// owned is dropped and the session is left as a fresh, empty canvas.
+    pub fn clear_project(&mut self) {
+        self.collapsed_group_ids.clear();
+        self.is_mask_selected = false;
+        self.cancel_crop();
+        self.transform_edit = None;
+        self.guide_drag = None;
+        self.document = None;
+        self.active_layer_id = None;
+        self.selected_layer_ids = Vec::new();
+        self.project_url = None;
+        self.history.reset();
     }
 
     // MARK: Layers
@@ -8447,5 +8499,82 @@ mod tests {
         assert!(s.preview_adjustment_editing(true));
         assert_eq!(adjustment_of(&s, id), original);
         assert!(s.finish_adjustment_editing(true));
+    }
+}
+
+/// Tests for `installProject` / `clearProject`
+/// (Document/EditorSession+Projects.swift:20-53).
+#[cfg(test)]
+mod project_install_tests {
+    use super::*;
+    use crate::raster::{Bitmap, ImportedImage};
+
+    fn loaded_session() -> (EditorSession, Uuid, crate::project::ProjectData) {
+        let mut session = EditorSession::new();
+        session.create_document(64, 64, false);
+        session.insert_image(
+            ImportedImage::new(Bitmap::new_clearing(16, 16, [255, 0, 0, 255]), "a"),
+            None,
+        );
+        let active = session.active_layer_id.unwrap();
+        let mut data =
+            crate::project::project_from_document(session.document.as_ref().unwrap());
+        data.manifest.active_layer_id = Some(active);
+        (session, active, data)
+    }
+
+    /// `installProject`: the loaded package replaces everything, the active
+    /// layer is the manifest's, the URL is recorded, and the session comes out
+    /// unmodified with an empty undo stack.
+    #[test]
+    fn install_project_replaces_state_and_marks_unmodified() {
+        let (_source, active, data) = loaded_session();
+
+        // A live session with history and a pending transform dies entirely.
+        let mut target = EditorSession::new();
+        target.create_document(10, 10, true);
+        target.add_blank_layer();
+        assert!(target.is_modified());
+        let url = std::path::Path::new("Z:/tmp/Sample.comp");
+        target.install_project(&data, url).unwrap();
+
+        let document = target.document.as_ref().unwrap();
+        assert_eq!(document.width, 64);
+        assert_eq!(document.layers.len(), 1);
+        assert_eq!(target.active_layer_id, Some(active));
+        assert_eq!(target.selected_layer_ids, vec![active]);
+        assert_eq!(target.project_url.as_deref(), Some(url));
+        assert!(!target.is_modified());
+        // `history.reset()`: open starts from a clean undo stack.
+        assert_eq!(target.history.undo_count(), 0);
+        assert!(!target.can_undo());
+        assert!(!target.can_redo());
+
+        // A damaged package leaves the live session untouched.
+        let mut broken = data.clone();
+        broken.manifest.width = 0;
+        let before = target.document.clone();
+        assert!(target.install_project(&broken, url).is_err());
+        assert!(target.document == before);
+        assert_eq!(target.project_url.as_deref(), Some(url));
+    }
+
+    /// `clearProject`: document, selection, URL and history all drop.
+    #[test]
+    fn clear_project_leaves_an_empty_unmodified_session() {
+        let (_source, _active, data) = loaded_session();
+        let mut target = EditorSession::new();
+        target
+            .install_project(&data, std::path::Path::new("Z:/tmp/Sample.comp"))
+            .unwrap();
+        assert!(!target.is_modified());
+
+        target.clear_project();
+        assert!(target.document.is_none());
+        assert_eq!(target.active_layer_id, None);
+        assert!(target.selected_layer_ids.is_empty());
+        assert_eq!(target.project_url, None);
+        assert!(!target.is_modified());
+        assert_eq!(target.history.undo_count(), 0);
     }
 }

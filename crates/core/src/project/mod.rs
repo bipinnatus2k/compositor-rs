@@ -16,10 +16,13 @@
 //!   coordinated atomic save
 //! - `convert` — `EditorSession+Projects`: snapshots and installation
 //!   (`ProjectData` <-> `CanvasDocument`)
+//! - `workspace` — `ProjectWorkspace.copyLayer`'s model half
+//!   (`copy_layers_between`)
 
 mod convert;
 pub mod manifest;
 mod store;
+mod workspace;
 
 use std::collections::HashMap;
 
@@ -28,6 +31,7 @@ use uuid::Uuid;
 use crate::raster::{Bitmap, GrayMask};
 
 pub use convert::{document_from_project, project_from_document};
+pub use workspace::copy_layers_between;
 pub use manifest::{
     image_file_name, mask_file_name, ManifestEffects, ManifestGuide, ManifestShape,
     ManifestTextStyle, ManifestTransform, ProjectLayerRecord, ProjectManifest, CURRENT_VERSION,
