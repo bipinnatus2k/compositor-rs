@@ -26,6 +26,8 @@ use compositor_core::session::EditorSession;
 use compositor_core::transform::LayerTransform;
 use compositor_core::tools::brush::RasterEdit;
 
+use crate::inline_text::inline_text_key;
+
 pub const RULER_SIZE: f32 = 20.0;
 pub const MIN_ZOOM: f64 = 0.008;
 pub const MAX_ZOOM: f64 = 32.0;
@@ -80,6 +82,9 @@ pub enum CanvasDrag {
     /// Plain drag moving the selection outline only; the origin lives in the
     /// session's `selection_move_origin`.
     SelectionMove { start: CGPoint },
+    /// The Type tool dragging a paragraph box out (`textBoxRect`); the rect
+    /// lives app-side in `text_box_rect`.
+    TextBox { start: CGPoint },
 }
 
 /// Which modal sheet is open. The floating panels that replaced the tool
@@ -267,6 +272,26 @@ pub fn parse_field(text: &str) -> Option<f64> {
     text.trim().parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
+/// What each inspector field shows for a transform (`TransformValueField`'s
+/// `sync`), as pure data: the Move drag writes these into the field
+/// entities so they follow the handles live.
+pub fn transform_field_texts(
+    value: LayerTransform,
+    pixel_size: CGSize,
+) -> Vec<(TransformField, String)> {
+    vec![
+        (TransformField::X, format_number(value.origin.x)),
+        (TransformField::Y, format_number(value.origin.y)),
+        (TransformField::Width, format_number(value.size.width)),
+        (TransformField::Height, format_number(value.size.height)),
+        (
+            TransformField::Scale,
+            format_number(value.scale_percent(pixel_size)),
+        ),
+        (TransformField::Rotation, format_number(value.rotation)),
+    ]
+}
+
 /// Everything the window shows, owned as a single GPUI entity. The document
 /// lives in the workspace's tabs (`workspace.current_mut().session`):
 /// every tab carries its own session, controller and busy snapshot, exactly
@@ -349,6 +374,17 @@ pub struct AppState {
     pub transform_h_input: Entity<InputState>,
     pub transform_scale_input: Entity<InputState>,
     pub transform_rotation_input: Entity<InputState>,
+    /// The inline canvas text editor (`InlineTextEditor.swift`): one
+    /// persistent multi-line input, shown as an overlay while a text draft
+    /// is open (see `inline_text`).
+    pub inline_text_input: Entity<gpui_kit::component::input::TextareaState>,
+    /// Whether the inline editor is bound to the current draft.
+    pub inline_text_open: bool,
+    /// The last text pushed into the inline input; keeps the two-way
+    /// binding from echoing the user's own keystrokes back.
+    pub inline_text_pushed: Option<String>,
+    /// The Type tool's in-progress box drag (`textBoxRect`).
+    pub text_box_rect: Option<CGRect>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
     key_epoch: std::time::Instant,
     /// A save panel raised mid-flow (a confirmation's Save button): the tab
@@ -412,6 +448,9 @@ impl AppState {
         let transform_h_input = number_input(0.0, window, cx);
         let transform_scale_input = number_input(100.0, window, cx);
         let transform_rotation_input = number_input(0.0, window, cx);
+        let inline_text_input = cx.new(|cx| {
+            gpui_kit::component::input::TextareaState::new(window, cx).default_value("")
+        });
 
         let brush_sliders = [
             cx.new(|_| slider(1.0, 300.0, 1.0, brush.diameter as f32)),
@@ -473,6 +512,10 @@ impl AppState {
             transform_h_input,
             transform_scale_input,
             transform_rotation_input,
+            inline_text_input,
+            inline_text_open: false,
+            inline_text_pushed: None,
+            text_box_rect: None,
             key_epoch: std::time::Instant::now(),
             pending_save: None,
         };
@@ -607,12 +650,34 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.canvas_keys_active(window, cx) {
-            return;
-        }
         let key = event.keystroke.key.as_str();
         let modifiers = &event.keystroke.modifiers;
         let bare = !(modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift);
+        // While the inline canvas text editor owns the keyboard, its keys
+        // route first (`CanvasTextView.keyDown`): ⌘Return finishes, Escape
+        // cancels, Option-arrows step the spacing, everything else types.
+        if self.inline_text_focused(window, cx) {
+            use crate::inline_text::InlineTextKey;
+            if let Some(action) = inline_text_key(
+                key,
+                modifiers.control,
+                modifiers.alt,
+                modifiers.platform,
+                modifiers.shift,
+            ) {
+                match action {
+                    InlineTextKey::Finish => self.commit_inline_text(cx),
+                    InlineTextKey::Cancel => self.cancel_inline_text(cx),
+                    InlineTextKey::Tracking(delta) => self.adjust_text_tracking(delta, cx),
+                    InlineTextKey::Leading(down, step) => self.adjust_text_leading(down, step, cx),
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if !self.canvas_keys_active(window, cx) {
+            return;
+        }
         // ⌘Return finishes the text draft (⌘ maps to Ctrl on Windows).
         if modifiers.control && !modifiers.alt && key == "enter" {
             self.finish_text_edit(cx);
@@ -1069,18 +1134,15 @@ impl AppState {
             return;
         };
         let pixel_size = self.transform_pixel_size();
-        let fields = [
-            (&self.transform_x_input, format_number(value.origin.x)),
-            (&self.transform_y_input, format_number(value.origin.y)),
-            (&self.transform_w_input, format_number(value.size.width)),
-            (&self.transform_h_input, format_number(value.size.height)),
-            (
-                &self.transform_scale_input,
-                format_number(value.scale_percent(pixel_size)),
-            ),
-            (&self.transform_rotation_input, format_number(value.rotation)),
-        ];
-        for (input, text) in fields {
+        for (field, text) in transform_field_texts(value, pixel_size) {
+            let input = match field {
+                TransformField::X => &self.transform_x_input,
+                TransformField::Y => &self.transform_y_input,
+                TransformField::Width => &self.transform_w_input,
+                TransformField::Height => &self.transform_h_input,
+                TransformField::Scale => &self.transform_scale_input,
+                TransformField::Rotation => &self.transform_rotation_input,
+            };
             let focused = input.read(cx).focus_handle(cx).is_focused(window);
             if !focused && input.read(cx).value() != text {
                 input.update(cx, |state, cx| state.set_value(text, window, cx));
@@ -1112,6 +1174,19 @@ impl AppState {
             );
             self.subscriptions.push(subscription);
         }
+        // The inline canvas text editor's two-way binding: typing writes
+        // into the draft (`textDidChange`).
+        let inline = self.inline_text_input.clone();
+        let subscription = cx.subscribe(
+            &inline,
+            move |state: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
+                if let InputEvent::Change = event {
+                    let text = state.inline_text_input.read(cx).value().to_string();
+                    state.inline_text_changed(&text, cx);
+                }
+            },
+        );
+        self.subscriptions.push(subscription);
         let transform_fields = [
             (self.transform_x_input.clone(), TransformField::X),
             (self.transform_y_input.clone(), TransformField::Y),
@@ -1696,7 +1771,7 @@ mod tests {
     use super::{
         byte_count_label, clamp_font_size, clamp_zoom, doc_to_screen_at, format_number,
         leading_from_text, leading_to_text, normalize_rotation, parse_field, resize_transform,
-        screen_to_doc_at, TransformField, MAX_ZOOM, MIN_ZOOM,
+        screen_to_doc_at, transform_field_texts, TransformField, MAX_ZOOM, MIN_ZOOM,
     };
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::LayerTransform;
@@ -1820,6 +1895,38 @@ mod tests {
         // The subscription roles must not collapse when copied.
         assert!(TransformField::X != TransformField::Y);
         assert!(TransformField::Width != TransformField::Height);
+    }
+
+    #[test]
+    fn dragged_transform_reaches_the_inspector_fields_verbatim() {
+        // The Move drag previews start + delta; the fields must show the
+        // previewed draft, not the drag's start.
+        let start = LayerTransform::new(CGPoint::new(40.0, 20.0), CGSize::new(100.0, 50.0));
+        let mut dragged = start;
+        dragged.origin.x += 12.5;
+        dragged.origin.y -= 7.0;
+        let pixel_size = CGSize::new(100.0, 50.0);
+        let fields = transform_field_texts(dragged, pixel_size);
+        let text_of = |field: TransformField| {
+            fields
+                .iter()
+                .find(|(f, _)| *f == field)
+                .map(|(_, text)| text.clone())
+                .unwrap()
+        };
+        assert_eq!(text_of(TransformField::X), "52.50");
+        assert_eq!(text_of(TransformField::Y), "13");
+        assert_eq!(text_of(TransformField::Width), "100");
+        assert_eq!(text_of(TransformField::Height), "50");
+        assert_eq!(text_of(TransformField::Scale), "100");
+        assert_eq!(text_of(TransformField::Rotation), "0");
+        // A resize through a handle moves the scale and the sizes together.
+        dragged.size.width *= 1.5;
+        dragged.size.height *= 1.5;
+        let fields = transform_field_texts(dragged, pixel_size);
+        assert_eq!(fields[2].1, "150");
+        assert_eq!(fields[3].1, "75");
+        assert_eq!(fields[4].1, "150");
     }
 }
 

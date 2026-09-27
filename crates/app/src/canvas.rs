@@ -45,6 +45,7 @@ pub struct CanvasScene {
     pub lasso: Option<Vec<Vec<(f32, f32)>>>,
     pub crop: Option<((f32, f32), (f32, f32))>,
     pub transform: Option<Vec<(f32, f32)>>,
+    pub text_box: Option<((f32, f32), (f32, f32))>,
 }
 
 impl AppState {
@@ -52,6 +53,11 @@ impl AppState {
         let composite = self.composite();
         let image = composite.as_ref().map(|composite| self.frame_image(composite));
         let scene = self.build_scene(image);
+        // The inline text editor rides on the canvas while a draft is open
+        // (InlineTextEditor.synchronize runs on every display sync in Swift;
+        // here the overlay re-renders with the scene, so zoom and pan keep
+        // it anchored).
+        let inline_overlay = self.render_inline_text_overlay();
         let app_move = cx.entity().downgrade();
         let app_up = cx.entity().downgrade();
         let app_prepaint = cx.entity().downgrade();
@@ -107,6 +113,7 @@ impl AppState {
                 .absolute()
                 .inset_0(),
             )
+            .children(inline_overlay)
             .into_any_element()
     }
 
@@ -118,6 +125,7 @@ impl AppState {
         let mut lasso = None;
         let mut crop = None;
         let mut transform = None;
+        let mut text_box = None;
 
         if let Some(document) = self.current_tab().session.document.as_ref() {
             // `displayedGuides`: a drag in progress replaces its own guide's
@@ -208,6 +216,13 @@ impl AppState {
                     );
                 }
             }
+            // The Type tool's box drag preview (`drawTextBoxDraft`).
+            if let Some(rect) = self.text_box_rect {
+                text_box = Some((
+                    self.doc_to_screen(rect.min_x(), rect.min_y()),
+                    self.doc_to_screen(rect.max_x(), rect.max_y()),
+                ));
+            }
         }
 
         CanvasScene {
@@ -223,6 +238,7 @@ impl AppState {
             lasso,
             crop,
             transform,
+            text_box,
         }
     }
 
@@ -231,7 +247,7 @@ impl AppState {
     pub fn canvas_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.sheet.is_some() {
@@ -379,7 +395,7 @@ impl AppState {
                 }
             }
             NavigationTool::Type => {
-                self.create_text_layer(doc, cx);
+                self.type_mouse_down(doc, window, cx);
             }
             NavigationTool::Shape => {
                 self.begin_shape(doc);
@@ -392,7 +408,7 @@ impl AppState {
     pub fn canvas_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.sheet.is_some() {
@@ -433,6 +449,11 @@ impl AppState {
                     self.workspace.current_mut().session.extend_lasso(doc);
                 }
             }
+            Some(CanvasDrag::TextBox { start }) => {
+                // The box draft follows the pointer (`dragTextGesture`).
+                let rect = compositor_core::selection::drag_box_rect(*start, doc, false, false);
+                self.text_box_rect = Some(rect);
+            }
             Some(CanvasDrag::MoveLayer { start_origin, start }) => {
                 let delta = CGPoint::new(doc.x - start.x, doc.y - start.y);
                 let mut value = *start_origin;
@@ -452,6 +473,9 @@ impl AppState {
                 let session = self.workspace.current_mut();
                 let value = session.session.snapped_move(value, &moving, 10.0);
                 session.session.preview_transform(value);
+                // The inspector's fields follow the drag live
+                // (TransformInspector's binding to editedTransform).
+                self.sync_transform_inputs(window, cx);
             }
             Some(CanvasDrag::PixelMove { start }) => {
                 self.workspace.current_mut().session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
@@ -480,7 +504,7 @@ impl AppState {
     pub fn canvas_mouse_up(
         &mut self,
         event: &MouseUpEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let drag = self.drag.take();
@@ -517,6 +541,7 @@ impl AppState {
                 }
                 CanvasDrag::MoveLayer { .. } => {
                     self.tab().session.commit_transform();
+                    self.sync_transform_inputs(window, cx);
                 }
                 CanvasDrag::Guide => {
                     // Releasing on a ruler cancels a new guide or deletes an
@@ -526,9 +551,16 @@ impl AppState {
                     self.tab().session.finish_guide_drag(delete);
                 }
                 CanvasDrag::Pan { .. } => {}
+                // The box lays its text after the match (`finishTextGesture`).
+                CanvasDrag::TextBox { .. } => {}
             }
             self.gradient_cursor = None;
             self.touch(cx);
+        }
+        // The Type tool's box drag decides here (`finishTextGesture`), even
+        // when the drag was empty: the release lays the text either way.
+        if self.drag.is_none() && self.text_box_rect.is_some() {
+            self.type_mouse_up(window, cx);
         }
     }
 
@@ -1050,23 +1082,52 @@ impl AppState {
 
     // MARK: Type
 
-    fn create_text_layer(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        // The session's beginText/applyText flow, with real-font typesetting
-        // (TypeTool.swift). Without a text input UI a click lays down the
-        // default sample content, editable through the same live-text path.
+    /// The Type tool's press (`beginTextGesture`): a press on a visible text
+    /// layer edits it inline; anywhere else the press anchors a text box
+    /// drag, and the release decides between point text and a paragraph box.
+    /// Any open draft commits first, so clicking away applies the text
+    /// (empty drafts are a quiet no-op, as in Swift).
+    fn type_mouse_down(&mut self, doc: CGPoint, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab().session.document.is_none() {
             return;
         }
-        self.tab().session.begin_text(doc, true);
-        let mut draft = match self.tab().session.text_draft.clone() {
-            Some(draft) => draft,
-            None => return,
-        };
-        if draft.style.content.is_empty() {
-            draft.style.content = self.tab().session.text_defaults.content.clone();
+        if !self.tab().session.finish_text() {
+            self.touch(cx);
+            return;
         }
-        self.tab().session.apply_text(draft);
-        self.set_status(format!("Text layer at {:.0}, {:.0}", doc.x, doc.y), cx);
+        self.sync_inline_text(window, cx);
+        let document = self.tab().session.document.clone().unwrap();
+        let visible = document.effective_visible_ids();
+        if let Some(layer) = document
+            .layers
+            .iter()
+            .rev()
+            .find(|l| visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(doc))
+        {
+            let id = layer.id;
+            self.tab().session.select_layer(Some(id));
+            self.tab().session.edit_active_text();
+            self.sync_inline_text(window, cx);
+            self.touch(cx);
+            return;
+        }
+        self.text_box_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
+        self.set_drag(Some(CanvasDrag::TextBox { start: doc }));
+    }
+
+    /// The Type tool's release (`finishTextGesture`): a click without a drag
+    /// lays point text at the click; a drag sets the paragraph bounds.
+    fn type_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rect) = self.text_box_rect.take() else {
+            return;
+        };
+        if rect.width() < 4.0 && rect.height() < 4.0 {
+            self.tab().session.begin_text(rect.origin, true);
+        } else {
+            self.tab().session.begin_text_in(rect);
+        }
+        self.sync_inline_text(window, cx);
+        self.touch(cx);
     }
 
     // MARK: Keys
@@ -1128,6 +1189,11 @@ impl AppState {
             return;
         }
         if self.tab().session.lasso_draft.take().is_some() {
+            self.touch(cx);
+            return;
+        }
+        // The Type tool's box drag preview dies with the gesture.
+        if self.text_box_rect.take().is_some() {
             self.touch(cx);
             return;
         }
@@ -1418,6 +1484,15 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         }
     }
 
+    // The Type tool's box draft: a thin accent outline (`drawTextBoxDraft`).
+    if let Some(((x0, y0), (x1, y1))) = scene.text_box {
+        let rect = Bounds::<Pixels>::new(
+            point(px(x0), px(y0)),
+            size(px((x1 - x0).max(1.0)), px((y1 - y0).max(1.0))),
+        );
+        paint_rect_outline(window, rect, rgba(0x4da6ffdd));
+    }
+
     // Rulers on top.
     if scene.rulers {
         paint_rulers(window, bounds, &scene);
@@ -1466,6 +1541,9 @@ impl CanvasScene {
             .transform
             .as_ref()
             .map(|corners| shift(corners));
+        out.text_box = self
+            .text_box
+            .map(|((x0, y0), (x1, y1))| ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)));
         out
     }
 }

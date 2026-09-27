@@ -758,6 +758,7 @@ impl AppState {
                             .disabled(!has_document)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.tab().session.cancel_text();
+                                this.sync_inline_text(window, cx);
                                 this.sync_text_style_inputs(window, cx);
                                 this.touch(cx);
                             })),
@@ -770,6 +771,7 @@ impl AppState {
                             .disabled(!has_document)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.tab().session.finish_text();
+                                this.sync_inline_text(window, cx);
                                 this.sync_text_style_inputs(window, cx);
                                 this.touch(cx);
                             })),
@@ -780,11 +782,12 @@ impl AppState {
                         .label("Edit Text")
                         .small()
                         .disabled(!has_document || !active_is_text)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.tab().session.edit_active_text();
-                            this.sync_text_style_inputs(window, cx);
-                            this.touch(cx);
-                        })),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.tab().session.edit_active_text();
+                                this.sync_inline_text(window, cx);
+                                this.sync_text_style_inputs(window, cx);
+                                this.touch(cx);
+                            })),
                 );
             }
         }
