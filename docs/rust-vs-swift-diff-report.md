@@ -44,7 +44,8 @@
 - 质量持久化：ToolDefaults 新增数值段（serde 向后兼容），`jpegExportQuality` 读写对齐 Swift UserDefaults。
 - Return（canvas.apply）现也提交挂起的变换（TransformInspector Apply）。
 
-**仍缺（本批次后续 Wave）**：tabs.rs/project.rs 模型层（Wave 2 进行中）→ AppState 重组（386 处 self.session，Wave 3）→ TabBar 行 + 菜单改投 + 面板迁移（Levels 样板 → 其余 → Camera Raw Docked，Wave 4）；InlineTextEditor；TransformInspector 把手实时跟随；select_subject 的 Vision 替代源；快捷键改键即时生效。
+**仍缺（本批次后续 Wave）**：~~tabs.rs/project.rs 模型层~~ ✅ 已落地（Wave 2：ProjectController 两阶段状态机 + ProjectWorkspace 全方法，23 测试）→ AppState 重组（386 处 self.session，Wave 3 进行中）→ TabBar 行 + 菜单改投 + 面板迁移（Levels 样板 → 其余 → Camera Raw Docked，Wave 4）；InlineTextEditor；TransformInspector 把手实时跟随；快捷键改键即时生效。
+- **平台能力缺口（明确结论，不做替代品）**：`select_subject`（Select Subject）与 `subject_removal::run`（Remove Background 底层，现为 stub）都依赖 Vision 前景分割——Swift 无点击点、全画布自动找前景，无合理 1:1 替代源（点击式 Object Selection 是不同功能且已移植）。Filter 菜单的 Remove Background 入口在底层就绪前保持现状；报告记录为平台差异。
 
 ---
 
