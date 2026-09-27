@@ -5723,11 +5723,17 @@ fn release_detached_clipping(layers: &mut Vec<ImageLayer>) {
 /// `ImageImporter.decode`: an image file into a premultiplied canvas bitmap
 /// plus its thumbnail.
 fn decode_image(path: &std::path::Path) -> Option<(Bitmap, Bitmap)> {
-    let image = image::open(path).ok()?;
-    let rgba = image.to_rgba8();
-    let (width, height) = (rgba.width() as usize, rgba.height() as usize);
-    let mut bitmap = Bitmap::new(width, height);
-    bitmap.data = rgba.into_raw();
+    // Camera RAW develops first (RawImporter): the CIRAWFilter output is
+    // opaque 8-bit sRGB, so the premultiply below is a no-op.
+    let mut bitmap = if crate::raw::is_raw(path) {
+        crate::raw::decode_raw(path)?
+    } else {
+        let rgba = image::open(path).ok()?.to_rgba8();
+        let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+        let mut bitmap = Bitmap::new(width, height);
+        bitmap.data = rgba.into_raw();
+        bitmap
+    };
     for pixel in bitmap.data.chunks_exact_mut(4) {
         let alpha = pixel[3] as u32;
         for channel in 0..3 {

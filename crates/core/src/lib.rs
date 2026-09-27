@@ -35,6 +35,7 @@ pub mod export;
 pub mod filters;
 pub mod project;
 pub mod psd;
+pub mod raw;
 pub mod render;
 pub mod session;
 pub mod tools;
