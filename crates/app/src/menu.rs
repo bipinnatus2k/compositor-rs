@@ -180,8 +180,6 @@ pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
                 .separator()
                 .menu("Lens Correction…", Box::new(keys::FilterLensCorrection))
                 .menu("Camera Raw Filter…", Box::new(keys::FilterCameraRaw))
-                .separator()
-                .menu("Remove Background…", Box::new(keys::RemoveBackground))
         }))
         .child(menu_button("menu-view", "View", move |menu, _, _| {
             menu.menu("Fit Canvas", Box::new(keys::ZoomFit))

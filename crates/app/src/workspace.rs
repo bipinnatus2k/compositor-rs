@@ -132,7 +132,6 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_filter_noise))
             .on_action(cx.listener(Self::on_filter_lens))
             .on_action(cx.listener(Self::on_filter_camera_raw))
-            .on_action(cx.listener(Self::on_remove_background))
             // View
             .on_action(cx.listener(Self::on_toggle_rulers))
             .on_action(cx.listener(Self::on_toggle_grid))
@@ -1115,40 +1114,6 @@ impl AppState {
                 .load_mask_selection(id, compositor_core::selection::SelectionMode::Replace);
             self.touch(cx);
         }
-    }
-    fn on_remove_background(&mut self, _: &keys::RemoveBackground, _w: &mut Window, cx: &mut Context<Self>) {
-        // Runs on the layer directly: no dialog, one undo (FilterKind menu).
-        let Some(base) = self
-            .tab().session
-            .active_layer()
-            .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()))
-        else {
-            return;
-        };
-        let job = compositor_core::filters::FilterJob {
-            kind: FilterKind::RemoveBackground,
-            image: &base,
-            settings: compositor_core::filters::FilterSettings::default(),
-            scale: 1.0,
-            selection: self.selection_clip(),
-            mapping: compositor_core::geometry::CGAffineTransform::IDENTITY,
-            seed: 7,
-            noise_origin: compositor_core::geometry::CGPoint::ZERO,
-            camera_raw_clipping: None,
-            visualize_point_color: -1,
-            sharpen_mask: false,
-        };
-        let result = compositor_core::filters::run_filter(&job);
-        self.history_edit("Remove Background", move |session| {
-            if let Some(id) = session.active_layer_id {
-                if let Some(doc) = session.document.as_mut() {
-                    if let Some(layer) = doc.layer_mut(id) {
-                        layer.asset = Some(compositor_core::raster::ImportedImage::new(result, layer.name.clone()));
-                    }
-                }
-            }
-        });
-        self.touch(cx);
     }
     fn on_clear_guides(&mut self, _: &keys::ClearGuides, _w: &mut Window, cx: &mut Context<Self>) {
         self.tab().session.clear_guides();

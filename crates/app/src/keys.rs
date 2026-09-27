@@ -36,7 +36,7 @@ actions!(compositor, [
     LoadLayerSelection, LoadMaskSelection,
     // Image adjustments that run through the filter sheet
     FilterBlackWhite, FilterColorBalance, FilterExposure, FilterGradientMap, FilterGrain,
-    RemoveBackground, ClearGuides,
+    ClearGuides,
     // New Adjustment Layer submenu (AdjustmentKind)
     AddAdjustmentHsv, AddAdjustmentLevels, AddAdjustmentCurves, AddAdjustmentExposure,
     AddAdjustmentGradientMap, AddAdjustmentGrain, AddAdjustmentAddNoise, AddAdjustmentGaussianBlur,
