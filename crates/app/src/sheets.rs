@@ -66,7 +66,10 @@ impl AppState {
         cx.new(|cx| InputState::new(window, cx).default_value(default))
     }
 
-    fn make_slider(
+    /// Creates a panel slider with the given range and initial value. The
+    /// subscription funnels every change into `apply_slider` with the role,
+    /// so the write-back does not care which panel the slider lives in.
+    pub(crate) fn make_slider(
         &mut self,
         min: f32,
         max: f32,
@@ -91,6 +94,9 @@ impl AppState {
         state
     }
 
+    /// Builds the modal sheet's widget bundle. The tool dialogs that became
+    /// floating panels (`panels_ui`) no longer build sheets here; what
+    /// remains are the modal dialogs of the two-phase flows.
     fn build_sheet(
         &mut self,
         kind: SheetKind,
@@ -103,7 +109,6 @@ impl AppState {
         };
         let base = SheetState {
             kind,
-            name: self.make_input("Untitled", window, cx),
             width: self.make_input(&doc_w.to_string(), window, cx),
             height: self.make_input(&doc_h.to_string(), window, cx),
             path: self.make_input("export.png", window, cx),
@@ -113,17 +118,10 @@ impl AppState {
             link: true,
             relative: false,
             anchor: 4,
-            background: 0,
             preset: 0,
-            channel: 0,
             sliders: Vec::new(),
-            checkbox_a: false,
-            checkbox_b: false,
-            colorize: false,
             based_on: 0,
             sides: [true, true, true, true],
-            histogram: [0.0; 1024],
-            levels: LevelsSettings::default(),
             jpeg_preview: None,
             jpeg_ready: None,
             jpeg_data: None,
@@ -132,12 +130,6 @@ impl AppState {
             confirm_step: None,
         };
         match kind {
-            SheetKind::NewCanvas => SheetState {
-                width: self.make_input("1920", window, cx),
-                height: self.make_input("1080", window, cx),
-                name: self.make_input("Untitled", window, cx),
-                ..base
-            },
             SheetKind::ImageSize => {
                 let resolution = self
                     .current_tab()
@@ -154,167 +146,6 @@ impl AppState {
                 }
             }
             SheetKind::CanvasSize => base,
-            SheetKind::Levels => {
-                self.begin_preview();
-                let mut sheet = SheetState { ..base };
-                // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
-                sheet.checkbox_a = true;
-                sheet.sliders = vec![
-                    self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
-                    self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
-                    self.make_slider(1.0, 255.0, 255.0, SliderRole::LevelsWhite, cx),
-                    self.make_slider(0.0, 255.0, 0.0, SliderRole::LevelsOutBlack, cx),
-                    self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
-                ];
-                if let Some(pixels) = self.preview_base.clone() {
-                    // With a selection, bins are weighted by the selection's
-                    // coverage on the layer's pixel grid (LevelsFilter.histogram,
-                    // Levels.swift:90-96).
-                    let coverage = histogram_coverage(
-                        self.preview_base_transform,
-                        self.tab().session.selection().cloned(),
-                        pixels.width,
-                        pixels.height,
-                    );
-                    compositor_core::adjust::levels_histogram(
-                        pixels.as_ref(),
-                        coverage.as_ref(),
-                        &mut sheet.histogram,
-                    );
-                }
-                sheet
-            }
-            SheetKind::HueSaturation => {
-                self.begin_preview();
-                let mut sheet = SheetState { ..base };
-                sheet.sliders = vec![
-                    self.make_slider(-180.0, 180.0, 0.0, SliderRole::Hue, cx),
-                    self.make_slider(-100.0, 100.0, 0.0, SliderRole::Saturation, cx),
-                    self.make_slider(-100.0, 100.0, 0.0, SliderRole::Lightness, cx),
-                ];
-                sheet
-            }
-            SheetKind::Effects => {
-                // No preview capture: every slider change is committed to the
-                // layer's effects right away (one undo step per change, as
-                // Swift's changeEffects does), and the canvas renders effects
-                // through core render.
-                let editing = self.tab().session.editing_effects();
-                let kind = self
-                    .tab().session
-                    .effects_editing
-                    .map(|editing| editing.kind)
-                    .unwrap_or(LayerEffectKind::Stroke);
-                let mut sheet = SheetState { ..base };
-                // `channel` stores which LayerEffectKind this sheet edits (an
-                // index into `LayerEffectKind::ALL`); Levels only reads the
-                // field while a Levels sheet is open, so it is free here.
-                sheet.channel = LayerEffectKind::ALL
-                    .iter()
-                    .position(|candidate| *candidate == kind)
-                    .unwrap_or(0);
-                // Stroke's Outside/Inside position rides in `checkbox_a`.
-                sheet.checkbox_a = editing.stroke.map(|stroke| stroke.inside).unwrap_or(false);
-                // Slider thumb ranges are the EffectsSheet's visible ranges.
-                // Swift's wider typed-input ranges (`inputRange`) have no
-                // text field in this UI, and the core `isValid` guard still
-                // bounds every stored value.
-                let mut slider = |min: f64, max: f64, value: f64, index: usize| {
-                    self.make_slider(min as f32, max as f32, value as f32, SliderRole::Effect(index), cx)
-                };
-                sheet.sliders = match kind {
-                    LayerEffectKind::Stroke => vec![
-                        slider(0.0, 20.0, editing.stroke.map(|s| s.size).unwrap_or(4.0), 0),
-                        slider(0.0, 100.0, editing.stroke.map(|s| s.opacity * 100.0).unwrap_or(100.0), 1),
-                    ],
-                    LayerEffectKind::Shadow => vec![
-                        slider(0.0, 100.0, editing.shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
-                        slider(-180.0, 180.0, editing.shadow.map(|s| s.angle).unwrap_or(90.0), 1),
-                        slider(0.0, 100.0, editing.shadow.map(|s| s.distance).unwrap_or(20.0), 2),
-                        slider(0.0, 100.0, editing.shadow.map(|s| s.blur).unwrap_or(20.0), 3),
-                    ],
-                    LayerEffectKind::ColorOverlay => vec![slider(
-                        0.0,
-                        100.0,
-                        editing.color_overlay.map(|s| s.opacity * 100.0).unwrap_or(100.0),
-                        0,
-                    )],
-                    LayerEffectKind::InnerShadow => vec![
-                        slider(0.0, 100.0, editing.inner_shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
-                        slider(-180.0, 180.0, editing.inner_shadow.map(|s| s.angle).unwrap_or(90.0), 1),
-                        slider(0.0, 50.0, editing.inner_shadow.map(|s| s.distance).unwrap_or(10.0), 2),
-                        slider(0.0, 100.0, editing.inner_shadow.map(|s| s.blur).unwrap_or(10.0), 3),
-                    ],
-                    LayerEffectKind::OuterGlow => vec![
-                        slider(0.0, 100.0, editing.outer_glow.map(|s| s.size).unwrap_or(20.0), 0),
-                        slider(0.0, 100.0, editing.outer_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
-                    ],
-                    LayerEffectKind::InnerGlow => vec![
-                        slider(0.0, 100.0, editing.inner_glow.map(|s| s.size).unwrap_or(10.0), 0),
-                        slider(0.0, 100.0, editing.inner_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
-                    ],
-                };
-                sheet
-            }
-            SheetKind::Filter(filter) => {
-                self.begin_preview();
-                let mut sheet = SheetState { ..base };
-                let defaults = FilterSettings::default();
-                match filter {
-                    FilterKind::GaussianBlur => {
-                        sheet.sliders = vec![self.make_slider(
-                            0.1, 250.0, defaults.radius as f32, SliderRole::Radius, cx,
-                        )];
-                    }
-                    FilterKind::MotionBlur => {
-                        sheet.sliders = vec![
-                            self.make_slider(-90.0, 90.0, defaults.angle as f32, SliderRole::Angle, cx),
-                            self.make_slider(1.0, 2000.0, defaults.distance as f32, SliderRole::Distance, cx),
-                        ];
-                    }
-                    FilterKind::AddNoise => {
-                        sheet.sliders = vec![self.make_slider(
-                            0.1, 400.0, defaults.amount as f32, SliderRole::Amount, cx,
-                        )];
-                    }
-                    FilterKind::LensCorrection => {
-                        sheet.sliders = vec![self.make_slider(
-                            -100.0, 100.0, 0.0, SliderRole::Distortion, cx,
-                        )];
-                    }
-                    FilterKind::CameraRaw => {
-                        let group: [(f64, f64, f64); 14] = [
-                            (-100.0, 100.0, 0.0), // Temperature
-                            (-100.0, 100.0, 0.0), // Tint
-                            (-5.0, 5.0, 0.0),     // Exposure
-                            (-100.0, 100.0, 0.0), // Contrast
-                            (-100.0, 100.0, 0.0), // Highlights
-                            (-100.0, 100.0, 0.0), // Shadows
-                            (-100.0, 100.0, 0.0), // Whites
-                            (-100.0, 100.0, 0.0), // Blacks
-                            (-100.0, 100.0, 0.0), // Vibrance
-                            (-100.0, 100.0, 0.0), // Saturation
-                            (-100.0, 100.0, 0.0), // Texture
-                            (-100.0, 100.0, 0.0), // Clarity
-                            (-100.0, 100.0, 0.0), // Dehaze
-                            (-100.0, 100.0, 0.0), // Vignette Amount
-                        ];
-                        sheet.sliders = group
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (min, max, value))| {
-                                self.make_slider(*min as f32, *max as f32, *value as f32, SliderRole::CameraRaw(i), cx)
-                            })
-                            .collect();
-                    }
-                    _ => {}
-                }
-                sheet
-            }
-            SheetKind::Amount(_) => SheetState {
-                tolerance: self.make_input("2", window, cx),
-                ..base
-            },
             SheetKind::ExportPng => SheetState {
                 path: self.make_input("export.png", window, cx),
                 ..base
@@ -346,12 +177,12 @@ impl AppState {
                 path: self.make_input("./image.png", window, cx),
                 ..base
             },
-            SheetKind::Trim | SheetKind::About | SheetKind::Shortcuts | SheetKind::Confirm | SheetKind::Alert => base,
+            SheetKind::Trim | SheetKind::About | SheetKind::Confirm | SheetKind::Alert => base,
         }
     }
 
-    /// Captures the active layer's pixels so adjustment sheets can preview.
-    fn begin_preview(&mut self) {
+    /// Captures the active layer's pixels so adjustment panels can preview.
+    pub(crate) fn begin_preview(&mut self) {
         self.preview_base = self
             .tab().session
             .active_layer()
@@ -370,9 +201,23 @@ impl AppState {
             .unwrap_or(0.0)
     }
 
-    /// Writes a sheet slider back to its setting and refreshes the preview.
+    /// Reads one of a panel bundle's slider values.
+    pub(crate) fn panel_value(
+        sliders: &[Entity<SliderState>],
+        cx: &gpui_kit::App,
+        index: usize,
+    ) -> f32 {
+        sliders
+            .get(index)
+            // Single-value sliders keep the live value in `end`; `start` is always 0.
+            .map(|slider| slider.read(cx).value().end())
+            .unwrap_or(0.0)
+    }
+
+    /// Writes a slider back to its setting and refreshes the preview. Panel
+    /// sliders (`panels_ui`) route by role to their panel's widget bundle;
+    /// the JPEG quality slider is the one modal sheet slider left.
     pub fn apply_slider(&mut self, role: SliderRole, _value: f32, cx: &mut Context<Self>) {
-        let Some(sheet) = self.sheet.as_ref() else { return };
         match role {
             SliderRole::JpegQuality => {
                 self.refresh_jpeg_preview(cx);
@@ -382,17 +227,20 @@ impl AppState {
             | SliderRole::LevelsWhite
             | SliderRole::LevelsOutBlack
             | SliderRole::LevelsOutWhite => {
-                let preview = sheet.checkbox_a;
+                let Some(panel) = self.panel_widgets.levels.as_ref() else {
+                    return;
+                };
+                let preview = panel.preview;
                 // Editing an adjustment layer: sliders feed the session's
                 // Levels editor, which previews through the live composite.
                 if self.tab().session.adjustment_editing_id.is_some() {
-                    self.tab().session.levels = Some(self.levels_settings_from_sheet(cx));
+                    self.tab().session.levels = Some(self.levels_settings_from_panel(cx));
                     self.tab().session.preview_adjustment_editing(preview);
                     return;
                 }
                 if let Some(base) = self.preview_base.clone() {
                     if preview {
-                        let settings = self.levels_settings_from_sheet(cx);
+                        let settings = self.levels_settings_from_panel(cx);
                         let mut adjusted = base.as_ref().clone();
                         levels_apply_settings(&mut adjusted, &settings);
                         adjusted = self.blend_adjusted(adjusted);
@@ -403,10 +251,13 @@ impl AppState {
                 }
             }
             SliderRole::Hue | SliderRole::Saturation | SliderRole::Lightness => {
-                let colorize = sheet.colorize;
-                let hue = self.sheet_value(cx, 0) as f64;
-                let saturation = self.sheet_value(cx, 1) as f64;
-                let lightness = self.sheet_value(cx, 2) as f64;
+                let Some(panel) = self.panel_widgets.hue_saturation.as_ref() else {
+                    return;
+                };
+                let colorize = panel.colorize;
+                let hue = Self::panel_value(&panel.sliders, cx, 0) as f64;
+                let saturation = Self::panel_value(&panel.sliders, cx, 1) as f64;
+                let lightness = Self::panel_value(&panel.sliders, cx, 2) as f64;
                 let mut settings = compositor_core::adjust::HueSaturationSettings::new(
                     hue,
                     saturation,
@@ -439,7 +290,7 @@ impl AppState {
                 }
             }
             SliderRole::CameraRaw(_) => {
-                let settings = self.filter_settings_from_sheet(cx);
+                let settings = self.filter_settings_from_panel(cx);
                 self.apply_filter_preview(FilterKind::CameraRaw, settings);
             }
             SliderRole::Effect(_) => {
@@ -450,11 +301,11 @@ impl AppState {
             | SliderRole::Distance
             | SliderRole::Amount
             | SliderRole::Distortion => {
-                let settings = self.filter_settings_from_sheet(cx);
-                let kind = match sheet.kind {
-                    SheetKind::Filter(kind) => kind,
-                    _ => FilterKind::GaussianBlur,
+                let Some(panel) = self.panel_widgets.filter.as_ref() else {
+                    return;
                 };
+                let kind = panel.kind;
+                let settings = self.filter_settings_from_panel(cx);
                 self.apply_filter_preview(kind, settings);
             }
         }
@@ -465,9 +316,12 @@ impl AppState {
     /// Rebuilds the Levels preview after the Preview checkbox flips: unchecked
     /// shows the untouched pixels, exactly as Swift's `edit.preview` does.
     pub fn refresh_levels_preview(&mut self, cx: &mut Context<Self>) {
-        let preview = self.sheet.as_ref().map(|s| s.checkbox_a).unwrap_or(true);
+        let Some(panel) = self.panel_widgets.levels.as_ref() else {
+            return;
+        };
+        let preview = panel.preview;
         if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.levels = Some(self.levels_settings_from_sheet(cx));
+            self.tab().session.levels = Some(self.levels_settings_from_panel(cx));
             self.tab().session.preview_adjustment_editing(preview);
             self.revision += 1;
             cx.notify();
@@ -477,7 +331,7 @@ impl AppState {
             return;
         };
         if preview {
-            let settings = self.levels_settings_from_sheet(cx);
+            let settings = self.levels_settings_from_panel(cx);
             let mut adjusted = base.as_ref().clone();
             levels_apply_settings(&mut adjusted, &settings);
             adjusted = self.blend_adjusted(adjusted);
@@ -489,48 +343,62 @@ impl AppState {
         cx.notify();
     }
 
-    fn levels_settings_from_sheet(&self, cx: &gpui_kit::App) -> LevelsSettings {
-        // The Auto modes set every channel's range at once; those keep their
-        // values while the sliders stay the source of truth for the visible
-        // channel's range.
-        let mut settings = self.sheet.as_ref().map(|sheet| sheet.levels).unwrap_or_default();
-        settings.channel = match self.sheet.as_ref().map(|s| s.channel).unwrap_or(0) {
-            1 => LevelsChannel::Red,
-            2 => LevelsChannel::Green,
-            3 => LevelsChannel::Blue,
+    /// The Levels panel's settings: the Auto modes set every channel's range
+    /// at once; those keep their values while the sliders stay the source of
+    /// truth for the visible channel's range.
+    fn levels_settings_from_panel(&self, cx: &gpui_kit::App) -> LevelsSettings {
+        let mut settings = self
+            .panel_widgets
+            .levels
+            .as_ref()
+            .map(|panel| panel.levels)
+            .unwrap_or_default();
+        settings.channel = match self.panel_widgets.levels.as_ref().map(|panel| panel.channel) {
+            Some(1) => LevelsChannel::Red,
+            Some(2) => LevelsChannel::Green,
+            Some(3) => LevelsChannel::Blue,
             _ => LevelsChannel::Rgb,
         };
+        let sliders = self
+            .panel_widgets
+            .levels
+            .as_ref()
+            .map(|panel| panel.sliders.clone())
+            .unwrap_or_default();
         let mut range = settings.current();
-        range.black = self.sheet_value(cx, 0) as f64;
-        range.gamma = self.sheet_value(cx, 1) as f64;
-        range.white = self.sheet_value(cx, 2) as f64;
-        range.output_black = self.sheet_value(cx, 3) as f64;
-        range.output_white = self.sheet_value(cx, 4) as f64;
+        range.black = Self::panel_value(&sliders, cx, 0) as f64;
+        range.gamma = Self::panel_value(&sliders, cx, 1) as f64;
+        range.white = Self::panel_value(&sliders, cx, 2) as f64;
+        range.output_black = Self::panel_value(&sliders, cx, 3) as f64;
+        range.output_white = Self::panel_value(&sliders, cx, 4) as f64;
         settings.set_current(range);
         settings
     }
 
-    pub(crate) fn filter_settings_from_sheet(&self, cx: &gpui_kit::App) -> FilterSettings {
+    /// The open filter panel's settings from its sliders and checkboxes.
+    pub(crate) fn filter_settings_from_panel(&self, cx: &gpui_kit::App) -> FilterSettings {
         let mut settings = FilterSettings::default();
-        let Some(sheet) = self.sheet.as_ref() else { return settings };
-        match sheet.kind {
-            SheetKind::Filter(FilterKind::GaussianBlur) => {
-                settings.radius = self.sheet_value(cx, 0) as f64;
+        let Some(panel) = self.panel_widgets.filter.as_ref() else {
+            return settings;
+        };
+        match panel.kind {
+            FilterKind::GaussianBlur => {
+                settings.radius = Self::panel_value(&panel.sliders, cx, 0) as f64;
             }
-            SheetKind::Filter(FilterKind::MotionBlur) => {
-                settings.angle = self.sheet_value(cx, 0) as f64;
-                settings.distance = self.sheet_value(cx, 1) as f64;
+            FilterKind::MotionBlur => {
+                settings.angle = Self::panel_value(&panel.sliders, cx, 0) as f64;
+                settings.distance = Self::panel_value(&panel.sliders, cx, 1) as f64;
             }
-            SheetKind::Filter(FilterKind::AddNoise) => {
-                settings.amount = self.sheet_value(cx, 0) as f64;
-                settings.gaussian = sheet.checkbox_a;
-                settings.monochromatic = sheet.checkbox_b;
+            FilterKind::AddNoise => {
+                settings.amount = Self::panel_value(&panel.sliders, cx, 0) as f64;
+                settings.gaussian = panel.gaussian;
+                settings.monochromatic = panel.monochromatic;
             }
-            SheetKind::Filter(FilterKind::LensCorrection) => {
-                settings.distortion = self.sheet_value(cx, 0) as f64;
+            FilterKind::LensCorrection => {
+                settings.distortion = Self::panel_value(&panel.sliders, cx, 0) as f64;
             }
-            SheetKind::Filter(FilterKind::CameraRaw) => {
-                let value = |i: usize| self.sheet_value(cx, i) as f64;
+            FilterKind::CameraRaw => {
+                let value = |i: usize| Self::panel_value(&panel.sliders, cx, i) as f64;
                 let raw = &mut settings.camera_raw;
                 raw.temperature = value(0);
                 raw.tint = value(1);
@@ -552,7 +420,7 @@ impl AppState {
         settings
     }
 
-    /// The Levels sheet's Auto button: Contrast, the shared-interval mode.
+    /// The Levels panel's Auto button: Contrast, the shared-interval mode.
     pub fn levels_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.levels_auto_mode(LevelsAuto::Contrast, window, cx);
     }
@@ -567,16 +435,23 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let (histogram, channel) = {
-            let Some(sheet) = self.sheet.as_ref() else { return };
-            (sheet.histogram, sheet.channel)
+            let Some(panel) = self.panel_widgets.levels.as_ref() else {
+                return;
+            };
+            (panel.histogram, panel.channel)
         };
         let settings = mode.settings(&histogram);
         let values = levels_auto_slider_values(&settings, channel);
-        if let Some(sheet) = self.sheet.as_mut() {
-            sheet.levels = settings;
+        if let Some(panel) = self.panel_widgets.levels.as_mut() {
+            panel.levels = settings;
         }
         for (index, value) in values.into_iter().enumerate() {
-            if let Some(slider) = self.sheet.as_ref().and_then(|s| s.sliders.get(index)) {
+            if let Some(slider) = self
+                .panel_widgets
+                .levels
+                .as_ref()
+                .and_then(|panel| panel.sliders.get(index))
+            {
                 let slider = slider.clone();
                 slider.update(cx, |state, cx| {
                     state.set_value(SliderValue::Single(value), window, cx)
@@ -599,32 +474,30 @@ impl AppState {
 
     /// Re-runs the noise filters when their checkboxes change.
     pub fn refresh_filter_preview(&mut self, cx: &mut Context<Self>) {
-        let (settings, kind) = {
-            let Some(sheet) = self.sheet.as_ref() else { return };
-            (self.filter_settings_from_sheet(cx), match sheet.kind {
-                SheetKind::Filter(kind) => kind,
-                _ => return,
-            })
+        let Some(panel) = self.panel_widgets.filter.as_ref() else {
+            return;
         };
+        let kind = panel.kind;
+        let settings = self.filter_settings_from_panel(cx);
         self.apply_filter_preview(kind, settings);
         self.revision += 1;
         cx.notify();
     }
 
-    // MARK: Effects sheet
+    // MARK: Effects panel
 
     /// The layers-panel effects menu: adds the effect (which selects and
-    /// starts editing it) and opens the Effects sheet for it. No sheet when
+    /// starts editing it) and opens the Effects panel for it. No panel when
     /// the add was refused (no editable pixel layer active).
     pub fn add_effect(
         &mut self,
         kind: LayerEffectKind,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.tab().session.add_effect(kind);
         if self.tab().session.effects_editing.map(|editing| editing.kind) == Some(kind) {
-            self.open_sheet(SheetKind::Effects, window, cx);
+            self.open_effects_panel(cx);
         }
         self.touch(cx);
     }
@@ -638,19 +511,19 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Pushes the Effects sheet's sliders into the bound layer's effect — a
+    /// Pushes the Effects panel's sliders into the bound layer's effect — a
     /// real undo step per change through `changeEffects`, which is what makes
     /// the canvas preview live.
     pub fn apply_effects_sliders(&mut self, cx: &mut Context<Self>) {
         let (kind, values) = {
             let cx_app: &gpui_kit::App = cx;
-            let Some(sheet) = self.sheet.as_ref() else { return };
+            let Some(panel) = self.panel_widgets.effects.as_ref() else { return };
             let kind = LayerEffectKind::ALL
-                .get(sheet.channel)
+                .get(panel.kind_index)
                 .copied()
                 .unwrap_or(LayerEffectKind::Stroke);
-            let values: Vec<f64> = (0..sheet.sliders.len())
-                .map(|index| self.sheet_value(cx_app, index) as f64)
+            let values: Vec<f64> = (0..panel.sliders.len())
+                .map(|index| Self::panel_value(&panel.sliders, cx_app, index) as f64)
                 .collect();
             (kind, values)
         };
@@ -746,7 +619,7 @@ fn blend_through_selection(
 /// The Levels histogram's per-pixel weights: the selection's coverage on the
 /// layer's own pixel grid (`PixelAdjust.coverage(...)` in
 /// `LevelsFilter.histogram`, Levels.swift:90-96).
-fn histogram_coverage(
+pub(crate) fn histogram_coverage(
     transform: Option<LayerTransform>,
     selection: Option<compositor_core::selection::DocumentSelection>,
     width: usize,

@@ -130,6 +130,12 @@ pub struct ProjectWorkspace {
     /// tab was discarded or which ran workspace-wide — e.g. a failed
     /// `load_project`. The app presents and drains them.
     pub errors: Vec<(String, String)>,
+    /// App-side guard for the floating panels: while any panel is open the
+    /// tab must not switch (Swift's `canStartProjectOperation` counts the
+    /// panels' edit states — `levels != nil`, `filterEdit != nil`, … — which
+    /// the Rust core only carries for adjustment editing). Opened/closed
+    /// panels keep this in sync through `AppState`.
+    pub ui_panels_open: bool,
 }
 
 impl Default for ProjectWorkspace {
@@ -153,6 +159,7 @@ impl ProjectWorkspace {
             pending_close: None,
             pending_receives: Vec::new(),
             errors: Vec::new(),
+            ui_panels_open: false,
         };
         workspace.selected_id = workspace.tabs[0].id;
         workspace
@@ -197,7 +204,7 @@ impl ProjectWorkspace {
     /// project operation, and none of the five floating edit sessions is
     /// open.
     pub fn can_switch(&self) -> bool {
-        if self.is_managing {
+        if self.is_managing || self.ui_panels_open {
             return false;
         }
         let tab = self.current();

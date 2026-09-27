@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use gpui_kit::{
     canvas, px, point, prelude::FluentBuilder as _, rgba, size, Bounds, Context, Entity,
-    InteractiveElement, IntoElement, Keystroke, KeystrokeEvent, MouseButton, MouseDownEvent,
+    InteractiveElement, IntoElement, Keystroke, KeystrokeEvent, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, SharedString,
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
 };
@@ -17,16 +17,16 @@ use gpui_kit::component::{Disableable, Sizable};
 
 use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
 use compositor_core::adjust::{CurvePoint, CurvesSettings, LevelsChannel};
-use compositor_core::document::PaletteColor;
-use compositor_core::effects::LayerEffectKind;
-use compositor_core::filters::FilterKind;
+
+
+
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::Bitmap;
-use compositor_core::session::SelectionAmountOperation;
+
 use compositor_core::tools::brush::RasterEdit;
 
 use crate::project::UnsavedChoice;
-use crate::sheets::SliderRole;
+
 use crate::state::{AppState, SheetKind};
 use crate::ui::{dropdown, labeled_checkbox, text_label, MenuEntry};
 
@@ -45,22 +45,8 @@ pub enum CurveDragBegin {
 
 fn sheet_title(kind: SheetKind) -> &'static str {
     match kind {
-        SheetKind::NewCanvas => "New Document",
         SheetKind::ImageSize => "Image Size",
         SheetKind::CanvasSize => "Canvas Size",
-        SheetKind::Levels => "Levels",
-        SheetKind::HueSaturation => "Hue/Saturation",
-        SheetKind::Effects => "Layer Effects",
-        SheetKind::Filter(FilterKind::GaussianBlur) => "Gaussian Blur",
-        SheetKind::Filter(FilterKind::MotionBlur) => "Motion Blur",
-        SheetKind::Filter(FilterKind::AddNoise) => "Add Noise",
-        SheetKind::Filter(FilterKind::LensCorrection) => "Lens Correction",
-        SheetKind::Filter(FilterKind::CameraRaw) => "Camera Raw Filter",
-        SheetKind::Filter(FilterKind::Curves) => "Curves",
-        SheetKind::Filter(_) => "Filter",
-        SheetKind::Amount(SelectionAmountOperation::Feather) => "Feather Selection",
-        SheetKind::Amount(SelectionAmountOperation::Expand) => "Expand Selection",
-        SheetKind::Amount(SelectionAmountOperation::Contract) => "Contract Selection",
         SheetKind::ExportPng => "Export PNG",
         SheetKind::ExportJpeg => "Export JPEG",
         SheetKind::Import => "Import Images",
@@ -68,14 +54,13 @@ fn sheet_title(kind: SheetKind) -> &'static str {
         SheetKind::Open => "Open",
         SheetKind::Trim => "Trim",
         SheetKind::About => "About Compositor",
-        SheetKind::Shortcuts => "Keyboard Shortcuts",
         // Confirm/Alert titles come from the presenting flow at render time.
         SheetKind::Confirm => "Compositor",
         SheetKind::Alert => "Compositor",
     }
 }
 
-fn parse_input_usize(input: &Entity<InputState>, cx: &gpui_kit::App) -> Option<usize> {
+pub(crate) fn parse_input_usize(input: &Entity<InputState>, cx: &gpui_kit::App) -> Option<usize> {
     input.read(cx).value().trim().parse::<usize>().ok()
 }
 
@@ -83,7 +68,7 @@ fn parse_input_f64(input: &Entity<InputState>, cx: &gpui_kit::App) -> Option<f64
     input.read(cx).value().trim().parse::<f64>().ok()
 }
 
-fn sheet_row(label: &str, control: impl gpui_kit::IntoElement) -> gpui_kit::Div {
+pub(crate) fn sheet_row(label: &str, control: impl gpui_kit::IntoElement) -> gpui_kit::Div {
     gpui_kit::div()
         .flex()
         .flex_row()
@@ -103,10 +88,13 @@ impl AppState {
     // MARK: Sheet rendering
 
     pub fn render_sheet_overlay(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        // The Shortcuts sheet's editor state (baseline draft + recording row +
-        // keystroke interceptor) dies with its sheet: drop it as soon as the
-        // open sheet is not the Shortcuts one.
-        if self.sheet.as_ref().map(|sheet| sheet.kind) != Some(SheetKind::Shortcuts) {
+        // The Shortcuts panel's editor state (baseline draft + recording row +
+        // keystroke interceptor) dies with its panel: drop it as soon as the
+        // Shortcuts panel is not open.
+        if !self
+            .panels
+            .is_visible(crate::panels::panel_names::KEYBOARD_SHORTCUTS)
+        {
             Self::shortcuts_editor_take();
         }
         let kind = self.sheet.as_ref()?.kind;
@@ -194,43 +182,6 @@ impl AppState {
                             this.dismiss_error_alert(cx);
                         })),
                 )
-        } else if kind == SheetKind::Shortcuts {
-            let done_disabled = Self::shortcuts_recording_id().is_some()
-                || self.shortcuts().validate().is_err();
-            gpui_kit::div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .border_t_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
-                .child(
-                    Button::new("shortcuts-restore")
-                        .label("Restore Defaults")
-                        .small()
-                        .outline()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.shortcuts().reset_all();
-                            this.notify_only(cx);
-                        })),
-                )
-                .child(gpui_kit::div().flex_1())
-                .child(
-                    Button::new("sheet-cancel")
-                        .label("Cancel")
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_sheet(cx))),
-                )
-                .child(
-                    Button::new("shortcuts-done")
-                        .label("Done")
-                        .small()
-                        .primary()
-                        .disabled(done_disabled)
-                        .on_click(cx.listener(|this, _, _, cx| this.shortcuts_done(cx))),
-                )
         } else {
             gpui_kit::div()
                 .flex()
@@ -293,101 +244,6 @@ impl AppState {
         let mut body = gpui_kit::div().flex().flex_col().gap_1();
 
         match kind {
-            SheetKind::NewCanvas => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let preset = sheet.preset;
-                let background = sheet.background;
-                let width = sheet.width.clone();
-                let height = sheet.height.clone();
-                let name = sheet.name.clone();
-                body = body
-                    .child(sheet_row(
-                        "Preset",
-                        dropdown(
-                            &app,
-                            "new-preset",
-                            match preset {
-                                1 => "Photo 3000 \u{d7} 2000",
-                                2 => "Web 1280 \u{d7} 720",
-                                _ => "Default 1920 \u{d7} 1080",
-                            },
-                            px(180.0),
-                            vec![
-                                MenuEntry::new("Default 1920 \u{d7} 1080", {
-                                    let width = width.clone();
-                                    let height = height.clone();
-                                    move |state, window, cx| {
-                                        set_inputs(state, &width, &height, 1920, 1080, window, cx);
-                                    }
-                                }),
-                                MenuEntry::new("Photo 3000 \u{d7} 2000", {
-                                    let width = width.clone();
-                                    let height = height.clone();
-                                    move |state, window, cx| {
-                                        set_inputs(state, &width, &height, 3000, 2000, window, cx);
-                                    }
-                                }),
-                                MenuEntry::new("Web 1280 \u{d7} 720", {
-                                    let width = width.clone();
-                                    let height = height.clone();
-                                    move |state, window, cx| {
-                                        set_inputs(state, &width, &height, 1280, 720, window, cx);
-                                    }
-                                }),
-                            ],
-                        ),
-                    ))
-                    .child(sheet_row(
-                        "Width",
-                        Input::new(&width).id("new-width").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Height",
-                        Input::new(&height).id("new-height").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Name",
-                        Input::new(&name).id("new-name").w(px(180.0)),
-                    ))
-                    .child(sheet_row(
-                        "Background",
-                        dropdown(
-                            &app,
-                            "new-background",
-                            match background {
-                                1 => "Black",
-                                2 => "Transparent",
-                                _ => "White",
-                            },
-                            px(120.0),
-                            vec![
-                                MenuEntry::new("White", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.background = 0;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                                MenuEntry::new("Black", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.background = 1;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                                MenuEntry::new("Transparent", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.background = 2;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                            ],
-                        ),
-                    ));
-                if preset != 0 {
-                    if let Some(sheet) = self.sheet.as_mut() {
-                        sheet.preset = preset;
-                    }
-                }
-            }
             SheetKind::ImageSize => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let percent = sheet.percent;
@@ -475,394 +331,6 @@ impl AppState {
                     ))
                     .child(sheet_row("Anchor", anchor_picker(anchor, cx)));
             }
-            SheetKind::Levels => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let channel = sheet.channel;
-                let histogram = sheet.histogram;
-                let sliders = sheet.sliders.clone();
-                let preview = sheet.checkbox_a;
-                body = body
-                    .child(sheet_row(
-                        "Preview",
-                        labeled_checkbox(
-                            &app,
-                            "levels-preview",
-                            "Preview",
-                            preview,
-                            |state, checked, _, cx| {
-                                if let Some(sheet) = state.sheet.as_mut() {
-                                    sheet.checkbox_a = checked;
-                                }
-                                state.refresh_levels_preview(cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ))
-                    .child(sheet_row(
-                        "Channel",
-                        dropdown(
-                            &app,
-                            "levels-channel",
-                            match channel {
-                                1 => "Red",
-                                2 => "Green",
-                                3 => "Blue",
-                                _ => "RGB",
-                            },
-                            px(90.0),
-                            vec![
-                                MenuEntry::new("RGB", |state, _, cx| set_channel(state, 0, cx)),
-                                MenuEntry::new("Red", |state, _, cx| set_channel(state, 1, cx)),
-                                MenuEntry::new("Green", |state, _, cx| set_channel(state, 2, cx)),
-                                MenuEntry::new("Blue", |state, _, cx| set_channel(state, 3, cx)),
-                            ],
-                        ),
-                    ))
-                    .child(
-                        gpui_kit::div()
-                            .w_full()
-                            .h(px(96.0))
-                            .rounded_sm()
-                            .overflow_hidden()
-                            .child(histogram_view(histogram)),
-                    )
-                    .child(labeled_slider_sheet(&sliders, 0, "Input Black"))
-                    .child(labeled_slider_sheet(&sliders, 1, "Gamma"))
-                    .child(labeled_slider_sheet(&sliders, 2, "Input White"))
-                    .child(labeled_slider_sheet(&sliders, 3, "Output Black"))
-                    .child(labeled_slider_sheet(&sliders, 4, "Output White"))
-                    .child(sheet_row(
-                        "Auto",
-                        gpui_kit::div()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(
-                                Button::new("levels-auto-contrast")
-                                    .label("Contrast")
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.levels_auto_mode(
-                                            compositor_core::adjust::levels_auto::LevelsAuto::Contrast,
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                                    .into_any_element(),
-                            )
-                            .child(
-                                Button::new("levels-auto-color")
-                                    .label("Color")
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.levels_auto_mode(
-                                            compositor_core::adjust::levels_auto::LevelsAuto::Color,
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                                    .into_any_element(),
-                            )
-                            .child(
-                                Button::new("levels-auto-neutral")
-                                    .label("Neutral")
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.levels_auto_mode(
-                                            compositor_core::adjust::levels_auto::LevelsAuto::Neutral,
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                                    .into_any_element(),
-                            ),
-                    ));
-            }
-            SheetKind::HueSaturation => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let colorize = sheet.colorize;
-                let sliders = sheet.sliders.clone();
-                body = body
-                    .child(labeled_slider_sheet(&sliders, 0, "Hue"))
-                    .child(labeled_slider_sheet(&sliders, 1, "Saturation"))
-                    .child(labeled_slider_sheet(&sliders, 2, "Lightness"))
-                    .child(sheet_row(
-                        "Colorize",
-                        labeled_checkbox(
-                            &app,
-                            "hue-colorize",
-                            "Colorize",
-                            colorize,
-                            |state, checked, _, cx| {
-                                if let Some(sheet) = state.sheet.as_mut() {
-                                    sheet.colorize = checked;
-                                }
-                                state.apply_slider(SliderRole::Hue, 0.0, cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ));
-            }
-            SheetKind::Effects => {
-                let sheet = self.sheet.as_ref().unwrap();
-                // The edited kind rides in `channel`; see build_sheet.
-                let kind = LayerEffectKind::ALL
-                    .get(sheet.channel)
-                    .copied()
-                    .unwrap_or(LayerEffectKind::Stroke);
-                let inside = sheet.checkbox_a;
-                let sliders = sheet.sliders.clone();
-                let color = self.tab().session.editing_effects().color(kind);
-                body = body.child(text_label(kind.label(), false).text_size(px(13.0)).mb_1());
-                match kind {
-                    // Position is the segmented Outside/Inside picker in
-                    // EffectsSheet.swift; here it is a dropdown, stored in
-                    // `checkbox_a` (false = Outside).
-                    LayerEffectKind::Stroke => {
-                        body = body
-                            .child(sheet_row(
-                                "Position",
-                                dropdown(
-                                    &app,
-                                    "effect-position",
-                                    if inside { "Inside" } else { "Outside" },
-                                    px(110.0),
-                                    vec![
-                                        MenuEntry::new("Outside", |state, _, cx| {
-                                            set_stroke_inside(state, false, cx)
-                                        }),
-                                        MenuEntry::new("Inside", |state, _, cx| {
-                                            set_stroke_inside(state, true, cx)
-                                        }),
-                                    ],
-                                ),
-                            ))
-                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                            .child(labeled_slider_sheet(&sliders, 0, "Size (px)"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Opacity (%)"));
-                    }
-                    LayerEffectKind::Shadow => {
-                        body = body
-                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Angle (°)"))
-                            .child(labeled_slider_sheet(&sliders, 2, "Distance (px)"))
-                            .child(labeled_slider_sheet(&sliders, 3, "Blur (px)"));
-                    }
-                    LayerEffectKind::ColorOverlay => {
-                        body = body
-                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"));
-                    }
-                    LayerEffectKind::InnerShadow => {
-                        body = body
-                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                            .child(labeled_slider_sheet(&sliders, 0, "Opacity (%)"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Angle (°)"))
-                            .child(labeled_slider_sheet(&sliders, 2, "Distance (px)"))
-                            .child(labeled_slider_sheet(&sliders, 3, "Blur (px)"));
-                    }
-                    LayerEffectKind::OuterGlow | LayerEffectKind::InnerGlow => {
-                        body = body
-                            .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                            .child(labeled_slider_sheet(&sliders, 0, "Size (px)"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Opacity (%)"));
-                    }
-                }
-            }
-            SheetKind::Filter(filter) => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let sliders = sheet.sliders.clone();
-                match filter {
-                    FilterKind::Curves => {
-                        // The curve editor (CurvesControls.swift): channel
-                        // picker, the curve canvas with its click/drag
-                        // gesture, a selected-point readout with Remove, and
-                        // Reset. The preview runs through the same filter
-                        // pipeline as the slider sheets.
-                        if self.curves_editor.is_none() {
-                            self.curves_editor = Some(crate::state::CurvesEditor::new());
-                        }
-                        let (curves, selected) = {
-                            let editor = self.curves_editor.as_ref().unwrap();
-                            (editor.settings.clone(), editor.selected)
-                        };
-                        let channel = curves.channel;
-                        let points = curves.channels[channel.index()].clone();
-                        let readout = selected
-                            .and_then(|index| points.get(index))
-                            .map(|point| {
-                                format!("Input {} \u{b7} Output {}", point.x as i64, point.y as i64)
-                            })
-                            .unwrap_or_default();
-                        let can_remove = selected.is_some_and(|index| {
-                            index > 0 && index + 1 < points.len()
-                        });
-                        body = body
-                            .child(sheet_row(
-                                "Channel",
-                                dropdown(
-                                    &app,
-                                    "curves-channel",
-                                    levels_channel_label(channel),
-                                    px(90.0),
-                                    LevelsChannel::ALL
-                                        .iter()
-                                        .map(|choice| {
-                                            let choice = *choice;
-                                            MenuEntry::new(
-                                                levels_channel_label(choice),
-                                                move |state, _, cx| {
-                                                    state.curves_set_channel(choice, cx);
-                                                },
-                                            )
-                                            .checked(channel == choice)
-                                        })
-                                        .collect(),
-                                ),
-                            ))
-                            .child(
-                                gpui_kit::div()
-                                    .id("curves-canvas")
-                                    .w_full()
-                                    .h(px(240.0))
-                                    .rounded_sm()
-                                    .overflow_hidden()
-                                    .border_1()
-                                    .border_color(gpui_kit::rgb(0x111111))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            |this, event: &MouseDownEvent, _, cx| {
-                                                this.curves_mouse_down(event, cx);
-                                            },
-                                        ),
-                                    )
-                                    .child(curves_canvas_view(
-                                        &curves, &points, selected, cx,
-                                    )),
-                            )
-                            .child(text_label(
-                                "Click to add a point. Drag to adjust.",
-                                true,
-                            ))
-                            .child(
-                                gpui_kit::div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(text_label(readout, false))
-                                    .child(gpui_kit::div().flex_1())
-                                    .child(
-                                        Button::new("curves-remove")
-                                            .label("Remove point")
-                                            .small()
-                                            .outline()
-                                            .disabled(!can_remove)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.curves_remove_point(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("curves-reset")
-                                            .label("Reset curve")
-                                            .small()
-                                            .outline()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.curves_reset(cx);
-                                            })),
-                                    ),
-                            );
-                    }
-                    FilterKind::GaussianBlur => {
-                        body = body.child(labeled_slider_sheet(&sliders, 0, "Radius"));
-                    }
-                    FilterKind::MotionBlur => {
-                        body = body
-                            .child(labeled_slider_sheet(&sliders, 0, "Angle"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Distance"));
-                    }
-                    FilterKind::AddNoise => {
-                        let gaussian = sheet.checkbox_a;
-                        let monochromatic = sheet.checkbox_b;
-                        body = body
-                            .child(labeled_slider_sheet(&sliders, 0, "Amount"))
-                            .child(sheet_row(
-                                "Distribution",
-                                labeled_checkbox(
-                                    &app,
-                                    "noise-gaussian",
-                                    "Gaussian",
-                                    gaussian,
-                                    |state, checked, _, cx| {
-                                        if let Some(sheet) = state.sheet.as_mut() {
-                                            sheet.checkbox_a = checked;
-                                        }
-                                        state.refresh_filter_preview(cx);
-                                    },
-                                )
-                                .into_any_element(),
-                            ))
-                            .child(sheet_row(
-                                "",
-                                labeled_checkbox(
-                                    &app,
-                                    "noise-mono",
-                                    "Monochromatic",
-                                    monochromatic,
-                                    |state, checked, _, cx| {
-                                        if let Some(sheet) = state.sheet.as_mut() {
-                                            sheet.checkbox_b = checked;
-                                        }
-                                        state.refresh_filter_preview(cx);
-                                    },
-                                )
-                                .into_any_element(),
-                            ));
-                    }
-                    FilterKind::LensCorrection => {
-                        body = body.child(labeled_slider_sheet(&sliders, 0, "Distortion"));
-                    }
-                    FilterKind::CameraRaw => {
-                        body = body
-                            .child(text_label("White Balance", false).mb_1())
-                            .child(labeled_slider_sheet(&sliders, 0, "Temperature"))
-                            .child(labeled_slider_sheet(&sliders, 1, "Tint"))
-                            .child(text_label("Light", false).mb_1())
-                            .child(labeled_slider_sheet(&sliders, 2, "Exposure"))
-                            .child(labeled_slider_sheet(&sliders, 3, "Contrast"))
-                            .child(labeled_slider_sheet(&sliders, 4, "Highlights"))
-                            .child(labeled_slider_sheet(&sliders, 5, "Shadows"))
-                            .child(labeled_slider_sheet(&sliders, 6, "Whites"))
-                            .child(labeled_slider_sheet(&sliders, 7, "Blacks"))
-                            .child(text_label("Color", false).mb_1())
-                            .child(labeled_slider_sheet(&sliders, 8, "Vibrance"))
-                            .child(labeled_slider_sheet(&sliders, 9, "Saturation"))
-                            .child(text_label("Effects", false).mb_1())
-                            .child(labeled_slider_sheet(&sliders, 10, "Texture"))
-                            .child(labeled_slider_sheet(&sliders, 11, "Clarity"))
-                            .child(labeled_slider_sheet(&sliders, 12, "Dehaze"))
-                            .child(labeled_slider_sheet(&sliders, 13, "Vignette"));
-                    }
-                    _ => {
-                        body = body.child(text_label(
-                            "This filter runs with its default settings.",
-                            true,
-                        ));
-                    }
-                }
-            }
-            SheetKind::Amount(_) => {
-                let sheet = self.sheet.as_ref().unwrap();
-                body = body.child(sheet_row(
-                    "Amount",
-                    Input::new(&sheet.tolerance).id("amount-value").w(px(80.0)),
-                ));
-            }
             SheetKind::Import => {
                 let sheet = self.sheet.as_ref().unwrap();
                 body = body
@@ -931,7 +399,7 @@ impl AppState {
                             }),
                     )
                     .child(sheet_row("", text_label(status, true)))
-                    .child(sheet_row("Quality", labeled_slider_sheet(&sliders, 0, &quality_text)))
+                    .child(sheet_row("Quality", labeled_slider(&sliders, 0, &quality_text)))
                     .child(sheet_row(
                         "Matte",
                         dropdown(
@@ -1066,9 +534,6 @@ impl AppState {
                         )),
                 );
             }
-            SheetKind::Shortcuts => {
-                body = body.child(self.shortcuts_sheet_body(cx));
-            }
             SheetKind::Confirm | SheetKind::Alert => {
                 let message = self.sheet.as_ref().map(|s| s.message.clone()).unwrap_or_default();
                 for line in message.lines() {
@@ -1083,18 +548,6 @@ impl AppState {
     }
 
     pub fn cancel_sheet(&mut self, cx: &mut Context<Self>) {
-        // The Effects sheet's Cancel finishes editing without committing:
-        // the edited effect returns to its opening state (Swift's
-        // finishEffectsEditing(commit: false)).
-        if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Effects) {
-            self.tab().session.finish_effects_editing(false);
-        }
-        // The Shortcuts sheet's Cancel drops the draft: the overrides return
-        // to their state when the sheet opened (Swift's `draft` is simply
-        // discarded unless Save runs).
-        if self.sheet.as_ref().map(|sheet| sheet.kind) == Some(SheetKind::Shortcuts) {
-            Self::shortcuts_cancel_draft();
-        }
         // The Confirm sheet's Cancel aborts the close/quit flow; the
         // Alert's Cancel is just OK; the controller-driven panels release
         // their pending (with no answer).
@@ -1260,24 +713,6 @@ impl AppState {
             None => return,
         };
         match kind {
-            SheetKind::NewCanvas => {
-                let (width, height, background) = {
-                    let cx_app: &gpui_kit::App = cx;
-                    let sheet = self.sheet.as_ref().unwrap();
-                    (
-                        parse_input_usize(&sheet.width, cx_app).unwrap_or(1920),
-                        parse_input_usize(&sheet.height, cx_app).unwrap_or(1080),
-                        sheet.background,
-                    )
-                };
-                self.tab().session.create_document(width.max(1), height.max(1), true);
-                match background {
-                    0 => self.fill_active([255, 255, 255, 255], "Fill White", cx),
-                    1 => self.fill_active([0, 0, 0, 255], "Fill Black", cx),
-                    _ => {}
-                }
-                self.fit_for = (0, 0);
-            }
             SheetKind::ImageSize => {
                 let (mut width, mut height, resolution, percent) = {
                     let cx_app: &gpui_kit::App = cx;
@@ -1328,22 +763,6 @@ impl AppState {
                     controller.finish_canvas_size(session, busy, Some(&options));
                 });
                 self.request_refit();
-            }
-            SheetKind::Levels => self.commit_preview("Levels", cx),
-            SheetKind::HueSaturation => self.commit_preview("Hue/Saturation", cx),
-            SheetKind::Effects => {
-                // Every change was already a committed undo step; OK just
-                // ends the editing session and keeps the effects.
-                self.tab().session.finish_effects_editing(true);
-            }
-            SheetKind::Filter(filter) => self.commit_preview(filter.label(), cx),
-            SheetKind::Amount(_) => {
-                let amount = {
-                    let cx_app: &gpui_kit::App = cx;
-                    let sheet = self.sheet.as_ref().unwrap();
-                    parse_input_usize(&sheet.tolerance, cx_app).unwrap_or(0)
-                } as i64;
-                self.tab().session.confirm_selection_amount(amount);
             }
             SheetKind::ExportPng => {
                 let url = path_or_none(&self.sheet_path(cx));
@@ -1482,7 +901,7 @@ impl AppState {
                 });
                 self.request_refit();
             }
-            SheetKind::About | SheetKind::Shortcuts | SheetKind::Confirm | SheetKind::Alert => {}
+            SheetKind::About | SheetKind::Confirm | SheetKind::Alert => {}
         }
         if self.sheet.as_ref().map(|sheet| sheet.kind) == kind_before {
             self.close_sheet(cx);
@@ -1731,7 +1150,7 @@ impl AppState {
     }
 
     /// The id of the row currently recording, if any.
-    fn shortcuts_recording_id() -> Option<String> {
+    pub(crate) fn shortcuts_recording_id() -> Option<String> {
         SHORTCUTS_SHEET.with_borrow(|slot| {
             slot.as_ref().and_then(|editor| editor.recording.clone())
         })
@@ -1739,7 +1158,7 @@ impl AppState {
 
     /// Discards the draft: the registry returns to its state when the sheet
     /// opened, and the editor state drops.
-    fn shortcuts_cancel_draft() {
+    pub(crate) fn shortcuts_cancel_draft() {
         let baseline = Self::shortcuts_editor_take().map(|editor| editor.baseline);
         if let Some(baseline) = baseline {
             restore_overrides(baseline);
@@ -1759,19 +1178,19 @@ impl AppState {
     /// The footer's Done: persists the draft (`ShortcutSettings.save`) and
     /// closes. The keymap itself is rebuilt at startup, so new chords take
     /// effect after a restart — noted on the sheet.
-    fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
         match self.shortcuts().save() {
             Ok(()) => self.set_status("Shortcuts saved; restart to apply them", cx),
             Err(error) => self.set_status(format!("Saving shortcuts failed: {error}"), cx),
         }
         Self::shortcuts_editor_take();
-        self.close_sheet(cx);
+        self.close_shortcuts_panel(cx);
     }
 
     /// The sheet body (KeyboardShortcutsSheet's `body`): an intro line, the
     /// catalog grouped like Swift's ForEach over "Menus", "Canvas & Layers"
     /// and "Text Editing", and the conflict readout above the footer.
-    fn shortcuts_sheet_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    pub(crate) fn shortcuts_sheet_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         self.shortcuts_editor_init(cx);
         let problem = self.shortcuts().validate().err();
         let recording = Self::shortcuts_recording_id();
@@ -2028,7 +1447,7 @@ pub fn curve_drag_move(points: &[CurvePoint], index: usize, x: f64, y: f64) -> V
 /// and a paint pass drawing grid, spline and control points, which also
 /// installs the window-level drag events (the drag keeps tracking when the
 /// pointer leaves the canvas, as a SwiftUI DragGesture does).
-fn curves_canvas_view(
+pub(crate) fn curves_canvas_view(
     curves: &CurvesSettings,
     points: &[CurvePoint],
     selected: Option<usize>,
@@ -2150,75 +1569,6 @@ fn install_curve_drag_events(
     });
 }
 
-fn set_inputs(
-    state: &mut AppState,
-    width: &Entity<InputState>,
-    height: &Entity<InputState>,
-    w: usize,
-    h: usize,
-    window: &mut Window,
-    cx: &mut Context<AppState>,
-) {
-    width.update(cx, |input, cx| input.set_value(w.to_string(), window, cx));
-    height.update(cx, |input, cx| {
-        input.set_value(h.to_string(), window, cx)
-    });
-    if let Some(sheet) = state.sheet.as_mut() {
-        sheet.preset = match (w, h) {
-            (3000, 2000) => 1,
-            (1280, 720) => 2,
-            _ => 0,
-        };
-    }
-    state.notify_only(cx);
-}
-
-fn set_channel(state: &mut AppState, channel: usize, cx: &mut Context<AppState>) {
-    if let Some(sheet) = state.sheet.as_mut() {
-        sheet.channel = channel;
-    }
-    state.notify_only(cx);
-}
-
-/// Stroke position (EffectsSheet's segmented Outside/Inside picker): the
-/// change goes through the session like every slider, so the canvas and the
-/// undo trail follow.
-fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppState>) {
-    state.tab().session.change_effects(|effects| {
-        if let Some(stroke) = effects.stroke.as_mut() {
-            stroke.inside = inside;
-        }
-    });
-    if let Some(sheet) = state.sheet.as_mut() {
-        sheet.checkbox_a = inside;
-    }
-    state.touch(cx);
-}
-
-/// The effect's color chip (EffectsSheet.swift's swatch); clicking opens the
-/// app's color picker on it.
-fn effect_swatch(
-    color: Option<PaletteColor>,
-    kind: LayerEffectKind,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::AnyElement {
-    let color = color.unwrap_or_default();
-    let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-    let rgb = (channel(color.red) << 16) | (channel(color.green) << 8) | channel(color.blue);
-    gpui_kit::div()
-        .id(SharedString::from(format!("effect-swatch-{}", kind.label())))
-        .w(px(36.0))
-        .h(px(18.0))
-        .rounded_xs()
-        .border_1()
-        .border_color(gpui_kit::rgb(0x111111))
-        .bg(gpui_kit::rgb(rgb))
-        .on_click(cx.listener(move |state, _, _, cx| {
-            state.open_effect_color_picker(kind, cx);
-        }))
-        .into_any_element()
-}
-
 fn make_side_handler(
     index: usize,
 ) -> impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static {
@@ -2254,7 +1604,7 @@ fn anchor_picker(anchor: usize, cx: &mut Context<AppState>) -> gpui_kit::AnyElem
 }
 
 /// A labeled slider row bound to one of the sheet's sliders.
-fn labeled_slider_sheet(
+pub(crate) fn labeled_slider(
     sliders: &[Entity<SliderState>],
     index: usize,
     label: &str,
@@ -2280,7 +1630,7 @@ fn labeled_slider_sheet(
 }
 
 /// The Levels histogram, painted as thin bars.
-fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
+pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {

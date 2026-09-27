@@ -134,6 +134,14 @@ impl FloatingPanels {
         &self.open
     }
 
+    /// An open panel's title; `None` when the panel is not open.
+    pub fn title_of(&self, name: &str) -> Option<SharedString> {
+        self.open
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.title.clone())
+    }
+
     /// The panel's top-left corner in window coordinates. `None` when the
     /// panel is not open, and `None` for a docked panel — its frame comes
     /// from [`docked_top_left`] / [`docked_size`] against the current window
@@ -362,8 +370,7 @@ fn drag_events_canvas<E: 'static>(
                         .global::<PanelDragState>()
                         .drag
                         .as_ref()
-                        .expect("checked above")
-                        .clone();
+                        .expect("checked above");
                     let moved = drag
                         .origin
                         .add(event.position - drag.grab)

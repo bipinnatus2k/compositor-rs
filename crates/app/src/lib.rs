@@ -10,6 +10,7 @@ pub mod keys;
 pub mod layers_panel;
 pub mod menu;
 pub mod panels;
+pub mod panels_ui;
 pub mod project;
 pub mod settings;
 pub mod sheets;

@@ -110,6 +110,21 @@ impl AppState {
             brightness,
             hex,
         });
+        // The picker lives in the shared floating panel
+        // (ColorPickerSheet.swift:167-181): first opened centered on the
+        // canvas, afterwards wherever it was last left.
+        let title = self
+            .tab().session
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.target.title())
+            .unwrap_or_default();
+        self.panels.show(
+            crate::panels::panel_names::COLOR_PICKER_PANEL,
+            title,
+            crate::panels::PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
         self.touch(cx);
     }
 
@@ -134,6 +149,8 @@ impl AppState {
             self.tab().session.close_color_picker(false);
         }
         self.picker_ui = None;
+        self.panels.close(crate::panels::panel_names::COLOR_PICKER_PANEL);
+        self.sync_panel_guard();
         cx.default_global::<PickerFieldState>().drag = None;
         self.touch(cx);
     }
@@ -244,13 +261,15 @@ impl AppState {
     }
 }
 
-/// The picker overlay, rendered above the workspace like the sheets.
-pub fn render_color_picker(
+/// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
+/// hue strip and the right column with preview, OK/Cancel and hex entry.
+/// Rendered inside `panels_ui`'s `render_panel` shell; the OK/Cancel and the
+/// title-bar ✕ route through `close_color_picker_ui`'s commit flag.
+pub(crate) fn color_picker_panel_body(
     state: &mut AppState,
     cx: &mut Context<AppState>,
 ) -> Option<AnyElement> {
     let picker = state.tab().session.color_picker.as_ref()?;
-    let title = picker.target.title();
     let color = picker.color();
     let hsb = picker.hsb;
     let Some(ui) = state.picker_ui.as_ref() else {
@@ -341,38 +360,7 @@ pub fn render_color_picker(
         .child(hue_strip_view(hsb, strip_image, cx))
         .child(side);
 
-    let overlay = gpui_kit::div()
-        .absolute()
-        .inset_0()
-        .bg(rgba(0x00000099))
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            gpui_kit::div()
-                .w(px(538.0))
-                .flex()
-                .flex_col()
-                .rounded_md()
-                .border_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
-                .bg(gpui_kit::rgb(0x2d2d2d))
-                .overflow_hidden()
-                .child(
-                    gpui_kit::div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(gpui_kit::rgb(0x4a4a4a))
-                        .child(text_label(title, false).text_size(px(13.0))),
-                )
-                .child(body),
-        );
-    Some(overlay.into_any_element())
+    Some(body.into_any_element())
 }
 
 /// The saturation/brightness field: the gradient canvas sized `fieldSize`²,

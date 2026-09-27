@@ -1108,10 +1108,17 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Escape: cancel the active edit, or close the sheet.
+    /// Escape: cancel the active edit, close the topmost panel, or close the
+    /// sheet. The order mirrors Swift's cancel chain: the color picker first,
+    /// then the floating panels (each panel's cancel is its `onClose`
+    /// semantics), then a modal sheet, then the canvas edits.
     pub fn cancel_active(&mut self, cx: &mut Context<Self>) {
         if self.tab().session.color_picker.is_some() {
             self.close_color_picker_ui(false, cx);
+            return;
+        }
+        if let Some(name) = self.panels.top_most() {
+            self.cancel_panel(name, cx);
             return;
         }
         if self.sheet.is_some() {

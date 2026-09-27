@@ -212,7 +212,9 @@ impl Render for AppState {
             )
             .child(self.render_status_bar(cx))
             .children(self.render_sheet_overlay(cx))
-            .children(crate::color_picker_ui::render_color_picker(self, cx))
+            // The floating panels render above the workspace; the color
+            // picker is one of them now (ColorPickerSheet.swift:167).
+            .children(self.render_panels_overlay(window, cx))
     }
 }
 
@@ -630,7 +632,7 @@ impl AppState {
         self.touch(cx);
     }
     fn on_shortcuts(&mut self, _: &keys::ShowShortcuts, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Shortcuts, _w, cx);
+        self.open_shortcuts_panel(cx);
     }
 
     // MARK: Image
@@ -675,29 +677,29 @@ impl AppState {
         self.touch(cx);
     }
 
-    fn on_levels(&mut self, _: &keys::LevelsSheet, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Levels, w, cx);
+    fn on_levels(&mut self, _: &keys::LevelsSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_levels_panel(cx);
     }
-    fn on_hue_saturation(&mut self, _: &keys::HueSaturationSheet, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::HueSaturation, w, cx);
+    fn on_hue_saturation(&mut self, _: &keys::HueSaturationSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_hue_saturation_panel(cx);
     }
-    fn on_curves(&mut self, _: &keys::CurvesSheet, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::Curves), w, cx);
+    fn on_curves(&mut self, _: &keys::CurvesSheet, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::Curves, cx);
     }
-    fn on_filter_black_white(&mut self, _: &keys::FilterBlackWhite, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::BlackWhite), w, cx);
+    fn on_filter_black_white(&mut self, _: &keys::FilterBlackWhite, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::BlackWhite, cx);
     }
-    fn on_filter_color_balance(&mut self, _: &keys::FilterColorBalance, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::ColorBalance), w, cx);
+    fn on_filter_color_balance(&mut self, _: &keys::FilterColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::ColorBalance, cx);
     }
-    fn on_filter_exposure(&mut self, _: &keys::FilterExposure, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::Exposure), w, cx);
+    fn on_filter_exposure(&mut self, _: &keys::FilterExposure, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::Exposure, cx);
     }
-    fn on_filter_gradient_map(&mut self, _: &keys::FilterGradientMap, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::GradientMap), w, cx);
+    fn on_filter_gradient_map(&mut self, _: &keys::FilterGradientMap, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::GradientMap, cx);
     }
-    fn on_filter_grain(&mut self, _: &keys::FilterGrain, w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::Grain), w, cx);
+    fn on_filter_grain(&mut self, _: &keys::FilterGrain, _w: &mut Window, cx: &mut Context<Self>) {
+        self.open_filter_panel(FilterKind::Grain, cx);
     }
 
     // MARK: Layer
@@ -807,7 +809,7 @@ impl AppState {
     fn on_add_adjustment_color_balance(&mut self, _: &keys::AddAdjustmentColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
         self.add_adjustment(AdjustmentKind::ColorBalance, cx);
     }
-    fn on_edit_adjustment(&mut self, _: &keys::EditAdjustment, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_edit_adjustment(&mut self, _: &keys::EditAdjustment, _w: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
@@ -828,7 +830,7 @@ impl AppState {
         match adjustment.kind {
             AdjustmentKind::Levels => {
                 self.tab().session.levels = Some(adjustment.levels.clone());
-                self.open_sheet(SheetKind::Levels, w, cx);
+                self.open_levels_panel(cx);
             }
             AdjustmentKind::Hsv => {
                 self.tab().session.hue_saturation =
@@ -840,12 +842,12 @@ impl AppState {
                             adjustment.colorize,
                         )
                     }));
-                self.open_sheet(SheetKind::HueSaturation, w, cx);
+                self.open_hue_saturation_panel(cx);
             }
             other => {
                 if let Some(filter) = other.filter_kind() {
                     self.tab().session.filter_edit = Some(filter_settings_from_adjustment(&adjustment));
-                    self.open_sheet(SheetKind::Filter(filter), w, cx);
+                    self.open_filter_panel(filter, cx);
                 }
             }
         }
@@ -865,32 +867,32 @@ impl AppState {
         self.tab().session.invert_selection();
         self.touch(cx);
     }
-    fn on_feather(&mut self, _: &keys::FeatherSheet, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Feather), _w, cx);
+    fn on_feather(&mut self, _: &keys::FeatherSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_amount_panel(SelectionAmountOperation::Feather, w, cx);
     }
-    fn on_expand(&mut self, _: &keys::ExpandSheet, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Expand), _w, cx);
+    fn on_expand(&mut self, _: &keys::ExpandSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_amount_panel(SelectionAmountOperation::Expand, w, cx);
     }
-    fn on_contract(&mut self, _: &keys::ContractSheet, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Amount(SelectionAmountOperation::Contract), _w, cx);
+    fn on_contract(&mut self, _: &keys::ContractSheet, w: &mut Window, cx: &mut Context<Self>) {
+        self.open_amount_panel(SelectionAmountOperation::Contract, w, cx);
     }
 
     // MARK: Filter
 
     fn on_filter_blur(&mut self, _: &keys::FilterGaussianBlur, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::GaussianBlur), _w, cx);
+        self.open_filter_panel(FilterKind::GaussianBlur, cx);
     }
     fn on_filter_motion(&mut self, _: &keys::FilterMotionBlur, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::MotionBlur), _w, cx);
+        self.open_filter_panel(FilterKind::MotionBlur, cx);
     }
     fn on_filter_noise(&mut self, _: &keys::FilterAddNoise, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::AddNoise), _w, cx);
+        self.open_filter_panel(FilterKind::AddNoise, cx);
     }
     fn on_filter_lens(&mut self, _: &keys::FilterLensCorrection, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::LensCorrection), _w, cx);
+        self.open_filter_panel(FilterKind::LensCorrection, cx);
     }
     fn on_filter_camera_raw(&mut self, _: &keys::FilterCameraRaw, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Filter(FilterKind::CameraRaw), _w, cx);
+        self.open_filter_panel(FilterKind::CameraRaw, cx);
     }
 
     // MARK: View

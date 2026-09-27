@@ -22,7 +22,7 @@ use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::raster::{ImportedImage, Bitmap};
 use compositor_core::render;
-use compositor_core::session::{EditorSession, SelectionAmountOperation};
+use compositor_core::session::EditorSession;
 use compositor_core::transform::LayerTransform;
 use compositor_core::tools::brush::RasterEdit;
 
@@ -82,17 +82,14 @@ pub enum CanvasDrag {
     SelectionMove { start: CGPoint },
 }
 
-/// Which modal sheet is open.
+/// Which modal sheet is open. The floating panels that replaced the tool
+/// dialogs (`SheetKind::Levels`, `HueSaturation`, `Effects`, `Filter`,
+/// `Amount`, `Shortcuts` — see `panels_ui`) are gone from here; what remains
+/// are the modal dialogs Swift presents as sheets/NSAlerts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SheetKind {
-    NewCanvas,
     ImageSize,
     CanvasSize,
-    Levels,
-    HueSaturation,
-    Effects,
-    Filter(FilterKind),
-    Amount(SelectionAmountOperation),
     ExportPng,
     ExportJpeg,
     Import,
@@ -100,7 +97,6 @@ pub enum SheetKind {
     Open,
     Trim,
     About,
-    Shortcuts,
     /// The unsaved-changes alert (`Pending::Confirm`): Save / Cancel /
     /// Don't Save, resolved through the workspace's flow.
     Confirm,
@@ -112,7 +108,6 @@ pub enum SheetKind {
 /// sheet doesn't use are simply never read.
 pub struct SheetState {
     pub kind: SheetKind,
-    pub name: Entity<InputState>,
     pub width: Entity<InputState>,
     pub height: Entity<InputState>,
     pub path: Entity<InputState>,
@@ -122,21 +117,10 @@ pub struct SheetState {
     pub link: bool,
     pub relative: bool,
     pub anchor: usize,
-    pub background: usize,
     pub preset: usize,
-    pub channel: usize,
     pub sliders: Vec<Entity<SliderState>>,
-    pub checkbox_a: bool,
-    pub checkbox_b: bool,
-    pub colorize: bool,
     pub based_on: usize,
     pub sides: [bool; 4],
-    /// Histogram of the adjusted pixels (Levels).
-    pub histogram: [f64; 1024],
-    /// The full Levels settings behind the sliders: Auto replaces every
-    /// channel's range at once, while the sliders only ever edit the visible
-    /// channel's range on top of this.
-    pub levels: compositor_core::adjust::LevelsSettings,
     /// The JPEG export's live encoded preview (`JPEGResult.preview`),
     /// fitted into the sheet's frame.
     pub jpeg_preview: Option<Arc<RenderImage>>,
@@ -305,6 +289,10 @@ pub struct AppState {
     pub viewport: Bounds<Pixels>,
     pub drag: Option<CanvasDrag>,
     pub sheet: Option<SheetState>,
+    /// The floating panels (design doc §5): the registry of open panels plus
+    /// their remembered positions, and the per-panel widget bundles.
+    pub panels: crate::panels::FloatingPanels,
+    pub panel_widgets: crate::panels_ui::PanelWidgets,
     pub status: Option<String>,
     pub rename: Option<uuid::Uuid>,
     pub rename_input: Option<Entity<InputState>>,
@@ -451,6 +439,8 @@ impl AppState {
             viewport: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
             drag: None,
             sheet: None,
+            panels: crate::panels::FloatingPanels::new(),
+            panel_widgets: crate::panels_ui::PanelWidgets::default(),
             status: None,
             rename: None,
             rename_input: None,
@@ -678,7 +668,7 @@ impl AppState {
     pub fn canvas_key_up(
         &mut self,
         event: &KeyUpEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.keystroke.key == "space" {
@@ -817,15 +807,12 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Option-P with the Levels sheet open: flips its Preview checkbox.
+    /// Option-P with the Levels panel open: flips its Preview checkbox.
     pub fn toggle_levels_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(sheet) = self.sheet.as_mut() else {
+        let Some(panel) = self.panel_widgets.levels.as_mut() else {
             return;
         };
-        if sheet.kind != SheetKind::Levels {
-            return;
-        }
-        sheet.checkbox_a = !sheet.checkbox_a;
+        panel.preview = !panel.preview;
         self.refresh_levels_preview(cx);
     }
 
@@ -912,6 +899,9 @@ impl AppState {
             return;
         };
         let hsb = picker.hsb;
+        // The text color's picker lives in the same floating panel as the
+        // palette one (ColorPickerSheet.swift:170-182).
+        let title = picker.target.title();
         let hue = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -976,6 +966,12 @@ impl AppState {
             brightness,
             hex,
         });
+        self.panels.show(
+            crate::panels::panel_names::COLOR_PICKER_PANEL,
+            title,
+            crate::panels::PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
     }
 
     // MARK: Transform inspector (TransformInspector.swift)
@@ -1504,8 +1500,10 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Commits the preview into the active layer's pixels as one undo step.
-    pub fn commit_preview(&mut self, name: &str, cx: &mut Context<Self>) {
+    /// Commits the preview into the active layer's pixels as one undo step,
+    /// then drops the preview (the canvas shows the layer's own pixels — now
+    /// the committed ones). The sheet/panel caller closes its own UI after.
+    pub fn commit_preview_pixels(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(preview) = self.preview.clone() {
             let transform = self.preview_base_transform.unwrap_or_default();
             self.history_edit(name, move |session| {
@@ -1522,7 +1520,10 @@ impl AppState {
                 }
             });
         }
-        self.close_sheet(cx);
+        self.preview = None;
+        self.preview_base = None;
+        self.preview_base_transform = None;
+        self.touch(cx);
     }
 
     /// The active selection clipped to the canvas (`selection?.clip(canvas:)`).
@@ -1581,7 +1582,7 @@ impl AppState {
         else {
             return;
         };
-        let mut settings = self.filter_settings_from_sheet(cx);
+        let mut settings = self.filter_settings_from_panel(cx);
         compositor_core::adjust::camera_raw::apply_defringe_sample(
             &mut settings.camera_raw.optics,
             hue,
@@ -1623,7 +1624,7 @@ impl AppState {
         let Some(base) = self.preview_base.clone() else {
             return;
         };
-        let mut settings = self.filter_settings_from_sheet(cx);
+        let mut settings = self.filter_settings_from_panel(cx);
         settings.camera_raw.white_balance = CameraRawWhiteBalance::Auto;
         if let Some((temperature, tint)) =
             compositor_core::adjust::camera_raw::CameraRawSettings::auto_balance(&base)
