@@ -128,7 +128,45 @@ impl AppState {
                 .as_ref()
                 .map(|sheet| sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset)))
                 .unwrap_or(false);
-        let footer = if kind == SheetKind::Confirm {
+        let footer = if kind == SheetKind::Confirm && self.delete_ask_ids.is_some() {
+            // The live-mask delete ask (deleteWithLiveMaskChoice's NSAlert,
+            // LiveLayerMask.swift:118-121): Bake and Delete / Cancel /
+            // Remove Links and Delete.
+            gpui_kit::div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .child(
+                    Button::new("delete-ask-bake")
+                        .label("Bake and Delete")
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.resolve_delete_ask(true, cx);
+                        })),
+                )
+                .child(
+                    Button::new("delete-ask-cancel")
+                        .label("Cancel")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.resolve_delete_ask_cancel(cx);
+                        })),
+                )
+                .child(
+                    Button::new("delete-ask-unlink")
+                        .label("Remove Links and Delete")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.resolve_delete_ask(false, cx);
+                        })),
+                )
+        } else if kind == SheetKind::Confirm {
             // `confirmReplacement` (:257-259): Save / Cancel / Don't Save.
             gpui_kit::div()
                 .flex()
@@ -540,7 +578,13 @@ impl AppState {
                     body = body.child(text_label(line.to_string(), false));
                 }
                 if kind == SheetKind::Confirm {
-                    body = body.child(text_label(crate::project::UNSAVED_CHANGES_INFO, true));
+                    if self.delete_ask_ids.is_some() {
+                        // The delete ask's informative text (the alert's
+                        // `informativeText`, LiveLayerMask.swift:117).
+                        body = body.child(text_label(crate::flows::DELETE_LIVE_MASK_INFO, true));
+                    } else {
+                        body = body.child(text_label(crate::project::UNSAVED_CHANGES_INFO, true));
+                    }
                 }
             }
         }
@@ -553,7 +597,13 @@ impl AppState {
         // their pending (with no answer).
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
             Some(SheetKind::Confirm) => {
-                self.resolve_confirm_cancel(cx);
+                // The delete ask's Cancel deletes nothing; the unsaved-changes
+                // confirm's Cancel aborts the close/quit flow.
+                if self.delete_ask_ids.is_some() {
+                    self.resolve_delete_ask_cancel(cx);
+                } else {
+                    self.resolve_confirm_cancel(cx);
+                }
                 return;
             }
             Some(SheetKind::Alert) => {
@@ -1177,10 +1227,10 @@ impl AppState {
 
     /// The footer's Done: persists the draft (`ShortcutSettings.save`) and
     /// closes. The keymap itself is rebuilt at startup, so new chords take
-    /// effect after a restart — noted on the sheet.
+    /// effect immediately (the keymap rebuilds from the registry).
     pub(crate) fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
         match self.shortcuts().save() {
-            Ok(()) => self.set_status("Shortcuts saved; restart to apply them", cx),
+            Ok(()) => self.set_status("Shortcuts saved", cx),
             Err(error) => self.set_status(format!("Saving shortcuts failed: {error}"), cx),
         }
         Self::shortcuts_editor_take();
@@ -1247,7 +1297,7 @@ impl AppState {
             .flex_col()
             .gap_1()
             .child(text_label(
-                "Click a shortcut, then press its new key combination. Saved changes take effect after a restart.",
+                "Click a shortcut, then press its new key combination. Changes apply immediately.",
                 true,
             ))
             .child(list);

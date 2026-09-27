@@ -14,6 +14,9 @@ use crate::state::{AppState, SaveAfter, SheetKind};
 use compositor_core::transform::LayerSampling;
 use crate::tabs::ProjectTab;
 
+/// The live-mask delete alert's informative text (LiveLayerMask.swift:117).
+pub(crate) const DELETE_LIVE_MASK_INFO: &str = "Bake keeps the current masked appearance in the dependent layers’ pixels. Remove Links reveals their pixels. You can undo either choice.";
+
 impl AppState {
     /// Runs a closure with the current tab's (controller, session, busy)
     /// triple — the shape every controller entry point takes.
@@ -245,6 +248,70 @@ impl AppState {
                 self.set_status(format!("Exported {}", url.display()), cx);
             }
         }
+    }
+
+    // MARK: The live-mask delete ask
+
+    /// `deleteLayerOrMask`'s app entry — what the workspace's delete handler
+    /// calls (the menu and Delete key route here). The mask target deletes
+    /// the mask (SelectionEdits.swift:71); otherwise, when the deleted layers
+    /// supply live masks to layers that stay, `deleteWithLiveMaskChoice`
+    /// (LiveLayerMask.swift:106-125) asks Bake / Cancel / Remove Links before
+    /// deleting, and the plain path deletes straight away.
+    pub fn request_delete_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // deleteLayerOrMask: the mask target deletes the mask; the single
+        // selection guard matches the workspace's former body.
+        let mask_delete = self.tab().session.is_mask_selected
+            && self
+                .tab()
+                .session
+                .active_layer()
+                .map(|layer| layer.mask.is_some())
+                .unwrap_or(false)
+            && self.tab().session.selected_layer_ids.len() <= 1;
+        if mask_delete {
+            self.tab().session.delete_layer_mask();
+            self.touch(cx);
+            return;
+        }
+        if !self.delete_needs_ask() {
+            self.tab().session.delete_selected_layers();
+            self.touch(cx);
+            return;
+        }
+        let ids = self.delete_candidates();
+        let single = ids.len() <= 1;
+        self.delete_ask_ids = Some(ids);
+        self.open_sheet(SheetKind::Confirm, window, cx);
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.message = if single {
+                "This layer supplies a live mask".to_string()
+            } else {
+                "These layers supply live masks".to_string()
+            };
+        }
+        self.touch(cx);
+    }
+
+    /// The delete ask's Bake and Delete / Remove Links and Delete buttons:
+    /// the choice runs `delete_with_live_mask_choice` on the asking tab's
+    /// session — bake keeps the masked appearance in the dependents' pixels,
+    /// remove links reveals them (both one undo step, either way undoable).
+    pub fn resolve_delete_ask(&mut self, bake: bool, cx: &mut Context<Self>) {
+        let Some(ids) = self.delete_ask_ids.take() else {
+            return;
+        };
+        self.close_sheet(cx);
+        self.with_current_tab(|_, session, _| {
+            session.delete_with_live_mask_choice(&ids, bake);
+        });
+        self.touch(cx);
+    }
+
+    /// The delete ask's Cancel: nothing is deleted.
+    pub fn resolve_delete_ask_cancel(&mut self, cx: &mut Context<Self>) {
+        self.delete_ask_ids = None;
+        self.close_sheet(cx);
     }
 
     // MARK: The unsaved-changes confirm

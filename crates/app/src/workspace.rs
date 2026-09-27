@@ -714,21 +714,11 @@ impl AppState {
         self.touch(cx);
     }
     fn on_delete_layer(&mut self, _: &keys::DeleteLayer, w: &mut Window, cx: &mut Context<Self>) {
-        self.hotkey(w, cx, |t, _w, cx| {
-            // deleteLayerOrMask: the mask target deletes the mask; otherwise
-            // the whole selection goes through one undo (SelectionEdits.swift:71).
-            let mask_delete = t.tab().session.is_mask_selected
-                && t.tab().session
-                    .active_layer()
-                    .map(|layer| layer.mask.is_some())
-                    .unwrap_or(false)
-                && t.tab().session.selected_layer_ids.len() <= 1;
-            if mask_delete {
-                t.tab().session.delete_layer_mask();
-            } else {
-                t.tab().session.delete_selected_layers();
-            }
-            t.touch(cx);
+        self.hotkey(w, cx, |t, w, cx| {
+            // deleteLayerOrMask: the mask target deletes the mask; a live
+            // mask dependency raises the bake/remove-links ask (Swift's
+            // finishDeletingLayers dialog).
+            t.request_delete_layer(w, cx);
         });
     }
     fn on_merge_down(&mut self, _: &keys::MergeDown, _w: &mut Window, cx: &mut Context<Self>) {

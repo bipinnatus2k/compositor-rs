@@ -14,7 +14,7 @@ use gpui_kit::Styled;
 
 use compositor_core::canvas::CropDragMode;
 use compositor_core::document::LayoutGrid;
-use compositor_core::document::{GuideAxis, NavigationTool};
+use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, NavigationTool};
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::raster::Bitmap;
 use compositor_core::selection::LassoKind;
@@ -709,22 +709,33 @@ impl AppState {
             CGSize::new(document.width as f64, document.height as f64),
             clip,
         );
-        if let (Some(source_point), Some(sample)) =
-            (self.tab().session.clone_source, self.sample_for_clone())
-        {
-            if self.tab().session.tool == NavigationTool::CloneStamp {
-                let offset = CGSize::new(source_point.x - doc.x, source_point.y - doc.y);
-                edit.clone = Some((sample, offset));
+        // Clone Stamp: aligned strokes keep the first stroke's offset, unaligned
+        // ones run from the brush to the source each time (CloneStamp.swift:23-27
+        // — `cloneStrokeOffset` plus the `cloneOffset = offset` fixup done only
+        // once the sample succeeded). This used to recompute source-minus-brush
+        // every stroke, which made aligned stamping drift.
+        if self.tab().session.tool == NavigationTool::CloneStamp {
+            if let Some(offset) = self.tab().session.clone_stroke_offset(doc) {
+                if let Some(sample) = self.sample_for_clone() {
+                    if self.tab().session.clone_settings.aligned
+                        && self.tab().session.clone_offset.is_none()
+                    {
+                        self.tab().session.clone_offset = Some(offset);
+                    }
+                    edit.clone = Some((sample, offset));
+                }
             }
         }
-        // The Blur brush: the canvas as shown (displayed transform, mask
-        // applied), softened by an amount that follows the brush size,
-        // painted in place through the tip (BlurTool.swift:8-40).
+        // The Blur brush: the stroke's own target sampled at its start — the
+        // layer as displayed, or the mask's own coverage when the mask is the
+        // target — softened by an amount that follows the brush size, painted
+        // in place through the tip (BlurTool.swift:8-40,
+        // EditorSession+Brush.swift:42-46). This used to sample the layer even
+        // on a mask target, stamping layer pixels into the mask.
         if self.tab().session.tool == NavigationTool::Blur {
-            if let Some(sample) = self.sample_for_clone() {
-                let diameter = self.tab().session.brush_settings.diameter;
-                let sigma = (diameter / 10.0).clamp(1.5, 30.0);
-                let blurred = compositor_core::raster::gaussian_blur_rgba(&sample, sigma);
+            let displayed = self.tab().session.displayed_transform(layer);
+            if let Some(sample) = blur_sample(&document, layer, &displayed, mask_target) {
+                let blurred = blur_sample_softened(&sample, self.tab().session.brush_settings.diameter);
                 edit.clone = Some((blurred, CGSize::ZERO));
             }
         }
@@ -767,7 +778,63 @@ impl AppState {
         }
         Some(canvas)
     }
+}
 
+/// The blur strength for a brush diameter: `min(30, max(1.5, diameter / 10))`
+/// (BlurTool.swift:10).
+pub(crate) fn blur_sigma(diameter: f64) -> f64 {
+    (diameter / 10.0).clamp(1.5, 30.0)
+}
+
+/// `blurSample_softened` — the sampled frame Gaussian-softened by the blur
+/// strength the brush diameter implies.
+pub(crate) fn blur_sample_softened(sample: &Bitmap, diameter: f64) -> Bitmap {
+    compositor_core::raster::gaussian_blur_rgba(sample, blur_sigma(diameter))
+}
+
+/// What a Blur stroke paints, taken when the stroke starts (BlurTool.swift:8-40):
+/// with the mask as the target, the mask's own coverage in the document grid —
+/// its edge tone kept past its pixels —; otherwise the active layer as the
+/// canvas displays it. The sample is painted in place through the tip.
+pub(crate) fn blur_sample(
+    document: &CanvasDocument,
+    layer: &ImageLayer,
+    displayed: &compositor_core::transform::LayerTransform,
+    mask_target: bool,
+) -> Option<Bitmap> {
+    if mask_target {
+        blur_mask_sample(document, layer)
+    } else {
+        let image = layer.asset.as_ref()?.image.as_ref().clone();
+        let mut canvas = Bitmap::new(document.width, document.height);
+        compositor_core::render::draw_layer_pixels(&image, displayed, &mut canvas);
+        Some(canvas)
+    }
+}
+
+/// The mask half of `blurSample(mask: true)` (BlurTool.swift:11-28): the
+/// document grid filled with the mask's background tone — past its pixels a
+/// mask keeps its edge tone, so blurring near its edge doesn't pull in the
+/// wrong one — with the mask's own coverage drawn over it.
+pub(crate) fn blur_mask_sample(document: &CanvasDocument, layer: &ImageLayer) -> Option<Bitmap> {
+    let mask = layer.mask.as_ref()?;
+    if !mask.is_enabled {
+        return None;
+    }
+    let mut canvas = Bitmap::new(document.width, document.height);
+    let background = (compositor_core::document::LayerMask::background_of(&mask.asset.thumbnail)
+        * 255.0)
+        .round() as u8;
+    for px in canvas.data.chunks_exact_mut(4) {
+        px.copy_from_slice(&[background, background, background, 255]);
+    }
+    let transform = layer.mask_transform();
+    let image = mask.asset.image.as_ref().clone();
+    compositor_core::render::draw_layer_pixels(&image, &transform, &mut canvas);
+    Some(canvas)
+}
+
+impl AppState {
     fn commit_stroke(&mut self, mut edit: RasterEdit, cx: &mut Context<Self>) {
         if !edit.has_paint() {
             return;
@@ -1757,13 +1824,111 @@ fn ruler_label(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        guide_axis_position, guide_release_deletes, handle_at, nice_tick, ruler_axis_at,
-        ruler_label, shape_drag_rect, transform_press_layer,
+        blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, guide_axis_position,
+        guide_release_deletes, handle_at, nice_tick, ruler_axis_at, ruler_label, shape_drag_rect,
+        transform_press_layer,
     };
     use crate::state::RULER_SIZE;
-    use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, ShapeKind};
+    use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, LayerMask, ShapeKind};
     use compositor_core::geometry::{CGPoint, CGRect};
     use compositor_core::raster::{Bitmap, ImportedImage};
+
+    fn opaque_layer(width: usize, height: usize, rgba: [u8; 4], origin: CGPoint) -> ImageLayer {
+        let mut image = Bitmap::new(width, height);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&rgba);
+        }
+        ImageLayer::with_asset(ImportedImage::new(image, "layer"), origin)
+    }
+
+    #[test]
+    fn blur_sigma_follows_the_brush_diameter_with_swifts_clamp() {
+        // sigma = min(30, max(1.5, diameter / 10)) (BlurTool.swift:10).
+        assert_eq!(blur_sigma(5.0), 1.5);
+        assert_eq!(blur_sigma(200.0), 20.0);
+        assert_eq!(blur_sigma(2000.0), 30.0);
+    }
+
+    #[test]
+    fn blur_sample_on_the_layer_draws_it_as_displayed() {
+        // blurSample(mask: false): the layer's own pixels through the given
+        // transform, at document size (BlurTool.swift:31-40).
+        let document = CanvasDocument::new(40, 40);
+        let layer = opaque_layer(20, 20, [255, 0, 0, 255], CGPoint::new(10.0, 10.0));
+        let sample = blur_sample(&document, &layer, &layer.transform, false).unwrap();
+        assert_eq!(
+            (sample.width, sample.height),
+            (document.width, document.height)
+        );
+        assert_eq!(sample.pixel(15, 15), [255, 0, 0, 255]);
+        // Outside the layer the sample is empty.
+        assert_eq!(sample.pixel(5, 5), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn blur_sample_on_a_mask_takes_the_masks_own_coverage() {
+        // blurSample(mask: true): the mask's coverage in the document grid,
+        // not the layer's masked pixels — and a disabled mask blocks the tool
+        // (BlurTool.swift:11-28; beginBrush's guard).
+        let mut document = CanvasDocument::new(40, 40);
+        let mut layer = opaque_layer(40, 40, [255, 0, 0, 255], CGPoint::ZERO);
+        let mut mask_image = Bitmap::new(40, 40);
+        for px in mask_image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[200, 200, 200, 255]);
+        }
+        layer.mask = Some(LayerMask {
+            asset: ImportedImage::new(mask_image, "mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        let sample = blur_mask_sample(&document, &layer).unwrap();
+        assert_eq!(
+            (sample.width, sample.height),
+            (document.width, document.height)
+        );
+        // The coverage's gray, drawn over the background tone.
+        assert_eq!(sample.pixel(10, 10), [200, 200, 200, 255]);
+        // A disabled mask samples nothing, like Swift's `guard let owned` on
+        // an enabled-only mask path.
+        layer.mask = Some(LayerMask {
+            is_enabled: false,
+            ..layer.mask.take().unwrap()
+        });
+        assert!(blur_mask_sample(&document, &layer).is_none());
+    }
+
+    #[test]
+    fn blur_sample_softened_blurs_the_sample_by_the_sigma() {
+        // A white square softened into its neighborhood; the exact spread
+        // follows the diameter's sigma (a bigger diameter blurs further, so
+        // the square's interior dimmed more).
+        let mut sample = Bitmap::new(41, 41);
+        for y in 15..26 {
+            for x in 15..26 {
+                sample.set_pixel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let small = blur_sample_softened(&sample, 30.0);
+        let large = blur_sample_softened(&sample, 300.0);
+        // The center dimmed: the blur pulled the surrounding emptiness in.
+        assert!(small.pixel(20, 20)[0] < 255);
+        assert!(large.pixel(20, 20)[0] < small.pixel(20, 20)[0]);
+    }
+
+    #[test]
+    fn shape_drag_rect_uses_the_requested_drag_mode() {
+        // Keep a direct assertion on the rect helper the canvas drags use.
+        let start = CGPoint::ZERO;
+        let rect = shape_drag_rect(
+            ShapeKind::Rectangle,
+            start,
+            CGPoint::new(30.0, 20.0),
+            false,
+            false,
+        );
+        assert_eq!(rect, CGRect::new(0.0, 0.0, 30.0, 20.0));
+    }
 
     #[test]
     fn transform_press_auto_selects_the_layer_above() {

@@ -391,6 +391,16 @@ pub struct AppState {
     /// whose controller owns the pending `SaveAs` and what to resume after
     /// `finish_save`.
     pub pending_save: Option<(crate::project::TabId, SaveAfter)>,
+    /// Add Noise / grain's random pattern for the open filter panel: fixed
+    /// while the panel is open so changing Amount doesn't reshuffle it, and
+    /// shared by the preview and the committed pixels (FilterEdit.seed,
+    /// Filters.swift:223).
+    pub filter_seed: u32,
+    /// The live-mask delete ask (`deleteWithLiveMaskChoice`,
+    /// LiveLayerMask.swift:106-125): the layers waiting for the
+    /// Bake / Remove Links / Cancel answer, while the three-button Confirm
+    /// sheet is up.
+    pub delete_ask_ids: Option<Vec<uuid::Uuid>>,
 }
 
 /// What continues after a mid-flow save panel completes.
@@ -411,6 +421,54 @@ fn slider(min: f32, max: f32, step: f32, value: f32) -> SliderState {
         .max(max)
         .step(step)
         .default_value(value)
+}
+
+/// A fresh pseudo-random seed for noise patterns (`UInt32.random`, via the
+/// same time source the core session uses for its own reseeds).
+pub(crate) fn time_seed() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u32)
+        .unwrap_or(0)
+        ^ 0x9e3779b9
+}
+
+/// The top-level ids a delete of the current selection removes
+/// (`delete_selected_layers`' id set: the selected layers, in document order).
+pub(crate) fn delete_candidate_ids(
+    document: &compositor_core::document::CanvasDocument,
+    selected: &[uuid::Uuid],
+) -> Vec<uuid::Uuid> {
+    document
+        .layers
+        .iter()
+        .filter(|l| selected.contains(&l.id))
+        .map(|l| l.id)
+        .collect()
+}
+
+/// `deleteWithLiveMaskChoice`'s targets (LiveLayerMask.swift:110-114): the
+/// layers that stay but take their live mask from one of the deleted layers —
+/// the ones the Bake / Remove Links question is about.
+pub(crate) fn delete_ask_targets(
+    document: &compositor_core::document::CanvasDocument,
+    ids: &[uuid::Uuid],
+) -> Vec<uuid::Uuid> {
+    let mut removed = std::collections::HashSet::new();
+    for id in ids {
+        removed.extend(document.descendant_ids(*id));
+        removed.insert(*id);
+    }
+    document
+        .layers
+        .iter()
+        .filter(|l| {
+            !removed.contains(&l.id)
+                && l.mask_source_id.map(|s| removed.contains(&s)).unwrap_or(false)
+        })
+        .map(|l| l.id)
+        .collect()
 }
 
 impl AppState {
@@ -518,6 +576,8 @@ impl AppState {
             text_box_rect: None,
             key_epoch: std::time::Instant::now(),
             pending_save: None,
+            filter_seed: time_seed(),
+            delete_ask_ids: None,
         };
         state.subscribe_sliders(cx);
         state.subscribe_inputs(cx);
@@ -853,7 +913,9 @@ impl AppState {
             scale: 1.0,
             selection,
             mapping: CGAffineTransform::IDENTITY,
-            seed: 7,
+            // A one-shot edit takes a fresh seed (Filters.swift:223's
+            // `UInt32.random` at FilterEdit creation).
+            seed: time_seed(),
             noise_origin: CGPoint::ZERO,
             camera_raw_clipping: None,
             visualize_point_color: -1,
@@ -1572,6 +1634,10 @@ impl AppState {
         self.preview_base = None;
         self.preview_base_transform = None;
         self.gradient_cursor = None;
+        // The filter panel session is over: the next one draws a fresh noise
+        // pattern (FilterEdit's `let seed = UInt32.random` at creation).
+        self.filter_seed = time_seed();
+        self.delete_ask_ids = None;
         self.touch(cx);
     }
 
@@ -1598,6 +1664,8 @@ impl AppState {
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
+        // A committed filter closes its panel session: a fresh seed next time.
+        self.filter_seed = time_seed();
         self.touch(cx);
     }
 
@@ -1609,6 +1677,38 @@ impl AppState {
                 .as_ref()
                 .map(|document| selection.clip(document.size()))
         })
+    }
+
+    /// Whether deleting the current selection must ask first: the deleted
+    /// layers supply live masks to layers that stay (`deleteWithLiveMaskChoice`'s
+    /// guard, LiveLayerMask.swift:110-114). Plain deletes answer false and go
+    /// through `delete_selected_layers` as before.
+    pub fn delete_needs_ask(&self) -> bool {
+        let session = &self.current_tab().session;
+        if !session.can_edit_layers() {
+            return false;
+        }
+        let Some(document) = session.document.as_ref() else {
+            return false;
+        };
+        let mut ids = delete_candidate_ids(document, &session.selected_layer_ids);
+        if ids.len() <= 1 {
+            // delete_selected_layers defers to delete_active_layer for a
+            // single selection.
+            ids = session.active_layer_id.into_iter().collect();
+        }
+        !delete_ask_targets(document, &ids).is_empty()
+    }
+
+    /// The layers a delete of the selection removes — the id set
+    /// `delete_selected_layers` computes (the selected layers, top level;
+    /// folders take their contents through `descendant_ids`).
+    pub(crate) fn delete_candidates(&self) -> Vec<uuid::Uuid> {
+        let session = &self.current_tab().session;
+        match session.document.as_ref() {
+            Some(document) => delete_candidate_ids(document, &session.selected_layer_ids),
+            None => Vec::new(),
+        }
     }
 
     /// Runs `filter` over the preview base and shows it live on canvas.
@@ -1629,7 +1729,10 @@ impl AppState {
             scale: 1.0,
             selection,
             mapping: CGAffineTransform::IDENTITY,
-            seed: 7,
+            // The seed was drawn when the panel opened and is reused for the
+            // committed pixels, so the preview is exactly what lands
+            // (FilterEdit.seed, Filters.swift:223).
+            seed: self.filter_seed,
             noise_origin: CGPoint::ZERO,
             camera_raw_clipping: None,
             // Swift's default is -1: no visualization (CameraRaw.swift:221).
@@ -1927,6 +2030,83 @@ mod tests {
         assert_eq!(fields[2].1, "150");
         assert_eq!(fields[3].1, "75");
         assert_eq!(fields[4].1, "150");
+    }
+
+    mod delete_ask {
+        use super::super::{delete_ask_targets, delete_candidate_ids, time_seed};
+        use compositor_core::document::{CanvasDocument, ImageLayer};
+        use compositor_core::geometry::CGPoint;
+        use compositor_core::raster::{Bitmap, ImportedImage};
+
+        fn empty_layer(name: &str) -> ImageLayer {
+            ImageLayer::with_asset(
+                ImportedImage::new(Bitmap::new(4, 4), name),
+                CGPoint::ZERO,
+            )
+        }
+
+        #[test]
+        fn candidates_are_the_selected_layers_in_document_order() {
+            let mut document = CanvasDocument::new(10, 10);
+            document.layers = vec![empty_layer("a"), empty_layer("b"), empty_layer("c")];
+            let ids: Vec<_> = document.layers.iter().map(|l| l.id).collect();
+            // Only the selected ids pass, in document order.
+            assert_eq!(
+                delete_candidate_ids(&document, &[ids[2], ids[0]]),
+                vec![ids[0], ids[2]]
+            );
+            assert!(delete_candidate_ids(&document, &[]).is_empty());
+        }
+
+        #[test]
+        fn targets_are_the_surviving_layers_masked_by_a_deleted_one() {
+            // base <- dependent takes its live mask from base. Deleting base
+            // must ask; deleting dependent must not.
+            let mut document = CanvasDocument::new(10, 10);
+            let base = empty_layer("base");
+            let mut dependent = empty_layer("dependent");
+            let mut isolated = empty_layer("isolated");
+            let base_id = base.id;
+            dependent.mask_source_id = Some(base_id);
+            let (dependent_id, isolated_id) = (dependent.id, isolated.id);
+            document.layers = vec![base, dependent, isolated];
+
+            let targets = delete_ask_targets(&document, &[base_id]);
+            assert_eq!(targets, vec![dependent_id]);
+            assert!(delete_ask_targets(&document, &[dependent_id]).is_empty());
+            assert!(delete_ask_targets(&document, &[isolated_id]).is_empty());
+        }
+
+        #[test]
+        fn a_folder_delete_counts_its_contents_suppliers() {
+            // Deleting the folder removes the child too, so a layer masked by
+            // the child is a target even though the child wasn't named.
+            let mut document = CanvasDocument::new(10, 10);
+            let mut folder = empty_layer("folder");
+            folder.is_group = true;
+            let mut child = empty_layer("child");
+            let folder_id = folder.id;
+            child.parent_id = Some(folder_id);
+            let child_id = child.id;
+            let mut dependent = empty_layer("dependent");
+            dependent.mask_source_id = Some(child_id);
+            let dependent_id = dependent.id;
+            document.layers = vec![folder, child, dependent];
+
+            assert_eq!(
+                delete_ask_targets(&document, &[folder_id]),
+                vec![dependent_id]
+            );
+        }
+
+        #[test]
+        fn time_seed_varies_across_calls() {
+            // Time-derived seeds (Filters.swift:223's UInt32.random): a run of
+            // calls must not all collapse onto one value.
+            let seeds: std::collections::HashSet<u32> =
+                (0..64).map(|_| time_seed()).collect();
+            assert!(seeds.len() > 1, "seeds never varied: {seeds:?}");
+        }
     }
 }
 
