@@ -164,6 +164,45 @@ pub struct PixelClipboard {
     pub origin: CGPoint,
 }
 
+/// Selected pixels being dragged (`PixelMove` in SelectionEdits.swift): the
+/// lifted raster plus the outline it started from. This is the Cmd-drag
+/// temporary Move — a raster-level lift that previews by rebuilding the
+/// layer's grid (hole at the origin, pixels at the offset), not the floating
+/// "Floating Selection" layer that Cmd-T's `begin_selection_transform` opens
+/// for full affine handles.
+pub struct PixelMove {
+    /// The lifted raster (`PixelMove.raster`).
+    pub raster: RasterEdit,
+    /// The selection the move started from (`PixelMove.origin`).
+    pub origin: DocumentSelection,
+    /// Option-drag duplicates instead of moving (`PixelMove.duplicate`).
+    pub duplicate: bool,
+    /// How far the pixels sit from where they started, whole document
+    /// pixels (`PixelMove.offset`).
+    pub offset: CGSize,
+}
+
+impl PixelMove {
+    /// `movedSelection` — the original outline shifted by the drag.
+    pub fn moved_selection(&self) -> DocumentSelection {
+        DocumentSelection {
+            path: self
+                .origin
+                .path
+                .translated(self.offset.width, self.offset.height),
+            antialiased: self.origin.antialiased,
+            feather: self.origin.feather,
+        }
+    }
+
+    /// The layer grid with the drag applied (`moveLifted(by:duplicate:)`):
+    /// the selection becomes a transparent hole and the lifted pixels land at
+    /// the offset. Pure — Swift's preview is the same rebuild each drag event.
+    pub fn moved_pixels(&self) -> Option<Bitmap> {
+        self.raster.move_lifted(self.offset, self.duplicate)
+    }
+}
+
 /// `ColorPickerTarget` — what the open color picker edits
 /// (ColorPalette.swift:162-180). The Gradient Map variant has no core
 /// filter-edit session to attach to yet, so nothing opens it.
@@ -335,6 +374,8 @@ pub struct EditorSession {
     pub selection_contract_amount: i64,
     pub selection_amount_operation: Option<SelectionAmountOperation>,
     pub selection_move_origin: Option<DocumentSelection>,
+    /// Selected pixels being dragged (`pixelMove`); see `begin_pixel_move`.
+    pub pixel_move: Option<PixelMove>,
 
     // Clipboard (`pixelClipboard`)
     pub pixel_clipboard: Option<PixelClipboard>,
@@ -452,6 +493,7 @@ impl Default for EditorSession {
             selection_contract_amount: 1,
             selection_amount_operation: None,
             selection_move_origin: None,
+            pixel_move: None,
             transform_edit: None,
             locks_transform_ratio: true,
             snapping_enabled: true,
@@ -1951,6 +1993,199 @@ impl EditorSession {
         }
         let composed = edit.clear_pixels();
         self.commit_pixel_edit(&edit, &composed, "Clear");
+    }
+
+    // MARK: Moving selected pixels (SelectionEdits.swift's Cmd-drag / Cmd-arrow)
+
+    /// `beginPixelMove`'s guard: `canPaint` for the image target (one visible
+    /// layer of its own, no adjustment) with a non-empty selection. The mask
+    /// target is refused — masks have no pixels to lift as a drag.
+    fn can_pixel_move(&self) -> bool {
+        if !self.can_edit_layers() || self.is_mask_selected {
+            return false;
+        }
+        if self.selected_layer_ids.len() != 1 {
+            return false;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return false;
+        };
+        let Some(layer) = self.active_layer() else {
+            return false;
+        };
+        if layer.is_group || layer.adjustment.is_some() || layer.asset.is_none() {
+            return false;
+        }
+        if !document.effective_visible_ids().contains(&layer.id) {
+            return false;
+        }
+        self.selection().map(|s| !s.is_empty()).unwrap_or(false)
+    }
+
+    /// `beginPixelMove(duplicate:)` — starts moving the selected image
+    /// pixels; false when there is nothing to move (no selection, a mask
+    /// target, or no pixels under the selection). The pixels lift out of the
+    /// layer's raster right away; the document only changes when the move
+    /// commits. This is the temporary Move tool's raster-level lift, not
+    /// Cmd-T's floating selection (see `begin_selection_transform`).
+    /// Moves the outline only (never pixels). The whole drag is one undo
+    /// step (`Selection.swift:263-268`).
+    pub fn begin_selection_move(&mut self) -> bool {
+        let inside = matches!(&self.document, Some(document)
+            if document
+                .selection
+                .as_ref()
+                .map(|s| !s.path.is_empty())
+                .unwrap_or(false));
+        if !inside || !self.can_edit_layers() || self.selection_move_origin.is_some() {
+            return false;
+        }
+        self.begin_edit("Move Selection");
+        self.selection_move_origin = self.selection().cloned();
+        true
+    }
+
+    /// Offsets the outline from the drag's start, rounded to whole pixels so
+    /// edges stay crisp. The outline is not re-clipped, so it can leave the
+    /// canvas and come back intact (`Selection.swift:271-279`).
+    pub fn move_selection_outline(&mut self, offset: CGSize) {
+        let Some(origin) = &self.selection_move_origin else {
+            return;
+        };
+        let shift =
+            crate::geometry::CGAffineTransform::translation(offset.width.round(), offset.height.round());
+        let path = origin.path.transformed(&shift);
+        if let Some(document) = self.document.as_mut() {
+            document.selection = Some(DocumentSelection {
+                path,
+                antialiased: origin.antialiased,
+                feather: origin.feather,
+            });
+        }
+    }
+
+    pub fn end_selection_move(&mut self) {
+        if self.selection_move_origin.is_none() {
+            return;
+        }
+        self.selection_move_origin = None;
+        self.end_edit();
+    }
+
+    pub fn begin_pixel_move(&mut self, duplicate: bool) -> bool {
+        if self.pixel_move.is_some() || !self.can_pixel_move() {
+            return false;
+        }
+        let Some(document) = self.document.clone() else {
+            return false;
+        };
+        let Some(mut edit) = self.raster_edit_for_active(&document) else {
+            return false;
+        };
+        if !edit.lift_selection() {
+            return false;
+        }
+        self.finish_opacity_edit();
+        let Some(origin) = self.selection().cloned() else {
+            return false;
+        };
+        self.pixel_move = Some(PixelMove {
+            raster: edit,
+            origin,
+            duplicate,
+            offset: CGSize::ZERO,
+        });
+        true
+    }
+
+    /// `movePixels(by:)` — previews the pixels `offset` document pixels
+    /// (whole pixels) away. The stored selection stays put until the commit;
+    /// the outline draws from `pixel_move.moved_selection()`.
+    pub fn drag_pixel_move(&mut self, offset: CGSize) {
+        let rounded = CGSize::new(offset.width.round(), offset.height.round());
+        let Some(move_state) = self.pixel_move.as_mut() else {
+            return;
+        };
+        if move_state.raster.move_lifted(rounded, move_state.duplicate).is_none() {
+            // As in Swift: a rebuild that fails cancels the whole move.
+            self.pixel_move = None;
+            self.brush_error = Some("The pixels could not be moved.".into());
+            return;
+        }
+        move_state.offset = rounded;
+    }
+
+    /// `displayedSelection` — the outline to draw: during a pixel move, the
+    /// original shifted by the drag; while a floating selection transform is
+    /// open, the selection where the floating pixels now sit.
+    pub fn displayed_selection(&self) -> Option<DocumentSelection> {
+        if let Some(move_state) = self.pixel_move.as_ref() {
+            return Some(move_state.moved_selection());
+        }
+        if let Some(edit) = self.transform_edit.as_ref() {
+            if let Some(matrix) = Self::floating_selection_transform(edit) {
+                if let Some(selection) = self.selection() {
+                    return Some(DocumentSelection {
+                        path: selection.path.transformed(&matrix),
+                        antialiased: selection.antialiased,
+                        feather: selection.feather,
+                    });
+                }
+            }
+        }
+        self.selection().cloned()
+    }
+
+    /// `finishPixelMove` — commits the pixels and the moved outline together
+    /// as one "Move Pixels" (or "Duplicate Pixels") undo step. A drag that
+    /// never moved commits nothing, as in Swift's `offset != .zero` check.
+    pub fn end_pixel_move(&mut self) {
+        let Some(move_state) = self.pixel_move.take() else {
+            return;
+        };
+        if move_state.offset == CGSize::ZERO {
+            return;
+        }
+        let Some(id) = self.active_layer_id else {
+            return;
+        };
+        let Some(composed) = move_state.moved_pixels() else {
+            self.brush_error = Some("The pixels could not be moved.".into());
+            return;
+        };
+        let (mut image, transform, _) = move_state.raster.snapshot_of(&composed);
+        let moved = move_state.moved_selection();
+        self.begin_edit(if move_state.duplicate {
+            "Duplicate Pixels"
+        } else {
+            "Move Pixels"
+        });
+        if let Some(document) = self.document.as_mut() {
+            if let Some(layer) = document.layer_mut(id) {
+                image.name = layer.name.clone();
+                layer.asset = Some(image);
+                layer.transform = transform;
+            }
+            document.selection = Some(moved);
+        }
+        self.end_edit();
+    }
+
+    /// `cancelPixelMove` — the document was never modified during the drag,
+    /// so dropping the lifted pixels restores everything.
+    pub fn cancel_pixel_move(&mut self) {
+        self.pixel_move = None;
+    }
+
+    /// `nudgePixels(dx:dy:)` — Cmd-arrow moves the selected pixels 1 px
+    /// (10 px with Shift, folded into dx/dy by the caller) as one undo step.
+    /// Swift beeps app-side when there is nothing to move.
+    pub fn nudge_pixels(&mut self, dx: f64, dy: f64) {
+        if !self.begin_pixel_move(false) {
+            return;
+        }
+        self.drag_pixel_move(CGSize::new(dx, dy));
+        self.end_pixel_move();
     }
 
     /// `canInvert` — the core conditions; the app conjuncts its own UI state.
@@ -5811,6 +6046,29 @@ mod tests {
         assert!(sel.path.contains(CGPoint::new(50.0, 50.0)));
     }
 
+    /// A selection outline move shifts the path only, one undo step
+    /// (Selection.swift:263-290).
+    #[test]
+    fn selection_outline_move_offsets_and_commits() {
+        let mut s = session();
+        s.tool = NavigationTool::Marquee;
+        s.begin_lasso(CGPoint::new(10.0, 10.0), SelectionMode::Replace);
+        s.drag_marquee(CGPoint::new(30.0, 30.0), false, false);
+        s.finish_lasso();
+        assert!(s.begin_selection_move());
+        // A second begin is refused while one is open.
+        assert!(!s.begin_selection_move());
+        s.move_selection_outline(CGSize::new(10.4, -7.6));
+        let moved = s.selection().unwrap();
+        // (10.4, -7.6) rounds to (10, -8): the rect now spans (20,2)-(40,22).
+        assert!(moved.path.contains(CGPoint::new(30.0, 12.0)), "offset by whole pixels");
+        assert!(!moved.path.contains(CGPoint::new(15.0, 25.0)), "the old spot is vacated");
+        let undo_count = s.history.undo_count();
+        s.end_selection_move();
+        assert_eq!(s.history.undo_count(), undo_count + 1);
+        assert!(s.selection_move_origin.is_none());
+    }
+
     /// Cmd-click on a layer thumbnail: the ≥ 50% opaque pixels become the
     /// selection, ignoring the mask (MaskTracing.swift:87).
     #[test]
@@ -6281,6 +6539,191 @@ mod tests {
         assert_eq!(image.pixel(20, 20)[3], 0);
         assert_eq!(image.pixel(60, 60), [255, 0, 0, 255]);
         assert_eq!(s.history.undo_name(), "Clear");
+    }
+
+    #[test]
+    fn pixel_move_moves_the_selected_pixels() {
+        let mut s = session();
+        // Red left third, green rest, so the landing is distinguishable from
+        // what was already there.
+        let mut image = Bitmap::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                image.set_pixel(x, y, if x < 30 { [255, 0, 0, 255] } else { [0, 180, 0, 255] });
+            }
+        }
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(image, "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        assert!(s.begin_pixel_move(false), "the drag starts");
+        s.drag_pixel_move(CGSize::new(25.5, 0.0));
+        // Offsets round to whole pixels so edges stay crisp (movePixels).
+        assert_eq!(s.pixel_move.as_ref().unwrap().offset, CGSize::new(26.0, 0.0));
+        s.end_pixel_move();
+        let image = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert_eq!(image.pixel(20, 20)[3], 0, "the origin becomes a hole");
+        assert_eq!(image.pixel(36, 20), [255, 0, 0, 255], "the pixels land 26 px over");
+        assert_eq!(image.pixel(60, 20), [0, 180, 0, 255], "the rest stays untouched");
+        // The outline moves with the pixels, as one undo step.
+        let selection = s.selection().unwrap();
+        assert_eq!(selection.path.bounds().unwrap().min_x(), 36.0);
+        assert_eq!(s.history.undo_name(), "Move Pixels");
+    }
+
+    #[test]
+    fn pixel_move_undo_restores_pixels_and_outline() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        let before = s.document.clone().unwrap();
+        s.begin_pixel_move(false);
+        s.drag_pixel_move(CGSize::new(25.0, -5.0));
+        s.end_pixel_move();
+        s.undo();
+        let after = s.document.clone().unwrap();
+        let image = after.layers[0].asset.as_ref().unwrap().image.as_ref();
+        assert_eq!(image.pixel(20, 20), [255, 0, 0, 255], "pixels return");
+        assert_eq!(after.selection, before.selection, "the outline returns");
+    }
+
+    #[test]
+    fn pixel_move_without_a_selection_is_a_no_op() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        assert!(!s.begin_pixel_move(false));
+        assert!(s.pixel_move.is_none());
+        s.nudge_pixels(5.0, 0.0);
+        assert_eq!(s.history.undo_name(), "New Canvas", "nothing was committed");
+    }
+
+    #[test]
+    fn pixel_move_refuses_a_mask_target() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        s.add_mask_from_selection(true);
+        assert!(s.is_mask_selected);
+        assert!(!s.begin_pixel_move(false), "a mask target has no pixels to lift");
+        assert!(s.pixel_move.is_none());
+    }
+
+    #[test]
+    fn pixel_move_duplicate_keeps_the_source_pixels() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        assert!(s.begin_pixel_move(true));
+        s.drag_pixel_move(CGSize::new(15.0, 0.0));
+        s.end_pixel_move();
+        let image = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert_eq!(image.pixel(20, 20), [255, 0, 0, 255], "the source stays");
+        assert_eq!(image.pixel(40, 20), [255, 0, 0, 255], "the copy lands 15 px over");
+        assert_eq!(s.history.undo_name(), "Duplicate Pixels");
+    }
+
+    #[test]
+    fn nudge_pixels_moves_one_step_as_one_undo() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        s.nudge_pixels(0.0, 3.0);
+        let image = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        // Moving down refills all but the top 3 rows of the original outline.
+        assert_eq!(image.pixel(20, 11)[3], 0, "the strip the pixels left");
+        assert_eq!(image.pixel(20, 23), [255, 0, 0, 255], "the pixels land 3 px down");
+        let selection = s.selection().unwrap();
+        assert_eq!(selection.path.bounds().unwrap().min_y(), 13.0);
+        assert_eq!(s.history.undo_name(), "Move Pixels");
+    }
+
+    #[test]
+    fn pixel_move_with_no_motion_commits_nothing() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        let undo_count = s.history.undo_count();
+        s.begin_pixel_move(false);
+        s.drag_pixel_move(CGSize::new(4.0, 4.0));
+        s.drag_pixel_move(CGSize::new(0.0, 0.0));
+        s.end_pixel_move();
+        assert_eq!(s.history.undo_count(), undo_count, "a canceled-out drag is a no-op");
+        assert!(s.pixel_move.is_none());
+        let image = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert_eq!(image.pixel(20, 20), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn displayed_selection_follows_the_pixel_drag() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        assert_eq!(
+            s.displayed_selection().unwrap().path.bounds().unwrap().min_x(),
+            10.0,
+            "without a move the outline is the selection"
+        );
+        s.begin_pixel_move(false);
+        s.drag_pixel_move(CGSize::new(7.0, 0.0));
+        assert_eq!(
+            s.displayed_selection().unwrap().path.bounds().unwrap().min_x(),
+            17.0,
+            "during the drag the outline leads the pixels"
+        );
+        // The stored selection stays put until the commit.
+        assert_eq!(s.selection().unwrap().path.bounds().unwrap().min_x(), 10.0);
+        s.end_pixel_move();
+        assert_eq!(s.selection().unwrap().path.bounds().unwrap().min_x(), 17.0);
+    }
+
+    #[test]
+    fn pixel_move_refused_while_a_transform_edit_is_open() {
+        // canPaint needs canEditLayers; a pending transform closes editing.
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        s.begin_transform();
+        assert!(!s.begin_pixel_move(false));
+        s.cancel_transform();
+        assert!(s.begin_pixel_move(false));
     }
 
     #[test]
