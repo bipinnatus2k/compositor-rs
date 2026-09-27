@@ -51,7 +51,7 @@
 - **InlineTextEditor + 检查器跟随**（2026-09-28）：画布位置锚定的多行 Textarea 浮层与 textDraft 双向绑定（Return 换行/Ctrl-Return 提交/Esc 取消/Option 方向键调字距行距）；Type 手势三态（提交旧稿/编辑命中层/拖出点框文本，默认样例文本点击删除）；TransformInspector 六字段随拖拽预览实时同步。6 项 v1 偏差留痕（自绘光标/缩放把手/旋转跟随等）。
 **app 接线批次（2026-09-28）**：审计未修清单的 app 侧项全部落地——Blur 蒙版目标采样蒙版覆盖层（Swift BlurTool.swift:8-40 原义，非"蒙版后内容"）、Add Noise 种子改为**面板打开时一次生成**（Swift "fixed while the panel is open"，预览与提交共用，硬编码 7 清除）、Clone Stamp aligned 走 `clone_stroke_offset`、删除活蒙版依赖弹 Swift 三键询问（Bake and Delete / Cancel / Remove Links and Delete，文案逐字，经 Confirm sheet 通道 + `request_delete_layer` 接线）；marquee from_center 经核实为审计误报（Swift 恒传 false，Option-center 是 Shape 专属且已接线）。**快捷键改键即时生效**：keymap 增量重建（快照拆分 compositor:: 前缀/组件基线，clear 后重放——绕开 init 幂等性），Done/Restore/Cancel 三路重绑，过时"需重启"文案清除。**面板形态**：Effects Stroke 改 Swift 的分段双按钮（标题行右侧），SelectionAmount 补 1…max 双向同步滑杆 + 无效提示行（Swift LassoControls.swift:181-249）。新增 16 测试。
 
-- **平台能力缺口（明确结论，不做替代品）**：`select_subject`（Select Subject）与 `subject_removal::run`（Remove Background 底层，现为 stub）都依赖 Vision 前景分割——Swift 无点击点、全画布自动找前景，无合理 1:1 替代源（点击式 Object Selection 是不同功能且已移植）。Filter 菜单的 Remove Background 入口在底层就绪前保持现状；报告记录为平台差异。
+- **平台能力缺口（最终结论，2026-09-28）**：subject_removal 两档（Basic/Advanced）都以 Vision 为唯一蒙版来源——Basic 是 Vision 原始蒙版直出（"quick"指跳过精修），其自身测试接受 noSubject，**无纯算法参照可移植**；`run` 保持带完整缺口文档的 no-op（`refined()` 的引导滤波/边缘平移/哑光对比一旦有蒙版源即可 1:1 移植，已记录），`select_subject` 同理不可行。**Filter 菜单的 Remove Background 入口已移除**（动作/注册/处理器同步摘除，core 枚举与缺口文档保留），点击只会跑 no-op 的入口对用户无意义。
 
 ---
 
