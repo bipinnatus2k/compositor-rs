@@ -940,6 +940,7 @@ mod tests {
         assert_eq!(a, a.clone(), "the same image equals itself");
     }
 
+    #[test]
     fn palette_hex_roundtrip() {
         let c = PaletteColor::new(1.0, 0.5, 0.0);
         let hex = c.hex();
@@ -967,8 +968,7 @@ mod tests {
         hsb.set_rgb(PaletteColor::new(0.5, 0.5, 0.5));
         // Gray keeps the previous hue and drops saturation.
         assert_eq!(hsb.hue, 0.0);
-        assert!((hsb.saturation - 0.5 / 0.5 + 1.0).abs() > 0.0 || hsb.saturation == 0.0);
-        assert!((hsb.saturation - 0.0).abs() < 1e-9);
+        assert!((hsb.saturation - 0.0).abs() < 1e-9, "gray drops saturation");
     }
 
     #[test]

@@ -203,7 +203,8 @@ fn to_rgba_image(composite: &Bitmap) -> image::RgbaImage {
             continue;
         }
         for channel in 0..3 {
-            pixel[channel] = ((pixel[channel] as u32 * 255) / alpha).min(255) as u8;
+            // Round to the nearest straight value instead of truncating.
+            pixel[channel] = (((pixel[channel] as u32 * 255) + alpha / 2) / alpha).min(255) as u8;
         }
     }
     image::RgbaImage::from_raw(composite.width as u32, composite.height as u32, data)

@@ -251,7 +251,10 @@ fn scale_percent_sets_both_sides_about_the_center() {
     assert!((scaled.center().y - stretched.center().y).abs() < 0.001);
     assert_eq!(scaled.rotation, 30.0);
     assert_eq!(scaled.scale_percent(pixels), 50.0);
-    let _ = &mut session;
+    // The case is pure LayerTransform math: no session edit was opened or
+    // committed.
+    assert!(session.transform_edit.is_none());
+    assert_eq!(session.document.as_ref().unwrap().layers.len(), 1);
 }
 
 /// Swift `noOpInvalidValuesAndSwitchingTools`. Swift applies the pending

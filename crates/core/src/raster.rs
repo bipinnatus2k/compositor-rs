@@ -91,11 +91,6 @@ impl Bitmap {
         unpremultiply_f32(px)
     }
 
-    /// Writes a straight-alpha color, premultiplying on the way in.
-    pub fn set_straight_f32(&mut self, x: usize, y: usize, c: [f32; 4]) {
-        self.set_pixel(x, y, premultiply_f32(c));
-    }
-
     /// `CGContext.clear(rect)`.
     pub fn clear_rect(&mut self, rect: CGRect) {
         let r = rect.integral().intersection(&self.bounds());
@@ -418,7 +413,8 @@ pub fn downsample_level(factor: f64) -> usize {
     ((1.0 / factor).log2().floor() as isize).clamp(0, MAX_LEVEL as isize) as usize
 }
 
-/// One box-filter halving step (`DownsampleCache`'s sharp halving).
+/// One halving step (`DownsampleCache`'s sharp halving): a Lanczos3
+/// resample, not a box average — the name documents the algorithm.
 pub fn halve(src: &Bitmap) -> Bitmap {
     // vImage-scale "high quality" is a Lanczos resample (`DownsampleCache`
     // halving); the output rounds the half size up ((w + 1) / 2).
@@ -616,7 +612,6 @@ pub fn draw_affine(
     sampling: LayerSampling,
     clip: Option<CGRect>,
 ) {
-    let inverse = transform.inverted();
     let clip_rect = clip.unwrap_or(dst.bounds()).intersection(&dst.bounds());
     if clip_rect.is_null() || clip_rect.is_empty() {
         return;
@@ -695,7 +690,7 @@ pub fn gaussian_blur_rgba(src: &Bitmap, sigma: f64) -> Bitmap {
         for x in 0..src.width {
             let mut acc = [0.0f32; 4];
             for (i, k) in kernel.iter().enumerate() {
-                let sx = clamp_mirror_index(x as isize + i as isize - radius as isize, src.width as isize);
+                let sx = clamp_edge_index(x as isize + i as isize - radius as isize, src.width as isize);
                 let px = src.pixel(sx as usize, y);
                 for c in 0..4 {
                     acc[c] += px[c] as f32 * *k as f32;
@@ -710,60 +705,7 @@ pub fn gaussian_blur_rgba(src: &Bitmap, sigma: f64) -> Bitmap {
         for x in 0..src.width {
             let mut acc = [0.0f32; 4];
             for (i, k) in kernel.iter().enumerate() {
-                let sy = clamp_mirror_index(y as isize + i as isize - radius as isize, src.height as isize);
-                let px = tmp.pixel(x, sy as usize);
-                for c in 0..4 {
-                    acc[c] += px[c] as f32 * *k as f32;
-                }
-            }
-            let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
-            dst.set_pixel(x, y, out);
-        }
-    }
-    dst
-}
-
-/// Gaussian blur on a grayscale mask.
-/// `gaussian_blur_rgba` with **transparent** out-of-bounds samples
-/// (`CIImage(cgImage:)` is unclamped: a blur spreads into transparency at the
-/// image's own edges rather than smearing them outwards).
-pub fn gaussian_blur_rgba_unclamped(src: &Bitmap, sigma: f64) -> Bitmap {
-    if sigma <= 0.0 {
-        return src.clone();
-    }
-    let radius = (sigma * 4.0).ceil() as usize;
-    let kernel = gaussian_kernel(sigma, radius);
-    let w = src.width;
-    let h = src.height;
-    let mut tmp = Bitmap::new(w, h);
-    let mut dst = Bitmap::new(w, h);
-    // Horizontal pass: out-of-bounds taps are transparent (premultiplied 0).
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = [0.0f32; 4];
-            for (i, k) in kernel.iter().enumerate() {
-                let sx = x as isize + i as isize - radius as isize;
-                if sx < 0 || sx >= w as isize {
-                    continue;
-                }
-                let px = src.pixel(sx as usize, y);
-                for c in 0..4 {
-                    acc[c] += px[c] as f32 * *k as f32;
-                }
-            }
-            let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
-            tmp.set_pixel(x, y, out);
-        }
-    }
-    // Vertical pass.
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = [0.0f32; 4];
-            for (i, k) in kernel.iter().enumerate() {
-                let sy = y as isize + i as isize - radius as isize;
-                if sy < 0 || sy >= h as isize {
-                    continue;
-                }
+                let sy = clamp_edge_index(y as isize + i as isize - radius as isize, src.height as isize);
                 let px = tmp.pixel(x, sy as usize);
                 for c in 0..4 {
                     acc[c] += px[c] as f32 * *k as f32;
@@ -788,7 +730,7 @@ pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
         for x in 0..src.width {
             let mut acc = 0.0f32;
             for (i, k) in kernel.iter().enumerate() {
-                let sx = clamp_mirror_index(x as isize + i as isize - radius as isize, src.width as isize);
+                let sx = clamp_edge_index(x as isize + i as isize - radius as isize, src.width as isize);
                 acc += src.value(sx as usize, y) as f32 * *k as f32;
             }
             tmp.data[y * src.width + x] = (acc + 0.5) as u8;
@@ -798,7 +740,7 @@ pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
         for x in 0..src.width {
             let mut acc = 0.0f32;
             for (i, k) in kernel.iter().enumerate() {
-                let sy = clamp_mirror_index(y as isize + i as isize - radius as isize, src.height as isize);
+                let sy = clamp_edge_index(y as isize + i as isize - radius as isize, src.height as isize);
                 acc += tmp.value(x, sy as usize) as f32 * *k as f32;
             }
             dst.data[y * src.width + x] = (acc + 0.5) as u8;
@@ -807,7 +749,9 @@ pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
     dst
 }
 
-fn clamp_mirror_index(i: isize, len: isize) -> isize {
+/// Clamps an out-of-bounds tap index to the nearest edge pixel — Core Image's
+/// clamping sampler (edge replication, not mirroring).
+fn clamp_edge_index(i: isize, len: isize) -> isize {
     if len <= 0 {
         return 0;
     }
@@ -980,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn halve_averages_quads() {
+    fn halve_resamples_with_lanczos() {
         let mut b = Bitmap::new(2, 2);
         b.set_pixel(0, 0, [0, 0, 0, 0]);
         b.set_pixel(1, 0, [100, 100, 100, 100]);

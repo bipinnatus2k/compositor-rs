@@ -6,9 +6,6 @@
 //! - The brush stroke session flow (`beginBrush`/`continueBrush`/`finishBrush`,
 //!   Swift `EditorSession+Brush`) is not ported, so `brushPaintsOnlyInsideTheSelection`
 //!   drives the same selection-clip pipeline through `fill_selection` instead.
-//! - The pixel-move flow (`beginPixelMove`/`movePixels`/`finishPixelMove`,
-//!   Swift `PixelMove`) has no session entry yet, so the three Cmd-drag cases
-//!   are not ported.
 //! - The busy-dimming UI state (`isProjectBusy`/`showsBusy`) is app-level and
 //!   not modeled in the core session.
 //! - Swift's `canPaint` guard (and therefore `beginGradient`) refuses an empty
@@ -103,8 +100,6 @@ fn empty_selection_edits_nothing() {
     let selection = session.selection().expect("explicit selection");
     assert!(selection.is_empty());
 
-    let before = session.document.clone();
-    let count = session.history.undo_count();
     // Fills and clears paint nothing.
     session.fill_selection(false);
     let result = render(&session);
@@ -117,7 +112,6 @@ fn empty_selection_edits_nothing() {
     // commits a transparent asset onto a blank layer even when the empty clip
     // painted nothing (Swift's `applyPixelEdit` skips when the edit has no
     // patches). Those sub-assertions are dropped; see the module notes.
-    let _ = (before, count);
 }
 
 /// Swift `gradientStaysInsideTheSelection`.
@@ -196,22 +190,15 @@ fn mask_fill_hides_only_the_selected_area() {
     assert_eq!(result.pixel(30, 20)[3], 255);
 }
 
-/// Swift `clipFollowsScaledLayersAndSoftensEdges`.
-///
-/// Two deviations forced adaptations, recorded in the module notes:
-/// - The Rust `RasterEdit` selection clip is sampled in grid coordinates
-///   rather than document ones (`fill`/`clear_pixels`/`result` in
-///   `tools/brush.rs`), so on a scaled layer the clear wipes the whole grid;
-///   the case runs over a 1:1 full-canvas image instead of Swift's 2×-stretched
-///   one.
-/// - Swift's clear runs `destinationOut` through the antialiased coverage
-///   mask, keeping partial alpha along the edge; the Rust `clear_pixels`
-///   clears wherever coverage > 0, so the softened-edge assertion becomes a
-///   sharp transition assertion.
+/// Swift `clipFollowsScaledLayersAndSoftensEdges`: a 50×20 image stretched
+/// 2× over the 100×40 canvas, then cleared inside an antialiased triangle.
+/// The clip is sampled through the layer's grid→document transform, and the
+/// clear runs destinationOut through the antialiased coverage mask, so some
+/// pixels along the diagonal edge end up partly cleared.
 #[test]
 fn clip_follows_scaled_layers_and_softens_edges() {
     let mut session = make_session(100, 40);
-    let mut image = Bitmap::new(100, 40);
+    let mut image = Bitmap::new(50, 20);
     for chunk in image.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[0, 0, 255, 255]);
     }
@@ -233,17 +220,16 @@ fn clip_follows_scaled_layers_and_softens_edges() {
     let result = render(&session);
     assert_eq!(result.pixel(10, 10)[3], 0, "inside the triangle: cleared");
     assert_eq!(result.pixel(90, 35)[3], 255, "outside: untouched");
-    // Every pixel along the diagonal is either fully kept or fully cleared —
-    // the clip is binary (see the module notes).
-    let mut sharp = true;
+    // Along the diagonal edge some pixels are partly cleared.
+    let mut partial = false;
     for x in 0..100 {
-        let y = (((1.0 - x as f64 / 100.0) * 40.0) as usize).min(39);
+        let y = ((((1.0 - x as f64 / 100.0) * 40.0) as usize).min(39)).min(39);
         let alpha = result.pixel(x, y)[3];
-        if alpha != 0 && alpha != 255 {
-            sharp = false;
+        if alpha > 0 && alpha < 255 {
+            partial = true;
         }
     }
-    assert!(sharp, "the cleared region ends where the outline runs");
+    assert!(partial, "the cleared edge keeps partial alpha");
 }
 
 /// Swift `maskButtonAddsWhiteMaskOrHidesTheSelection`.
@@ -462,4 +448,76 @@ fn invert_works_in_every_tool() {
     assert_eq!(session.history.undo_name(), "Invert");
     session.undo();
     assert_eq!(session.history.undo_name(), "Gradient");
+}
+
+/// Bounding box of a selection's rings (Swift `boundingBoxOfPath`).
+fn bounding_box(session: &EditorSession) -> CGRect {
+    let path = &session.selection().expect("selection").path;
+    let mut points = path.rings.iter().flatten();
+    let first = *points.next().expect("non-empty path");
+    let mut rect = CGRect::new(first.x, first.y, 0.0, 0.0);
+    for p in points {
+        rect = rect.union(&CGRect::new(p.x, p.y, 0.0, 0.0));
+    }
+    rect
+}
+
+/// Swift `cmdDragMovesSelectedPixelsAndOutlineAsOneUndo`.
+#[test]
+fn cmd_drag_moves_selected_pixels_and_outline_as_one_undo() {
+    let mut session = make_session(100, 40);
+    two_color_layer(&mut session);
+    select(&mut session, CGRect::new(10.0, 10.0, 10.0, 10.0));
+    let count = session.history.undo_count();
+    assert!(session.begin_pixel_move(false));
+    session.drag_pixel_move(CGSize::new(30.4, 0.0));
+    session.drag_pixel_move(CGSize::new(60.2, 5.0));
+    session.end_pixel_move();
+    assert_eq!(session.history.undo_count(), count + 1);
+    assert_eq!(session.history.undo_name(), "Move Pixels");
+    assert_eq!(bounding_box(&session), CGRect::new(70.0, 15.0, 10.0, 10.0));
+    let result = render(&session);
+    assert_eq!(result.pixel(15, 15)[3], 0, "hole where the pixels were");
+    assert_eq!(result.pixel(75, 20), [255, 0, 0, 255], "red pixels now on blue");
+    assert_eq!(result.pixel(85, 20), [0, 0, 255, 255], "untouched blue");
+    assert_eq!(result.pixel(5, 5), [255, 0, 0, 255], "untouched red");
+    session.undo();
+    assert_eq!(bounding_box(&session), CGRect::new(10.0, 10.0, 10.0, 10.0));
+    assert_eq!(render(&session).pixel(15, 15), [255, 0, 0, 255]);
+}
+
+/// Swift `duplicatePixelDragPreservesSourceAndUndoesTogether`.
+#[test]
+fn duplicate_pixel_drag_preserves_source_and_undoes_together() {
+    let mut session = make_session(100, 40);
+    two_color_layer(&mut session);
+    select(&mut session, CGRect::new(10.0, 10.0, 10.0, 10.0));
+    let count = session.history.undo_count();
+    assert!(session.begin_pixel_move(true));
+    session.drag_pixel_move(CGSize::new(60.0, 5.0));
+    session.end_pixel_move();
+    let result = render(&session);
+    assert!(result.pixel(15, 15)[0] > 250, "the source keeps its red");
+    assert!(result.pixel(75, 20)[0] > 250, "the copy is red too");
+    assert_eq!(session.history.undo_count(), count + 1);
+    assert_eq!(session.history.undo_name(), "Duplicate Pixels");
+    session.undo();
+    let restored = render(&session);
+    assert!(restored.pixel(15, 15)[0] > 250, "the source survives the undo");
+    assert!(restored.pixel(75, 20)[2] > 250, "and the copy is gone (blue again)");
+}
+
+/// Swift `cmdArrowNudgesPixelsAndMasksRefuse`.
+#[test]
+fn cmd_arrow_nudges_pixels_and_masks_refuse() {
+    let mut session = make_session(100, 40);
+    two_color_layer(&mut session);
+    select(&mut session, CGRect::new(40.0, 0.0, 10.0, 40.0)); // Last red column band.
+    session.nudge_pixels(10.0, 0.0);
+    let result = render(&session);
+    assert_eq!(result.pixel(45, 20)[3], 0);
+    assert_eq!(result.pixel(55, 20), [255, 0, 0, 255]);
+    session.add_layer_mask(true);
+    assert!(session.is_mask_selected && !session.begin_pixel_move(false));
+    session.cancel_pixel_move();
 }

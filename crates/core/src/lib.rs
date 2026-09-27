@@ -25,7 +25,7 @@ pub mod raster;
 pub mod selection;
 pub mod transform;
 
-/// In progress — ported from `Document/` and `Rendering/`.
+/// Ported from `Document/`, `Filters/`, and the adjustment editors.
 pub mod adjust;
 pub mod adjustment;
 pub mod canvas;

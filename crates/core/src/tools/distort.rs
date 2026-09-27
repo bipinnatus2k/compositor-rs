@@ -228,18 +228,27 @@ pub fn warp(
     if is_convex(corners) {
         // Perspective: the unit square maps to the source pixels and to the
         // output shape; every output pixel samples the source through the two
-        // mappings composed, trusting only pixels inside the shape.
+        // mappings composed. Boundary pixels take the quad's analytic coverage
+        // of the pixel square — Core Image antialiases the shape's edges, so
+        // the trimmed crop keeps the partly covered edge pixels too.
         let to_src = Homography::new(&[src.0, src.1, src.2, src.3]);
         let to_dst = Homography::new(&[dst.0, dst.1, dst.2, dst.3]);
         for y in 0..height {
             for x in 0..width {
-                let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5);
-                if !point_in_quad(dst, p) {
+                let coverage = quad_pixel_coverage(dst, x, y);
+                if coverage <= 0.0 {
                     continue;
                 }
-                let unit = to_dst.apply_inverse(p);
+                let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5);
+                let mut unit = to_dst.apply_inverse(p);
+                if unit.x < 0.0 || unit.x > 1.0 || unit.y < 0.0 || unit.y > 1.0 {
+                    // A partly covered pixel whose center sits outside the
+                    // shape still samples the nearest edge content.
+                    unit.x = unit.x.clamp(0.0, 1.0);
+                    unit.y = unit.y.clamp(0.0, 1.0);
+                }
                 let source = to_src.apply(unit);
-                sample_into(image, source, is_mask, &mut out, x, y, 1.0);
+                sample_into(image, source, is_mask, &mut out, x, y, coverage);
             }
         }
     } else {
@@ -311,6 +320,57 @@ fn point_in_triangle(p: CGPoint, a: CGPoint, b: CGPoint, c: CGPoint) -> bool {
     let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
     let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
     !(has_neg && has_pos)
+}
+
+
+/// The fraction of pixel (x, y) covered by the convex quad: the quad clipped
+/// to the pixel square (Sutherland–Hodgman against the square's four
+/// half-planes), area of what survives. Interior pixels clip to the full
+/// square, so the fast path (center plus every corner inside) skips the math.
+fn quad_pixel_coverage(quad: (CGPoint, CGPoint, CGPoint, CGPoint), x: usize, y: usize) -> f64 {
+    let px = x as f64;
+    let py = y as f64;
+    let center = CGPoint::new(px + 0.5, py + 0.5);
+    let corners = [
+        CGPoint::new(px, py),
+        CGPoint::new(px + 1.0, py),
+        CGPoint::new(px + 1.0, py + 1.0),
+        CGPoint::new(px, py + 1.0),
+    ];
+    if point_in_quad(quad, center) && corners.iter().all(|c| point_in_quad(quad, *c)) {
+        return 1.0;
+    }
+    let mut poly = [quad.0, quad.1, quad.2, quad.3].to_vec();
+    // Half-planes: keep the inside of x >= px, x <= px+1, y >= py, y <= py+1.
+    for (nx, ny, nd) in [(1.0, 0.0, -px), (-1.0, 0.0, px + 1.0), (0.0, 1.0, -py), (0.0, -1.0, py + 1.0)] {
+        let mut next = Vec::with_capacity(poly.len() + 1);
+        let n = poly.len();
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let da = nx * a.x + ny * a.y + nd;
+            let db = nx * b.x + ny * b.y + nd;
+            if da >= 0.0 {
+                next.push(a);
+            }
+            if (da > 0.0 && db < 0.0) || (da < 0.0 && db > 0.0) {
+                let t = da / (da - db);
+                next.push(CGPoint::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)));
+            }
+        }
+        poly = next;
+        if poly.is_empty() {
+            return 0.0;
+        }
+    }
+    let mut area2 = 0.0;
+    let n = poly.len();
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    (area2 * 0.5).abs()
 }
 
 /// Even-odd point-in-quad, so folded shapes still clip correctly.
@@ -446,6 +506,39 @@ pub fn map_path(
 mod tests {
     use super::*;
     use crate::geometry::CGSize;
+
+    #[test]
+    fn quad_pixel_coverage_is_exact() {
+        // A pixel squarely inside the quad is fully covered; one it barely
+        // touches gets a fraction; a missed one gets nothing.
+        let quad = (
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(40.0, 0.0),
+            CGPoint::new(40.0, 40.0),
+            CGPoint::new(0.0, 40.0),
+        );
+        assert_eq!(quad_pixel_coverage(quad, 10, 10), 1.0);
+        assert_eq!(quad_pixel_coverage(quad, 39, 10), 1.0);
+        assert_eq!(quad_pixel_coverage(quad, 41, 10), 0.0);
+        // The right edge at x = 39.5 cuts the pixel in half.
+        let cut = (
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(39.5, 0.0),
+            CGPoint::new(39.5, 40.0),
+            CGPoint::new(0.0, 40.0),
+        );
+        let half = quad_pixel_coverage(cut, 39, 10);
+        assert!((half - 0.5).abs() < 1e-9, "{half}");
+        // A diagonal edge across one pixel: half the square.
+        let diag = (
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(2.0, 2.0),
+            CGPoint::new(2.0, 0.0),
+            CGPoint::new(0.0, 0.0),
+        );
+        let corner = quad_pixel_coverage(diag, 0, 0);
+        assert!((corner - 0.5).abs() < 1e-9, "{corner}");
+    }
 
     fn unit_transform() -> LayerTransform {
         LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0))

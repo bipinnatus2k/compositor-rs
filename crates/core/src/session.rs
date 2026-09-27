@@ -2492,7 +2492,7 @@ impl EditorSession {
                     }
                     let o = (y * width + x) * 4;
                     let v = grid.data[o] as f32;
-                    let value = (v * (1.0 - a) + fill as f32 * a) as u8;
+                    let value = (v * (1.0 - a) + fill as f32 * a).round() as u8;
                     grid.data[o] = value;
                     grid.data[o + 1] = value;
                     grid.data[o + 2] = value;
@@ -2753,7 +2753,7 @@ impl EditorSession {
             } else {
                 LayerMask::background_of(&owned.asset.thumbnail)
             };
-            let fill = (background * 255.0) as u8;
+            let fill = (background * 255.0).round() as u8;
             for chunk in out.data.chunks_exact_mut(4) {
                 chunk[0] = fill;
                 chunk[1] = fill;
@@ -2788,7 +2788,7 @@ impl EditorSession {
                     if a < 1.0 {
                         let o = (y * out.width + x) * 4;
                         for c in 0..4 {
-                            out.data[o + c] = (out.data[o + c] as f32 * a) as u8;
+                            out.data[o + c] = (out.data[o + c] as f32 * a).round() as u8;
                         }
                     }
                 }
@@ -3140,7 +3140,6 @@ impl EditorSession {
             self.collapsed_group_ids.remove(&parent);
         }
         self.end_edit();
-        let _ = &mut names;
     }
 
     /// `addGroup` — a new empty "Folder N" above the active layer, parented
@@ -4257,13 +4256,20 @@ impl EditorSession {
                         let crop_y = crop.min_y().round().max(0.0) as usize;
                         let crop_w = crop.width().round().max(1.0) as usize;
                         let crop_h = crop.height().round().max(1.0) as usize;
-                        let mut cropped = Bitmap::new(crop_w.min(warped_mask.width - crop_x.min(warped_mask.width)), crop_h.min(warped_mask.height - crop_y.min(warped_mask.height)));
-                        for y in 0..cropped.height {
-                            for x in 0..cropped.width {
-                                cropped.set_pixel(x, y, warped_mask.pixel(crop_x + x, crop_y + y));
+                        // Defensive: a crop rect outside the warped mask must
+                        // keep the mask as it is, never produce an empty 0×0
+                        // bitmap that would replace the layer's mask.
+                        let crop_w = crop_w.min(warped_mask.width.saturating_sub(crop_x));
+                        let crop_h = crop_h.min(warped_mask.height.saturating_sub(crop_y));
+                        if crop_w > 0 && crop_h > 0 {
+                            let mut cropped = Bitmap::new(crop_w, crop_h);
+                            for y in 0..cropped.height {
+                                for x in 0..cropped.width {
+                                    cropped.set_pixel(x, y, warped_mask.pixel(crop_x + x, crop_y + y));
+                                }
                             }
+                            mask = Some(original.replacing(ImportedImage::new(cropped, "Layer Mask")));
                         }
-                        mask = Some(original.replacing(ImportedImage::new(cropped, "Layer Mask")));
                     }
                 }
             } else if original.is_linked {
@@ -4665,9 +4671,13 @@ impl EditorSession {
             self.edit_active_text();
         }
         if let Some(draft) = self.text_draft.as_mut() {
-            change(&mut draft.style);
-            if !draft.style.is_valid() {
-                return;
+            // Like the defaults branch below, the change must not stick when
+            // it leaves the style invalid: work on a copy and only commit a
+            // valid result into the open draft.
+            let mut style = draft.style.clone();
+            change(&mut style);
+            if style.is_valid() {
+                draft.style = style;
             }
         } else {
             let mut style = self.text_defaults.clone();

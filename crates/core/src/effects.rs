@@ -887,8 +887,19 @@ mod tests {
         });
         let (result, inset) = render_effects(&img, None, &effects);
         assert!(inset >= 4.0);
-        // The pixels stay; somewhere below them the shadow is black.
-        let _ = result;
+        // The output is inset by the margin: the square sits offset and the
+        // shadow (distance 2 down) is black below it.
+        let square = [255u8, 0, 0, 255];
+        let black = [0u8, 0, 0, 255];
+        assert!(
+            (0..result.height).any(|y| (0..result.width).any(|x| result.pixel(x, y) == square)),
+            "the square stays"
+        );
+        assert!(
+            (0..result.height).any(|y| (0..result.width).any(|x| result.pixel(x, y) == black)),
+            "a black shadow pixel is rendered"
+        );
+        assert!(result.height >= 4 + inset as usize, "the inset reserves room");
     }
 
     #[test]

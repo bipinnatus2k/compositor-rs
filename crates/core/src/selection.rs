@@ -61,7 +61,8 @@ pub enum SelectionMode {
 /// point is not repeated at the end.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SelectionPath {
-    /// Outer rings and hole rings. Even-odd fill decides coverage.
+    /// Outer rings and hole rings; coverage follows the nonzero winding
+    /// rule (see `rasterize`/`winding_contains`) — not even-odd.
     pub rings: Vec<Vec<CGPoint>>,
 }
 

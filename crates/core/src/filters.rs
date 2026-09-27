@@ -162,6 +162,9 @@ pub struct FilterSettings {
 
 impl Default for FilterSettings {
     fn default() -> Self {
+        // Every field is `#[serde(default …)]`, so the empty object is the
+        // canonical default and stays in sync with the serde attributes; the
+        // unwrap is on a constant input and cannot fail.
         serde_json::from_str("{}").unwrap()
     }
 }
@@ -526,7 +529,6 @@ fn grow_to_fit(image: &Bitmap, pad: usize) -> Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::LayerSampling;
 
     #[test]
     fn settings_normalize_defaults() {
@@ -778,7 +780,12 @@ mod tests {
     }
 
     #[test]
-    fn resample_alias_used() {
-        let _ = LayerSampling::High;
+    fn filter_settings_default_matches_serde_roundtrip() {
+        // The serde-deserialized default must equal `Default::default()` —
+        // the two construction paths stay in sync.
+        let a = FilterSettings::default();
+        let b: FilterSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.radius, 1.0);
     }
 }

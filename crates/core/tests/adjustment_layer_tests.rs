@@ -18,9 +18,8 @@
 use compositor_core::adjustment::{
     AdjustmentKind, CurvePoint, CurvesSettings, LayerAdjustment, LevelsSettings,
 };
-use compositor_core::document::{NavigationTool, PaletteColor};
+use compositor_core::document::PaletteColor;
 use compositor_core::filters::FilterSettings;
-use compositor_core::geometry::CGPoint;
 use compositor_core::project::{document_from_project, project_from_document, save as save_project};
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render::draw_live_composite;
@@ -97,7 +96,7 @@ fn global_adjustment_affects_below_but_not_above_and_remains_live() {
     s.select_layer(Some(adjustment));
     s.toggle_layer_visibility(adjustment);
     assert_eq!(rendered(&s)[4..8], [0, 0, 255, 255]);
-    let _ = base_id;
+    assert_ne!(base_id, adjustment, "the base layer is distinct from the adjustment");
 }
 
 /// Swift `clippedCurveChangesOnlyItsBaseAndCopyMergedMatchesExport` — the
@@ -459,7 +458,6 @@ fn shared_editors_keep_pixels_dynamic_and_support_cancel() {
             Some(&saved)
         );
     }
-    let _ = NavigationTool::Move;
 }
 
 /// Swift `legacyHSVStillDecodesAndRenders`.

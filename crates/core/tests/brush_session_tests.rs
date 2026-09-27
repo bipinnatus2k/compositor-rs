@@ -123,10 +123,7 @@ fn soft_mask_painting_hides_and_repaints() {
     edit.append(CGPoint::new(40.0, 40.0));
     edit.flush();
     let mask = edit.result();
-    for x in [10usize, 40, 54, 70] {
-        let value = mask.pixel(x, 40)[0];
-        let _ = value; // compared against the committed render below
-    }
+    // The same columns are compared against the committed render below.
     // Commit the grid as the mask of an opaque red layer.
     let (asset, transform, _) = edit.paint_snapshot();
     let mut layer = ImageLayer::with_asset(red(80, 80), CGPoint::ZERO);
@@ -314,7 +311,7 @@ fn soft_stroke_builds_coverage_while_keeping_its_feathered_rim() {
     stroke.flush();
     let many = stroke.result().pixel(100, 50)[3];
     assert!(many as i32 > one as i32 + 60, "{many} vs {one}");
-    assert!(many <= 255);
+    assert!(many > 0, "the overlapping stroke still deposits coverage");
 }
 
 /// Swift `spacedDabsLeaveNoVisibleRippleAlongTheStroke`.

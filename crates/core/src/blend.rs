@@ -1,6 +1,6 @@
 //! Port of `LayerBlendMode` (`LayerAppearance.swift`) and the blend math the
 //! Swift code gets from Core Image (`SeparableBlend.swift`, `CGContext` blend
-//! modes). All 25 modes are computed with the standard PDF/Photoshop formulas
+//! modes). All 24 modes are computed with the standard PDF/Photoshop formulas
 //! Core Image implements, in sRGB space.
 //!
 //! Colors are straight (unpremultiplied) floats 0–1 with alpha.

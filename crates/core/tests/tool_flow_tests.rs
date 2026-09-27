@@ -17,7 +17,7 @@
 //! - Swift applies a pending transform on tool switching; the port calls
 //!   `commit_transform`/`finish_text` — what the app's switch calls.
 
-use compositor_core::document::{LayerShape, NavigationTool, PaletteColor, ShapeKind, TextAlignment};
+use compositor_core::document::{LayerShape, NavigationTool, ShapeKind, TextAlignment};
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::project::{document_from_project, project_from_document, save as save_project, ProjectData};
 use compositor_core::raster::{Bitmap, ImportedImage};
@@ -115,9 +115,10 @@ fn distorting_warps_the_layer_into_the_shape_as_one_undo_step() {
     assert_eq!(session.history.undo_count(), count + 1);
     let transform = session.active_layer().unwrap().transform;
     assert_eq!(transform.origin, CGPoint::new(10.0, 10.0));
-    // Swift lands on exactly 50 × 20; the Rust crop rounds to 49 — a
-    // whole-pixel off-by-one in `warp_trimmed`'s bounds, recorded as a gap.
-    assert!((transform.size.width - 50.0).abs() <= 1.0, "{:?}", transform.size);
+    // Swift lands on exactly 50 × 20: Core Image antialiases the shape's
+    // edges, so the rightmost partly covered column survives the trim. The
+    // warp's analytic quad-pixel coverage matches that.
+    assert_eq!(transform.size.width, 50.0, "{:?}", transform.size);
     assert_eq!(transform.size.height, 20.0);
     assert_eq!(transform.rotation, 0.0);
 
@@ -402,7 +403,10 @@ fn clone_copies_the_source_under_the_brush_keeping_alignment() {
     assert_eq!(fresh, CGSize::new(-35.0, 10.0));
     let after = stroke(&session, CGPoint::new(50.0, 10.0), fresh);
     assert_eq!(after.pixel(50, 10), [0, 255, 0, 255]);
-    let _ = count;
+    // The strokes are painted through RasterEdit directly (no session commit
+    // in this ported half), so history is untouched; the clone offset state
+    // is what the case exercises.
+    assert_eq!(session.history.undo_count(), count, "no undo steps recorded");
 }
 
 // CloneStampTests.cloneStampKeepsItsOwnSoftBrushTip is not ported: it needs
@@ -461,7 +465,6 @@ fn transforms_duplicates_and_clipping_keep_text_editable() {
     draft.style.content = "Text".to_string();
     assert!(session.apply_text(draft));
     let id = session.active_layer_id.expect("text layer");
-    let layer = session.document.as_ref().unwrap().layer(id).unwrap().clone();
     session.document.as_mut().unwrap().layer_mut(id).unwrap().transform.rotation = 30.0;
     session.document.as_mut().unwrap().layer_mut(id).unwrap().transform.size.width *= 2.0;
     let old = session.active_layer().unwrap().transform;
@@ -489,7 +492,7 @@ fn transforms_duplicates_and_clipping_keep_text_editable() {
         .unwrap()
         .live_text()
         .is_some());
-    let _ = layer;
+    assert_ne!(updated, old, "the re-edit refreshes the transform");
 }
 
 /// Swift `saveReopenAndRasterize` — the manifest round trip; Swift's

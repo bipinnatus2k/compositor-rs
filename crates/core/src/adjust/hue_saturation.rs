@@ -391,7 +391,13 @@ pub fn hue_response(settings: &HueSaturationSettings) -> Vec<HueResponse> {
     (0..=360)
         .map(|degree| {
             let mut response: HueResponse = (0.0, 0.0, 0.0);
-            for (color_range, adjustment) in &settings.adjustments {
+            // Sum in a fixed order: Swift's Dictionary iteration order varies
+            // too, but a deterministic order keeps float sums reproducible
+            // across runs and platforms.
+            let mut order: Vec<&ColorRange> = settings.adjustments.keys().collect();
+            order.sort_by_key(|r| ColorRange::ALL.iter().position(|a| a == *r).unwrap_or(usize::MAX));
+            for color_range in order {
+                let adjustment = &settings.adjustments[color_range];
                 if *adjustment == RangeAdjustment::default() {
                     continue;
                 }
