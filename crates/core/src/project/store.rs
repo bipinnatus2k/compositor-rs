@@ -510,23 +510,30 @@ fn write_package(
     let stage_error = |_| ProjectError::Encode;
     let staging = parent.join(format!("{name}.staging-{}", Uuid::new_v4()));
     fs::create_dir_all(staging.join("images")).map_err(stage_error)?;
-    fs::write(staging.join("manifest.json"), metadata).map_err(stage_error)?;
+    let write_synced = |path: &Path, bytes: &[u8]| -> Result<(), ProjectError> {
+        // Flush to disk: a power cut between the renames must not leave a
+        // new package whose contents never reached the drive.
+        use std::io::Write;
+        let mut file = fs::File::create(path).map_err(stage_error)?;
+        file.write_all(bytes).map_err(stage_error)?;
+        file.sync_all().map_err(stage_error)
+    };
+    write_synced(&staging.join("manifest.json"), metadata)?;
     for (filename, bytes) in files {
-        fs::write(staging.join("images").join(filename), bytes).map_err(stage_error)?;
+        write_synced(&staging.join("images").join(filename), bytes)?;
+    }
+    if let Ok(dir_handle) = fs::File::open(&staging) {
+        let _ = dir_handle.sync_all();
     }
     // The old package moves aside first and is only deleted once the new
-    // package is in place: a crash between the two renames leaves the old
-    // (or new, complete) package intact, never a missing destination
-    // (Foundation's `.atomic` replace).
+    // package is in place. This is still remove-and-rename, not an atomic
+    // directory exchange: a process killed between the two renames finds the
+    // destination missing, with the complete old package in `.backup-*` for
+    // manual recovery (see the module note above).
     let backup = parent.join(format!("{name}.backup-{}", Uuid::new_v4()));
     let replaced = match fs::symlink_metadata(dir) {
         Ok(existing) => {
-            let move_aside = if existing.is_dir() {
-                fs::rename(dir, &backup)
-            } else {
-                fs::rename(dir, &backup)
-            };
-            let committed = move_aside.and_then(|()| fs::rename(&staging, dir));
+            let committed = fs::rename(dir, &backup).and_then(|()| fs::rename(&staging, dir));
             match committed {
                 Ok(()) => {
                     if existing.is_dir() {
@@ -553,7 +560,14 @@ fn write_package(
         },
     };
     match replaced {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Best-effort: persist the directory entry so the rename
+            // survives a power cut too.
+            if let Ok(parent_handle) = fs::File::open(parent) {
+                let _ = parent_handle.sync_all();
+            }
+            Ok(())
+        }
         Err(_) => Err(ProjectError::Encode),
     }
 }

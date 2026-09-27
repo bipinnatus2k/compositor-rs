@@ -2663,6 +2663,12 @@ pub fn adjust_camera_raw_curve_color(
     balance: f64,
     visualize: i32,
 ) {
+    // The four grading wheels' colors depend only on the constant grade
+    // values; computing them per pixel re-ran the trig-heavy hsl_to_rgb
+    // up to 4x for every pixel of the image.
+    let wheel_colors: [[f64; 3]; 4] = std::array::from_fn(|wheel| {
+        hsl_to_rgb(grade[wheel * 3] as f64, 1.0, 0.5)
+    });
     for p in bitmap.data.chunks_exact_mut(4) {
         let alpha = p[3] as f64;
         if alpha == 0.0 {
@@ -2757,7 +2763,7 @@ pub fn adjust_camera_raw_curve_color(
             if w <= 0.0 || (ws <= 0.0 && wl == 0.0) {
                 continue;
             }
-            let wheel_rgb = hsl_to_rgb(wh, 1.0, 0.5);
+            let wheel_rgb = wheel_colors[wheel];
             rgb[0] = camera_clamp(rgb[0] + (wheel_rgb[0] - 0.5) * ws * w * 0.85);
             rgb[1] = camera_clamp(rgb[1] + (wheel_rgb[1] - 0.5) * ws * w * 0.85);
             rgb[2] = camera_clamp(rgb[2] + (wheel_rgb[2] - 0.5) * ws * w * 0.85);

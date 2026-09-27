@@ -193,7 +193,10 @@ pub fn resize_canvas(
                 .filter_map(|l| l.asset.as_ref())
                 .map(|a| a.image.width as u64 * a.image.height as u64)
                 .sum();
-            if options.width * options.height > (100_000_000 - used) as usize
+            // Saturate: a session can hold assets beyond the store's load-time
+            // budget, and `100_000_000 - used` must not underflow.
+            if used >= 100_000_000
+                || options.width * options.height > (100_000_000 - used) as usize
                 || result.layers.len() >= 10_000
             {
                 return Err("the canvas is too large".to_string());
@@ -323,6 +326,7 @@ pub fn resize_image(
         if layer.asset.is_some() {
             if !(1..=30_000).contains(&width)
                 || !(1..=30_000).contains(&height)
+                || used_pixels >= 100_000_000
                 || width as u64 * height as u64 > 100_000_000 - used_pixels
             {
                 return None;
@@ -356,7 +360,8 @@ pub fn resize_image(
                 ));
             }
         }
-        layer.transform = transform;
+        // Keep the old transform until the mask below has been resampled from
+        // it: the mask pixels live on the layer's old pixel grid.
         if let Some(mask) = layer.mask.as_mut() {
             let uniform = mask.asset.image.width == 1 && mask.asset.image.height == 1;
             if uniform || mask.placement.is_some() {
@@ -367,10 +372,15 @@ pub fn resize_image(
                     *placement = placement.placing(&unit_to_document.concat(&scaling));
                 }
             } else {
-                if width as u64 * height as u64 > 100_000_000 - used_mask_pixels {
+                if used_mask_pixels >= 100_000_000
+                    || width as u64 * height as u64 > 100_000_000 - used_mask_pixels
+                {
                     return None;
                 }
                 used_mask_pixels += width as u64 * height as u64;
+                // The mask pixels live on the layer's *old* pixel grid; map
+                // from that, not from the new (scaled) box — building the
+                // source transform from the new transform would scale twice.
                 let source_transform = LayerTransform {
                     sampling,
                     ..layer.transform
@@ -394,6 +404,7 @@ pub fn resize_image(
                 mask.asset = ImportedImage::with_thumbnail(out, thumbnail, mask.asset.name.clone());
             }
         }
+        layer.transform = transform;
     }
     Some(result)
 }
@@ -516,9 +527,6 @@ impl CropSnap {
         let mut best: Option<f64> = None;
         for target in targets {
             let distance = (target - value).abs();
-            if std::env::var("CROP_DBG").is_ok() {
-                eprintln!("DBG nearest value={value} target={target} distance={distance} tol={}", self.tolerance);
-            }
             if distance > self.tolerance {
                 continue;
             }
@@ -548,18 +556,6 @@ impl CropSnap {
             return rect;
         }
         if matches!(drag.mode, CropDragMode::Move) {
-            let shift = |edges: [f64; 2], targets: &[f64]| -> f64 {
-                let mut best: Option<f64> = None;
-                for edge in edges {
-                    if let Some(delta) = self.nearest(edge, targets) {
-                        best = Some(match best {
-                            Some(current) if current.abs() < delta.abs() => current,
-                            _ => delta,
-                        });
-                    }
-                }
-                best.unwrap_or(0.0)
-            };
             let shift = |edges: [f64; 2], targets: &[f64]| -> f64 {
                 let mut best: Option<f64> = None;
                 for edge in edges {
@@ -916,6 +912,42 @@ mod tests {
         assert_eq!(mask.asset.image.width, 1, "uniform mask untouched");
         let placement = mask.placement.unwrap();
         assert_eq!(placement.size, CGSize::new(100.0, 100.0), "placement scales");
+    }
+
+    #[test]
+    fn resize_resamples_in_place_masks_from_the_old_grid() {
+        // A non-uniform mask covering the layer lives on the layer's old
+        // pixel grid; Image Size must resample it once (old grid → new grid),
+        // not scale it twice (which throws the mask off the bitmap).
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut layer = ImageLayer::blank("L", doc.size());
+        let mut mask_image = Bitmap::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                mask_image.data[(y * 4 + x) * 4] = (x * 40 + y * 20) as u8;
+                mask_image.data[(y * 4 + x) * 4 + 3] = 255;
+            }
+        }
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::with_thumbnail(mask_image, Bitmap::new(2, 2), "Mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        doc.layers = vec![layer];
+        let out = resize_image(&doc, 20, 20, None, LayerSampling::High).unwrap();
+        let mask = out.layers[0].mask.as_ref().unwrap();
+        assert_eq!((mask.asset.image.width, mask.asset.image.height), (20, 20));
+        // New-grid pixel (5,5) samples the old mask around source (2.2, 2.2):
+        // a single resample lands near v(2,2)=80 (Lanczos ringing aside).
+        // The double-transform bug pushed the sample far off the source and
+        // clamped it to the edge pixel v(3,3)=180.
+        let v = mask.asset.image.pixel(5, 5)[0];
+        assert!(
+            (40..=140).contains(&v),
+            "in-place mask resampled once, got {}",
+            v
+        );
     }
 
     #[test]

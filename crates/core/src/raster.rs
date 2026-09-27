@@ -624,20 +624,27 @@ pub fn draw_affine(
     // High-quality downscale: pre-shrink the source by the transform's scale.
     let scale_x = transform.a.hypot(transform.b);
     let scale_y = transform.c.hypot(transform.d);
-    let mut source = src.clone();
+    // Only the High pre-shrink mutates the source; Smooth/Nearest draw from it
+    // as is, so the full-image clone is only paid when halving is needed.
+    let mut shrunk;
+    let source: &Bitmap;
     let mut t = *transform;
     if sampling == LayerSampling::High {
+        shrunk = src.clone();
         // DownsampleCache.level: `factor < 0.5` enables sharp halvings, so a
         // 0.5 factor exactly is left to the final pass.
         let mut level = downsample_level(scale_x);
         let mut factor = 1.0f64;
-        while level > 0 && (source.width > 1 || source.height > 1) {
-            source = halve(&source);
+        while level > 0 && (shrunk.width > 1 || shrunk.height > 1) {
+            shrunk = halve(&shrunk);
             factor *= 2.0;
             level -= 1;
         }
         // Pre-shrink applies to the source before the placement: p' = t * shrink.
         t = t.concat(&CGAffineTransform::scale(factor, factor));
+        source = &shrunk;
+    } else {
+        source = src;
     }
     let inverse = t.inverted();
     // Integer-aligned 1:1 placement draws without resampling, as Core

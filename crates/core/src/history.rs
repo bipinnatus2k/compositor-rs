@@ -163,8 +163,8 @@ impl DocumentHistory {
     }
 
     /// Bytes retained only by history, excluding images in the live document.
-    /// Layer bitmaps are RGBA (4 bytes per pixel); a mask is a DeviceGray
-    /// image whose bytesPerRow is one byte per pixel
+    /// Layer bitmaps and masks are RGBA (4 bytes per pixel) in this port —
+    /// unlike Swift, whose masks are DeviceGray at one byte per pixel
     /// (DocumentHistory.retainedBytes). Images compare by identity.
     pub fn retained_bytes(&self, current: Option<&CanvasDocument>) -> usize {
         let mut seen: HashSet<ArcPtr> = HashSet::new();
@@ -191,7 +191,8 @@ impl DocumentHistory {
                     if let Some(mask) = layer.mask.as_ref() {
                         for image in [&mask.asset.image, &mask.asset.thumbnail] {
                             if seen.insert(arc_ptr(image)) {
-                                bytes += image.width * image.height;
+                                // RGBA here, 4x the Swift DeviceGray estimate.
+                                bytes += image.width * image.height * 4;
                             }
                         }
                     }
@@ -270,10 +271,11 @@ mod tests {
     }
 
     #[test]
-    fn masks_retain_one_byte_per_pixel() {
-        // A mask is DeviceGray: its bytesPerRow is one byte per pixel, so a
-        // 20×30 mask (thumbnail 20×30 at most) costs a fraction of what an
-        // RGBA bitmap of the same size would (DocumentHistory.swift:103).
+    fn masks_retain_four_bytes_per_pixel() {
+        // Unlike Swift's DeviceGray masks, this port stores masks as RGBA
+        // bitmaps (document.rs LayerMask::solid builds 4-channel pixels), so
+        // a 20×30 mask costs four bytes per pixel — the estimate must match
+        // reality or the retained-byte limit under-counts masks 4x.
         let mut history = DocumentHistory::default();
         let plain = CanvasDocument::new(10, 10);
         let mut masked = CanvasDocument::new(10, 10);
@@ -291,9 +293,9 @@ mod tests {
         masked.layers = vec![layer];
         history.begin("Mask", &Some(plain.clone()), None);
         history.end(&Some(masked.clone()), None);
-        // before contributes nothing (no mask); after contributes the gray
-        // image and its thumbnail at one byte per pixel.
-        let expected = 20 * 30 + 20 * 30;
+        // before contributes nothing (no mask); after contributes the RGBA
+        // image and its thumbnail at four bytes per pixel.
+        let expected = 20 * 30 * 4 + 20 * 30 * 4;
         assert!(
             (history.retained_bytes(None) as i64 - expected as i64).abs() <= 2,
             "retained={} expected≈{expected}",

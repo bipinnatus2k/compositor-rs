@@ -692,10 +692,26 @@ fn sample_grid_alpha(
 }
 
 /// The gray grid of a placed mask bitmap (RGBA → gray), sized to the layer.
+/// The mask grid normally matches the layer grid 1:1; a mismatch (e.g. a
+/// 1×1 solid mask from `LayerMask::solid` under a larger layer) is sampled
+/// with edge clamping instead of indexing out of bounds.
 fn gray_of(placed: &Bitmap, width: usize, height: usize) -> crate::raster::GrayMask {
+    if placed.width == width && placed.height == height {
+        let mut gray = crate::raster::GrayMask::new(width, height);
+        for i in 0..gray.data.len() {
+            gray.data[i] = placed.data[i * 4];
+        }
+        return gray;
+    }
     let mut gray = crate::raster::GrayMask::new(width, height);
-    for i in 0..gray.data.len() {
-        gray.data[i] = placed.pixel(i % width, i / width)[0];
+    if placed.width == 0 || placed.height == 0 || width == 0 || height == 0 {
+        return gray;
+    }
+    for y in 0..height {
+        for x in 0..width {
+            gray.data[y * width + x] =
+                crate::raster::bilinear_sample(placed, x as f64, y as f64)[0];
+        }
     }
     gray
 }
@@ -1375,8 +1391,6 @@ mod tests {
     }
 
     #[test]
-    fn shape_rectangle_fills_with_color() {
-    #[test]
     fn effects_cache_hits_for_identical_input() {
         let mut doc = CanvasDocument::new(10, 10);
         let mut layer = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0);
@@ -1392,6 +1406,30 @@ mod tests {
         let first = draw_live_composite(&doc);
         let second = draw_live_composite(&doc);
         assert_eq!(first.pixel(5, 5), second.pixel(5, 5));
+    }
+
+    #[test]
+    fn solid_one_pixel_mask_with_effects_does_not_panic() {
+        // A 1x1 solid mask (LayerMask::solid, one click in the UI) covering a
+        // larger layer: baking effects must not index the tiny mask out of
+        // bounds (gray_of / effects.rs shown-mask loop).
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut layer = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0);
+        layer.mask = Some(crate::document::LayerMask {
+            asset: ImportedImage::with_thumbnail(Bitmap::new(1, 1), Bitmap::new(1, 1), "Mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        let mut overlay = crate::effects::ColorOverlayEffect::default();
+        overlay.enabled = Some(true);
+        layer.effects = Some(crate::effects::LayerEffects {
+            color_overlay: Some(overlay),
+            ..Default::default()
+        });
+        doc.layers = vec![layer];
+        let out = draw_live_composite(&doc);
+        assert_eq!((out.width, out.height), (10, 10));
     }
 
     #[test]
@@ -1418,8 +1456,15 @@ mod tests {
         let full = mask_clip_image(layer.mask.as_ref().unwrap(), &layer.transform, 40, 40)
             .expect("full mask");
         assert_eq!((full.width, full.height), (40, 40));
-        let limited = mask_clip_image_limited(layer.mask.as_ref().unwrap(), &layer.transform, 40, 40, Some(10))
-            .expect("limited mask");
+        // A mask placed apart is resampled into the layer grid; the limit caps
+        // the longest side of that resample (LayerMask.swift:110-118).
+        let placed_mask = crate::document::LayerMask {
+            placement: Some(LayerTransform::new(CGPoint::new(10.0, 10.0), CGSize::new(20.0, 20.0))),
+            ..layer.mask.as_ref().unwrap().clone()
+        };
+        let limited =
+            mask_clip_image_limited(&placed_mask, &layer.transform, 40, 40, Some(10))
+                .expect("limited mask");
         assert_eq!((limited.width, limited.height), (10, 10), "limit caps the grid");
     }
 
@@ -1440,6 +1485,8 @@ mod tests {
         assert_eq!((out.width, out.height), (10_000, 10_000));
     }
 
+    #[test]
+    fn shape_rectangle_fills_with_color() {
         let shape = LayerShape {
             kind: ShapeKind::Rectangle,
             corner_radius: 0.0,

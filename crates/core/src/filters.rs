@@ -407,9 +407,11 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
     result
 }
 
-/// `CIMotionBlur`-equivalent: an even streak along `angle` degrees
-/// counterclockwise from horizontal, with the same spread as CI's tapered
-/// kernel at `MOTION_RADIUS_PER_PIXEL` × length.
+/// `CIMotionBlur`-equivalent: a Gaussian-tapered streak along `angle` degrees
+/// counterclockwise from horizontal (Core Image's kernel is not an even box;
+/// the doc previously claimed "even streak" — it tapers like CI at
+/// `MOTION_RADIUS_PER_PIXEL` × length). Edge samples clamp like Core Image's
+/// default sampler, so border pixels keep their energy.
 pub fn motion_blur(image: &Bitmap, distance: f64, angle_degrees: f64) -> Bitmap {
     if distance < 1.0 {
         return image.clone();
@@ -436,20 +438,21 @@ pub fn motion_blur(image: &Bitmap, distance: f64, angle_degrees: f64) -> Bitmap 
     for w in weights.iter_mut() {
         *w /= total;
     }
-    let weights = weights;
     let mut acc = vec![0.0f32; image.width * image.height * 4];
     for i in -radius..=radius {
         let dx = dir_x * i as f64;
         let dy = dir_y * i as f64;
         let weight = weights[(i + radius) as usize] as f32;
+        if weight == 0.0 {
+            continue;
+        }
         for y in 0..image.height {
             for x in 0..image.width {
-                let sx = (x as f64 + 0.5 + dx).floor();
-                let sy = (y as f64 + 0.5 + dy).floor();
-                if sx < 0.0 || sy < 0.0 || sx >= image.width as f64 || sy >= image.height as f64 {
-                    continue;
-                }
-                let p = image.pixel(sx as usize, sy as usize);
+                // Clamp to the edge (Core Image's default sampler) instead of
+                // dropping the tap — dropped taps darkened the borders.
+                let sx = (x as f64 + dx).clamp(0.0, (image.width - 1) as f64);
+                let sy = (y as f64 + dy).clamp(0.0, (image.height - 1) as f64);
+                let p = crate::raster::bilinear_sample(image, sx, sy);
                 let o = (y * image.width + x) * 4;
                 for c in 0..4 {
                     acc[o + c] += p[c] as f32 * weight;
@@ -729,6 +732,28 @@ mod tests {
         let vertical = motion_blur(&img, 12.0, 90.0);
         assert!(vertical.pixel(10, 13)[3] > 0);
         assert_eq!(vertical.pixel(13, 10)[3], 0);
+    }
+
+    #[test]
+    fn motion_blur_keeps_border_energy() {
+        // A fully opaque image stays fully opaque after blurring: edge taps
+        // clamp (Core Image's sampler) instead of being dropped, which used
+        // to fade the borders toward transparent black.
+        let mut img = Bitmap::new(40, 40);
+        for pixel in img.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[200, 100, 50, 255]);
+        }
+        let out = motion_blur(&img, 30.0, 35.0);
+        for (i, o) in [0, 39, 40 * 40 - 1, 40 * 20].iter().enumerate() {
+            let p = out.pixel(o % 40, o / 40);
+            assert!(
+                (p[0] as i32 - 200).abs() <= 2
+                    && (p[1] as i32 - 100).abs() <= 2
+                    && (p[2] as i32 - 50).abs() <= 2
+                    && p[3] == 255,
+                "border pixel {i} kept its energy: {p:?}"
+            );
+        }
     }
 
     #[test]

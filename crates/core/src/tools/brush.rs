@@ -133,6 +133,26 @@ impl RasterEdit {
         canvas: CGSize,
         selection_clip: Option<SelectionClip>,
     ) -> RasterEdit {
+        // BrushStroke.init throws on out-of-range settings
+        // (BrushStroke.swift:176-177: diameter 1…2000, hardness 0…1, opacity
+        // 0.01…1). The port clamps instead, so a stray value can neither
+        // change semantics nor allocate an unbounded tip grid.
+        let mut settings = settings;
+        settings.diameter = if settings.diameter.is_finite() {
+            settings.diameter.clamp(1.0, 2000.0)
+        } else {
+            40.0
+        };
+        settings.hardness = if settings.hardness.is_finite() {
+            settings.hardness.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        settings.opacity = if settings.opacity.is_finite() {
+            settings.opacity.clamp(0.01, 1.0)
+        } else {
+            1.0
+        };
         let canvas_rect = CGRect::from_origin_size(CGPoint::ZERO, canvas);
         let original_width = source
             .as_ref()
@@ -568,6 +588,14 @@ impl RasterEdit {
         self.coverage.data.iter().any(|v| *v != 0)
     }
 
+    /// The selection clip's coverage at a grid pixel, sampled through the
+    /// grid→document transform: the clip lives in document coordinates, so a
+    /// scaled layer's grid must be mapped before sampling.
+    fn clip_alpha(&self, clip: &SelectionClip, x: usize, y: usize) -> f32 {
+        let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&self.pixel_to_document);
+        clip.alpha_at_document(doc.x, doc.y)
+    }
+
     /// Spot Healing, once the stroke ends: rebuilds the painted area from
     /// nearby texture (`HealPixels.c`) into the stroke's starting pixels —
     /// never the dark wash shown while painting — and clears the coverage, so
@@ -598,6 +626,13 @@ impl RasterEdit {
         }
         let opacity = self.settings.opacity as f32;
         if !crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed) {
+            // The heal failed (e.g. no RING pixels inside the work box). The
+            // dark wash preview must not survive as real pixels — the caller
+            // ignores this return value and paints the snapshot regardless —
+            // so drop the coverage and geometry, leaving the layer untouched.
+            self.coverage = GrayMask::new(self.width, self.height);
+            self.segments.clear();
+            self.tail_segment = None;
             return false;
         }
         for row in 0..rh {
@@ -722,7 +757,7 @@ impl RasterEdit {
         if let Some(clip) = &self.selection_clip {
             for y in 0..self.height {
                 for x in 0..self.width {
-                    let alpha = clip.alpha_at(x, y);
+                    let alpha = self.clip_alpha(clip, x, y);
                     if alpha >= 1.0 {
                         continue;
                     }
@@ -798,7 +833,7 @@ impl RasterEdit {
             for x in 0..self.width {
                 let mut alpha = opacity;
                 if let Some(clip) = &self.selection_clip {
-                    alpha *= clip.alpha_at(x, y);
+                    alpha *= self.clip_alpha(clip, x, y);
                     if alpha <= 0.0 {
                         continue;
                     }
@@ -842,7 +877,7 @@ impl RasterEdit {
             for x in 0..self.width {
                 let mut within = true;
                 if let Some(clip) = &self.selection_clip {
-                    within = clip.alpha_at(x, y) > 0.0;
+                    within = self.clip_alpha(clip, x, y) > 0.0;
                 }
                 let i = y * self.width + x;
                 coverage.data[i] = if within { 255 } else { 0 };
@@ -876,7 +911,7 @@ impl RasterEdit {
         for y in 0..self.height {
             for x in 0..self.width {
                 let within = match &self.selection_clip {
-                    Some(clip) => clip.alpha_at(x, y) > 0.0,
+                    Some(clip) => self.clip_alpha(clip, x, y) > 0.0,
                     None => true,
                 };
                 if !within {
@@ -916,7 +951,7 @@ impl RasterEdit {
             for x in 0..lifted.width {
                 let gx = region.min_x() as usize + x;
                 let gy = region.min_y() as usize + y;
-                let alpha = clip.alpha_at(gx, gy) as f32;
+                let alpha = self.clip_alpha(clip, gx, gy);
                 let mut px = composed.pixel(gx, gy);
                 for c in 0..3 {
                     px[c] = (px[c] as f32 * alpha) as u8;
@@ -940,15 +975,16 @@ impl RasterEdit {
         let clip = self.selection_clip.as_ref()?;
         for y in 0..self.height {
             for x in 0..self.width {
-                let alpha = clip.alpha_at(x, y);
+                let alpha = self.clip_alpha(clip, x, y);
                 if alpha <= 0.0 || duplicate {
                     continue;
                 }
                 // Punch out under the original selection.
                 let o = (y * self.width + x) * 4;
-                let a = out.data[o + 3] as f32 * (1.0 - alpha as f32);
+                let keep = 1.0 - alpha as f32;
+                let a = (out.data[o + 3] as f32 * keep).round();
                 for c in 0..3 {
-                    out.data[o + c] = (out.data[o + c] as f32 * (1.0 - alpha as f32)) as u8;
+                    out.data[o + c] = (out.data[o + c] as f32 * keep).round() as u8;
                 }
                 out.data[o + 3] = a as u8;
             }
@@ -1327,6 +1363,32 @@ mod tests {
         let out = edit.fill([0, 255, 0, 255]);
         assert_eq!(out.pixel(35, 35)[1], 255);
         assert_eq!(out.pixel(5, 5)[3], 0);
+    }
+
+    #[test]
+    fn selection_clip_lands_on_a_scaled_layer() {
+        // The clip lives in document coordinates: on a layer drawn at 2x, the
+        // fill must cover the grid pixels whose *document* centers are inside
+        // the selection (sampling grid coordinates clips at the wrong place).
+        let transform = LayerTransform::new(CGPoint::ZERO, CGSize::new(20.0, 20.0));
+        let sel = crate::selection::DocumentSelection::new(crate::selection::SelectionPath::rect(
+            CGRect::new(5.0, 5.0, 10.0, 10.0),
+        ));
+        let clip = sel.clip(CGSize::new(40.0, 40.0));
+        let edit = RasterEdit::new(
+            Some(Bitmap::new(10, 10)),
+            transform,
+            false,
+            BrushSettings::default(),
+            CGSize::new(40.0, 40.0),
+            Some(clip),
+        );
+        let out = edit.fill([0, 255, 0, 255]);
+        // Grid pixel (3,3) shows at document (7,7) — inside the selection.
+        assert_eq!(out.pixel(3, 3)[1], 255, "inside the document rect");
+        // Grid pixels (1,1) and (8,8) show at (3,3) and (17,17) — outside.
+        assert_eq!(out.pixel(1, 1)[3], 0, "outside the document rect");
+        assert_eq!(out.pixel(8, 8)[3], 0, "outside the document rect");
     }
 
     /// The provisional straight tail shows in the wet preview even though no
@@ -1914,5 +1976,38 @@ mod heal_tests {
         );
         edit.settings.healing = true;
         assert!(!edit.heal(0, 1));
+    }
+
+    #[test]
+    fn failed_heal_leaves_no_wash_behind() {
+        // A stroke covering the whole layer leaves no RING pixels for the
+        // kernel: the heal fails. The dark wash preview (rgb 31 at 45%) must
+        // not survive as committed pixels — the app ignores heal()'s return
+        // value and paints the snapshot regardless.
+        let mut source = Bitmap::new(8, 8);
+        for i in (0..source.data.len()).step_by(4) {
+            source.data[i..i + 4].copy_from_slice(&[220, 30, 30, 255]);
+        }
+        let mut edit = RasterEdit::new(
+            Some(source),
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(8.0, 8.0)),
+            false,
+            BrushSettings::default(),
+            CGSize::new(8.0, 8.0),
+            None,
+        );
+        edit.settings.healing = true;
+        edit.settings.hardness = 1.0;
+        edit.settings.diameter = 12.0;
+        edit.append(CGPoint::new(4.0, 4.0));
+        edit.append(CGPoint::new(4.0, 4.5));
+        assert!(edit.has_paint());
+        assert!(!edit.heal(0, 1), "a fully covered layer has no RING to heal from");
+        let out = edit.result();
+        assert_eq!(
+            out.pixel(4, 4),
+            [220, 30, 30, 255],
+            "the failed heal leaves the layer untouched"
+        );
     }
 }

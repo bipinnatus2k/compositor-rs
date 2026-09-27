@@ -326,6 +326,11 @@ fn bool_field(data: &[u8], key: &str) -> Option<bool> {
 fn unit_field(data: &[u8], key: &str, from: usize) -> Option<f64> {
     let key_at = find_offset(data, key.as_bytes(), from)?;
     let unit_at = find_offset(data, b"UntF", key_at)?;
+    // "UntF" + 4-byte unit + 8-byte double; a truncated descriptor must read
+    // as absent (Swift's `double(at:in:)` returns nil) rather than panic.
+    if unit_at + 16 > data.len() {
+        return None;
+    }
     Some(f64_at(data, unit_at + 8))
 }
 
@@ -783,7 +788,11 @@ fn fill_polygons(target: &mut Bitmap, polys: &[Vec<CGPoint>], color: PaletteColo
         return;
     }
     let cols = x1 - x0;
-    let mut coverage = vec![0.0f32; target.width * target.height];
+    // Coverage only over the shape's bounding window: allocating the whole
+    // target bitmap cost 4 bytes per canvas pixel for a shape that may cover
+    // a corner of it.
+    let rows = y1 - y0;
+    let mut coverage = vec![0.0f32; rows * cols];
     // Per-band accumulators indexed relative to x0. `area_row` holds the
     // signed trapezoid each straddling edge sweeps inside the column,
     // `height_row` the partial band height over which its winding already
@@ -874,18 +883,18 @@ fn fill_polygons(target: &mut Bitmap, polys: &[Vec<CGPoint>], color: PaletteColo
         // Sweep the band left to right: the pixel's signed winding area is
         // the full-height winding accumulated so far plus this column's
         // partial-height and trapezoid terms.
-        let row_start = y * target.width;
+        let row_start = (y - y0) * cols;
         let mut full = 0.0f64;
         for px in x0..x1 {
             let idx = px - x0;
             full += full_events[idx];
             let a = (full + height_row[idx] + area_row[idx]).abs().min(1.0) as f32;
-            coverage[row_start + px] = a;
+            coverage[row_start + idx] = a;
         }
     }
     for y in y0..y1 {
         for x in x0..x1 {
-            let c = coverage[y * target.width + x].min(1.0);
+            let c = coverage[(y - y0) * cols + (x - x0)].min(1.0);
             if c <= 0.0 {
                 continue;
             }
@@ -906,6 +915,21 @@ fn fill_polygons(target: &mut Bitmap, polys: &[Vec<CGPoint>], color: PaletteColo
 mod tests {
     use super::*;
     use crate::document::ShapeKind;
+
+    #[test]
+    fn unit_field_on_truncated_descriptor_is_none() {
+        // "UntF" present but fewer than 16 bytes remain after its start: the
+        // read must fail gracefully instead of panicking on the u64 slice.
+        let mut data = b"Left".to_vec();
+        data.extend_from_slice(b"\0\0UntF");
+        data.extend_from_slice(b"#Pxl");
+        data.extend_from_slice(&[0, 1, 2, 3]); // only 4 of the 8 double bytes
+        assert_eq!(unit_field(&data, "Left", 0), None);
+        // A complete descriptor still reads.
+        let mut full = b"Left\0\0UntF#Pxl".to_vec();
+        full.extend_from_slice(&100.0f64.to_be_bytes());
+        assert_eq!(unit_field(&full, "Left", 0), Some(100.0));
+    }
 
     #[test]
     fn shape_image_fills_the_box() {

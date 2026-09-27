@@ -701,6 +701,8 @@ impl CanvasDocument {
     pub fn effective_visible_ids(&self) -> HashSet<Uuid> {
         let parents: std::collections::HashMap<Uuid, Option<Uuid>> =
             self.layers.iter().map(|l| (l.id, l.parent_id)).collect();
+        let visibility: std::collections::HashMap<Uuid, bool> =
+            self.layers.iter().map(|l| (l.id, l.is_visible)).collect();
         let mut visible = HashSet::new();
         for layer in &self.layers {
             let mut current = Some(layer.id);
@@ -711,11 +713,9 @@ impl CanvasDocument {
                     ok = false;
                     break;
                 }
-                if let Some(l) = self.layer(id) {
-                    if !l.is_visible {
-                        ok = false;
-                        break;
-                    }
+                if visibility.get(&id).copied() == Some(false) {
+                    ok = false;
+                    break;
                 }
                 current = parents.get(&id).copied().flatten();
                 steps += 1;

@@ -565,6 +565,24 @@ impl SelectionClip {
             }
         }
     }
+
+    /// The coverage value (0–1) at a document *point* (pixel centers included),
+    /// 0 outside the region. Brush edits sample through their layer's
+    /// pixel→document transform, so the clip lands correctly on scaled layers.
+    pub fn alpha_at_document(&self, x: f64, y: f64) -> f32 {
+        match &self.coverage {
+            None => 0.0,
+            Some(mask) => {
+                let lx = x - self.rect.min_x();
+                let ly = y - self.rect.min_y();
+                if lx < 0.0 || ly < 0.0 || lx >= mask.width as f64 || ly >= mask.height as f64 {
+                    0.0
+                } else {
+                    mask.value(lx as usize, ly as usize) as f32 / 255.0
+                }
+            }
+        }
+    }
 }
 
 /// Rasterization of an outline into a `width` × `height` mask. Winding fill,
@@ -724,7 +742,9 @@ fn fill_row_coverage(edges: &[RowEdge], y0: f64, acc: &mut [f64]) {
                 .iter()
                 .map(|e| (e.x_ref + e.slope * (ym - y0), e.dir, e.slope))
                 .collect();
-            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // total_cmp: ring coordinates are upstream-guarded against NaN, but a
+            // stray NaN must not panic the sort.
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
             // Sweep right to left: the span between crossings i-1 and i is
             // inside when the winding number to its right is nonzero — the
             // same rule `winding_contains` applies at a point (a closed ring's
@@ -800,7 +820,7 @@ fn span_column_overlap(
             }
         }
     }
-    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    cuts.sort_by(|a, b| a.total_cmp(b));
     let mut area = 0.0;
     for pair in cuts.windows(2) {
         area += 0.5 * (overlap(pair[0]) + overlap(pair[1])) * (pair[1] - pair[0]);
@@ -811,7 +831,7 @@ fn span_column_overlap(
 /// Sorts ascending and merges near-duplicates (vertex ys computed from
 /// different edges can differ by rounding noise).
 fn sort_dedup(values: &mut Vec<f64>) {
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values.sort_by(|a, b| a.total_cmp(b));
     values.dedup_by(|a, b| *a - *b < 1e-9);
 }
 

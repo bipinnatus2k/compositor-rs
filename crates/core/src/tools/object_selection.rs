@@ -302,7 +302,10 @@ fn simplify_closed(input: &[CGPoint], tolerance: f64) -> Vec<CGPoint> {
     }
     let start = (0..points.len())
         .min_by(|&lhs, &rhs| {
-            (points[lhs].x, points[lhs].y).partial_cmp(&(points[rhs].x, points[rhs].y)).unwrap()
+            points[lhs]
+                .x
+                .total_cmp(&points[rhs].x)
+                .then(points[lhs].y.total_cmp(&points[rhs].y))
         })
         .unwrap_or(0);
     let rotated: Vec<CGPoint> = points[start..].iter().chain(points[..start].iter()).copied().collect();

@@ -593,17 +593,25 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
         Some(m) => {
             let mut result = image.clone();
             debug_assert_eq!((m.width, m.height), (image.width, image.height));
-            for i in 0..(result.width * result.height) {
-                let coverage = m.data[i] as u32;
-                if coverage == 255 {
-                    continue;
-                }
-                let o = i * 4;
-                if coverage == 0 {
-                    result.data[o..o + 4].copy_from_slice(&[0, 0, 0, 0]);
-                } else {
-                    for c in 0..4 {
-                        result.data[o + c] = (result.data[o + c] as u32 * coverage / 255) as u8;
+            // Release safety: a mismatched mask (e.g. a 1x1 solid mask under a
+            // larger layer) must not index out of bounds — treat a smaller
+            // mask as its clamped extension, ignore out-of-range entries.
+            let mw = m.width.min(result.width);
+            let mh = m.height.min(result.height);
+            for y in 0..mh {
+                for x in 0..mw {
+                    let i = y * result.width + x;
+                    let coverage = m.data[y * m.width + x] as u32;
+                    if coverage == 255 {
+                        continue;
+                    }
+                    let o = i * 4;
+                    if coverage == 0 {
+                        result.data[o..o + 4].copy_from_slice(&[0, 0, 0, 0]);
+                    } else {
+                        for c in 0..4 {
+                            result.data[o + c] = (result.data[o + c] as u32 * coverage / 255) as u8;
+                        }
                     }
                 }
             }

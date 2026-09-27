@@ -82,7 +82,12 @@ pub fn copy_layers_between(
             layer.mask_source_id = None;
             continue;
         }
-        layer.asset = source.bake_live_mask(layer.id);
+        if let Some(baked) = source.bake_live_mask(layer.id) {
+            layer.asset = Some(baked);
+        }
+        // A bake that fails (a clipping chain beyond the baker's depth limit)
+        // keeps the layer's own pixels rather than blanking the asset — the
+        // copy must never replace content with nothing.
         layer.mask_source_id = None;
     }
 

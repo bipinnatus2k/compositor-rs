@@ -590,24 +590,48 @@ impl EditorSession {
         self.history.end(&self.document, self.active_layer_id);
     }
 
+    /// `canUseHistory` (EditorSession.swift:563-567): no editor may swap the
+    /// document out under a busy gesture. The core additionally guards
+    /// `pixel_move` — lifted pixels must not land in a restored document.
+    pub fn can_use_history(&self) -> bool {
+        self.selection_amount_operation.is_none()
+            && self.text_draft.is_none()
+            && self.levels.is_none()
+            && self.transform_edit.is_none()
+            && self.pixel_move.is_none()
+            && !self.shows_new_document
+    }
+
     pub fn can_undo(&self) -> bool {
         // A pending gradient can still be applied or cancelled, so the menu
         // treats it as undoable too (EditorSession.swift:567's
         // `gradientEdit != nil` branch).
-        self.history.can_undo() || self.gradient_edit.is_some()
+        self.can_use_history() && (self.history.can_undo() || self.gradient_edit.is_some())
     }
 
     pub fn can_redo(&self) -> bool {
-        self.history.can_redo()
+        self.can_use_history() && self.history.can_redo()
     }
 
     pub fn undo(&mut self) {
+        // Like Photoshop, the first Undo discards a pending gradient
+        // (EditorSession.swift:569-571).
+        if self.gradient_edit.is_some() {
+            self.cancel_gradient();
+            return;
+        }
+        if !self.can_undo() {
+            return;
+        }
         if let Some(snapshot) = self.history.undo() {
             self.restore(snapshot);
         }
     }
 
     pub fn redo(&mut self) {
+        if !self.can_redo() {
+            return;
+        }
         if let Some(snapshot) = self.history.redo() {
             self.restore(snapshot);
         }
@@ -661,6 +685,10 @@ impl EditorSession {
         self.collapsed_group_ids.clear();
         self.is_mask_selected = false;
         self.cancel_crop();
+        // A pending gradient recorded against the old document must not leak
+        // into the freshly installed one (apply_gradient commits by draft
+        // layer id; dropping the draft keeps that safe).
+        self.gradient_edit = None;
         self.guide_drag = None;
         self.transform_edit = None;
         self.active_layer_id = active_layer_id;
@@ -679,6 +707,7 @@ impl EditorSession {
         self.collapsed_group_ids.clear();
         self.is_mask_selected = false;
         self.cancel_crop();
+        self.gradient_edit = None;
         self.transform_edit = None;
         self.guide_drag = None;
         self.document = None;
@@ -691,9 +720,14 @@ impl EditorSession {
     // MARK: Layers
 
     pub fn select_layer(&mut self, id: Option<Uuid>) {
-        // Switching layers commits a pending transform and applies the
-        // pending gradient first (selectLayer).
+        // selectLayer (EditorSession.swift:325-331): the effect selection
+        // dies, a changed layer finishes pending text, and switching commits
+        // a pending transform and applies the pending gradient first.
+        self.effect_selection = None;
         if id != self.active_layer_id {
+            if !self.finish_text() {
+                return;
+            }
             self.commit_transform();
             self.resolve_gradient();
             self.is_mask_selected = false;
@@ -762,8 +796,17 @@ impl EditorSession {
         self.end_edit();
     }
 
-    /// `deleteLayer` — a selected folder takes its contents.
+    /// `deleteLayer` — a selected folder takes its contents. When the layer
+    /// supplies live masks to layers that stay, Swift routes through
+    /// `deleteWithLiveMaskChoice` (EditorSession.swift:635-639), which asks
+    /// bake-or-unlink. The core has no dialog; baking keeps the masked
+    /// appearance in the dependents' pixels and stays one undo step, so the
+    /// plain path bakes. The app can offer the real choice via
+    /// `delete_with_live_mask_choice`.
     pub fn delete_layer(&mut self, id: Uuid) {
+        if self.delete_with_live_mask_choice(&[id], true) {
+            return;
+        }
         self.delete_layer_with_baked(id, Default::default());
     }
 
@@ -824,6 +867,11 @@ impl EditorSession {
         if name.is_empty() {
             return;
         }
+        // canEditLayers (EditorSession.swift:646): a crop or open transform
+        // blocks layer edits.
+        if !self.can_edit_layers() {
+            return;
+        }
         if self.document.as_ref().and_then(|d| d.layer(id)).is_some() {
             self.begin_edit("Rename Layer");
             if let Some(doc) = self.document.as_mut() {
@@ -834,6 +882,10 @@ impl EditorSession {
     }
 
     pub fn toggle_layer_visibility(&mut self, id: Uuid) {
+        // canEditLayers (EditorSession.swift:657).
+        if !self.can_edit_layers() {
+            return;
+        }
         let was_visible = self
             .document
             .as_ref()
@@ -850,6 +902,11 @@ impl EditorSession {
 
     /// `moveActiveLayer(by:)` — within its siblings.
     pub fn move_active_layer(&mut self, offset: i64) {
+        // canMoveActiveLayer (EditorSession.swift:710-715) requires
+        // canEditLayers too.
+        if !self.can_edit_layers() {
+            return;
+        }
         let Some(active_id) = self.active_layer_id else {
             return;
         };
@@ -1929,11 +1986,24 @@ impl EditorSession {
     /// `makeRasterEdit(for:)` — the active layer's pixels, or its mask's grid
     /// when the mask is the target.
     fn raster_edit_for_active(&self, document: &CanvasDocument) -> Option<RasterEdit> {
-        let layer = self.active_layer()?;
+        let id = self.active_layer_id?;
+        self.raster_edit_for_layer(document, id, self.is_mask_selected)
+    }
+
+    /// `makeRasterEdit(for: layer)` for an arbitrary target — a pending
+    /// gradient commits to the layer its draft captured, not to whichever
+    /// layer is active when the commit happens.
+    fn raster_edit_for_layer(
+        &self,
+        document: &CanvasDocument,
+        layer_id: Uuid,
+        is_mask: bool,
+    ) -> Option<RasterEdit> {
+        let layer = document.layer(layer_id)?;
         if layer.is_group {
             return None;
         }
-        let (source, transform) = if self.is_mask_selected {
+        let (source, transform) = if is_mask {
             let uniform = layer
                 .mask
                 .as_ref()
@@ -1959,7 +2029,7 @@ impl EditorSession {
         Some(RasterEdit::new(
             source,
             transform,
-            self.is_mask_selected,
+            is_mask,
             self.brush_settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
@@ -1969,10 +2039,20 @@ impl EditorSession {
     /// `commitRasterEdit` — the composed grid becomes the targeted layer's (or
     /// mask's) pixels as one undo step.
     fn commit_pixel_edit(&mut self, edit: &RasterEdit, composed: &Bitmap, name: &str) {
-        let (mut image, transform, _) = edit.snapshot_of(composed);
         let Some(id) = self.active_layer_id else {
             return;
         };
+        self.commit_pixel_edit_for_layer(id, edit, composed, name);
+    }
+
+    fn commit_pixel_edit_for_layer(
+        &mut self,
+        id: Uuid,
+        edit: &RasterEdit,
+        composed: &Bitmap,
+        name: &str,
+    ) {
+        let (mut image, transform, _) = edit.snapshot_of(composed);
         self.begin_edit(name);
         if let Some(document) = self.document.as_mut() {
             if let Some(layer) = document.layer_mut(id) {
@@ -2356,9 +2436,12 @@ impl EditorSession {
         self.end_edit();
     }
 
-    /// `addMask(revealing:)` — with a selection, the mask shows (or hides)
-    /// just the selected pixels of the layer's own grid; without one it is the
-    /// plain reveal/hide mask.
+    /// `addMask(revealing:)` — with a selection the mask starts as the inverse
+    /// of the reveal state (LayerMask.swift:233-260: "so a white mask hides
+    /// the selection"): `revealing` fills white, then knocks the selection out
+    /// to black, so only the unselected pixels show; `!revealing` hides only
+    /// the selected pixels. Without a selection it is the plain reveal/hide
+    /// mask.
     pub fn add_mask_from_selection(&mut self, revealing: bool) {
         if self.selection().is_none() {
             self.add_layer_mask(revealing);
@@ -2889,6 +2972,10 @@ impl EditorSession {
     /// `selectLayers` — the selection is intersected with the document's
     /// layers; switching it commits a pending transform first.
     pub fn select_layers(&mut self, ids: &[Uuid], primary: Option<Uuid>) {
+        // selectLayers (LayerGroups.swift:96-104): the effect selection dies,
+        // a changed selection finishes pending text, and a changed valid
+        // selection commits the transform and resolves the pending gradient.
+        self.effect_selection = None;
         let Some(document) = self.document.as_ref() else {
             return;
         };
@@ -2902,8 +2989,12 @@ impl EditorSession {
         }
         let same = valid.len() == self.selected_layer_ids.len()
             && valid.iter().all(|id| self.selected_layer_ids.contains(id));
+        if !same && !self.finish_text() {
+            return;
+        }
         if !same {
             self.commit_transform();
+            self.resolve_gradient();
         }
         self.active_layer_id = match primary {
             Some(primary) if valid.contains(&primary) => Some(primary),
@@ -3260,7 +3351,10 @@ impl EditorSession {
     }
 
     /// `deleteSelectedLayers` — every selected layer (a selected folder takes
-    /// its contents) in one undo step; one selection just deletes it.
+    /// its contents) in one undo step; one selection just deletes it. When the
+    /// deleted layers supply live masks to layers that stay, Swift asks
+    /// bake-or-unlink (EditorSession.swift:652); the plain path bakes so the
+    /// dependents keep their masked appearance (see `delete_layer`).
     pub fn delete_selected_layers(&mut self) {
         if !self.can_edit_layers() {
             return;
@@ -3276,6 +3370,9 @@ impl EditorSession {
             .collect();
         if ids.len() <= 1 {
             self.delete_active_layer();
+            return;
+        }
+        if self.delete_with_live_mask_choice(&ids, true) {
             return;
         }
         let mut removed = std::collections::HashSet::new();
@@ -3787,7 +3884,9 @@ impl EditorSession {
     }
 
     /// `finishDeletingLayers` — the deletion that carries baked pixels for
-    /// dependents.
+    /// dependents. Several ids delete in one "Delete Layers" undo step whose
+    /// after-snapshot includes the baked pixels (LiveLayerMask.swift:149-153:
+    /// the passed ids are deleted, not the selection).
     fn delete_selected_layers_with_baked(
         &mut self,
         ids: &[Uuid],
@@ -3799,14 +3898,11 @@ impl EditorSession {
             }
             return;
         }
-        self.delete_selected_layers();
-        if let Some(document) = self.document.as_mut() {
-            for (id, image) in baked {
-                if let Some(layer) = document.layer_mut(id) {
-                    layer.asset = Some(image);
-                }
-            }
+        self.begin_edit("Delete Layers");
+        for id in ids {
+            self.delete_layer_with_baked(*id, baked.clone());
         }
+        self.end_edit();
     }
 
     // MARK: Transform snapping (Guides.swift)
@@ -3895,9 +3991,10 @@ impl EditorSession {
     // MARK: Gradient (Gradient.swift)
 
     /// `beginGradient(at:)` — dragging a new line replaces the pending one on
-    /// the same target.
+    /// the same target. Swift's first guard is `tool == .gradient`
+    /// (Gradient.swift:37).
     pub fn begin_gradient(&mut self, at: CGPoint) {
-        if !self.can_edit_pixels() {
+        if self.tool != NavigationTool::Gradient || !self.can_edit_pixels() {
             return;
         }
         let Some(id) = self.active_layer_id else {
@@ -3935,17 +4032,19 @@ impl EditorSession {
     }
 
     /// `refreshGradient` — re-renders the pending gradient from the current
-    /// endpoints, settings, and palette.
+    /// endpoints, settings, and palette. `hasLine` is the plain euclidean
+    /// length (Gradient.swift:32) — no extra square root.
     pub fn refresh_gradient(&self) -> Option<Bitmap> {
         let draft = self.gradient_edit.as_ref()?;
-        let has_line = ((draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y)).sqrt() >= 0.5;
+        let has_line =
+            (draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y) >= 0.5;
         if !has_line {
             return None;
         }
         let Some(document) = self.document.as_ref() else {
             return None;
         };
-        let edit = self.raster_edit_for_active(document)?;
+        let edit = self.raster_edit_for_layer(document, draft.layer_id, draft.is_mask)?;
         let (fg, bg, transparent) = self.gradient_colors(draft.is_mask);
         let mut colors = if self.gradient_settings.foreground_to_background {
             [fg, bg]
@@ -3982,8 +4081,10 @@ impl EditorSession {
         }
     }
 
-    /// `commitGradient` — the pending gradient rasterizes into its layer (or
-    /// mask) as one undo step. A click without a line just cancels.
+    /// `commitGradient` — the pending gradient rasterizes into the layer (or
+    /// mask) its draft captured (Gradient.swift:88-100 commits `edit.raster`,
+    /// which is bound to the layer from begin time), as one undo step. A click
+    /// without a line just cancels. `hasLine` is the plain euclidean length.
     pub fn apply_gradient(&mut self) -> bool {
         let Some(draft) = self.gradient_edit.clone() else {
             return false;
@@ -3993,14 +4094,15 @@ impl EditorSession {
             self.gradient_edit = Some(draft);
             return false;
         }
-        let has_line = ((draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y)).sqrt() >= 0.5;
+        let has_line = (draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y) >= 0.5;
         if !has_line {
             return true;
         }
         let Some(document) = self.document.clone() else {
             return false;
         };
-        let Some(edit) = self.raster_edit_for_active(&document) else {
+        let Some(edit) = self.raster_edit_for_layer(&document, draft.layer_id, draft.is_mask)
+        else {
             return false;
         };
         let (fg, bg, transparent) = self.gradient_colors(edit.is_mask);
@@ -4019,7 +4121,8 @@ impl EditorSession {
             colors,
             self.gradient_settings.opacity,
         );
-        self.commit_pixel_edit(
+        self.commit_pixel_edit_for_layer(
+            draft.layer_id,
             &edit,
             &composed,
             if edit.is_mask { "Gradient Mask" } else { "Gradient" },
@@ -5264,10 +5367,6 @@ impl EditorSession {
                 tolerance: 8.0,
             };
             updated = snap.apply(updated, drag, point, ratio, symmetric);
-            #[cfg(test)]
-            if std::env::var("CROP_DBG").is_ok() {
-                eprintln!("DBG snap in={:?} out={:?} xs={:?} ys={:?}", (updated.min_x(), updated.min_y()), (updated.min_x(), updated.min_y()), snap.xs, snap.ys);
-            }
         }
         self.crop_rect = Some(updated);
     }
@@ -5337,7 +5436,6 @@ impl EditorSession {
                 self.document = Some(doc);
             }
         }
-        self.crop_rect = None;
         self.crop_rect = None;
     }
 
@@ -6271,13 +6369,45 @@ mod tests {
             start: CGPoint::ZERO,
             end: CGPoint::new(10.0, 10.0),
         });
+        // Like Photoshop, the first Undo only discards the pending gradient;
+        // it does not also consume a history entry (EditorSession.swift:569).
+        s.undo();
+        assert!(s.gradient_edit.is_none(), "the pending gradient dies first");
+        assert_eq!(
+            s.crop_rect,
+            Some(CGRect::new(0.0, 0.0, 40.0, 40.0)),
+            "the history step is not consumed by the gradient discard"
+        );
         s.undo();
         assert_eq!(s.crop_rect, None, "the crop draft dies with the undo");
-        assert!(s.gradient_edit.is_none(), "so does the pending gradient");
         s.crop_rect = Some(CGRect::new(0.0, 0.0, 40.0, 40.0));
         s.redo();
         assert_eq!(s.crop_rect, None);
-        assert!(s.gradient_edit.is_none());
+    }
+
+    #[test]
+    fn undo_is_blocked_while_a_transform_edit_is_open() {
+        // canUseHistory (EditorSession.swift:563-567): undoing mid-transform
+        // would swap the document out and let commit_transform write the
+        // stale draft into the restored one.
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(Bitmap::new(50, 50), "L"));
+        s.rename_layer(s.active_layer_id.unwrap(), "Renamed");
+        s.begin_transform_persistent(true);
+        assert!(s.transform_edit.is_some());
+        assert!(!s.can_undo(), "a busy transform blocks undo");
+        assert!(!s.can_redo(), "and redo");
+        s.undo();
+        assert_eq!(
+            s.active_layer().unwrap().name,
+            "Renamed",
+            "the blocked undo changed nothing"
+        );
+        s.cancel_transform();
+        assert!(s.can_undo(), "undo works again once the transform closes");
+        s.undo();
+        assert_ne!(s.active_layer().unwrap().name, "Renamed");
     }
 
     #[test]
@@ -7495,15 +7625,62 @@ mod tests {
             .image
             .as_ref()
             .clone();
-        if std::env::var("GRAD_DBG").is_ok() {
-            eprintln!(
-                "DBG after undo (12,50)={:?} (0,0)={:?} undo_count={}",
-                image.pixel(12, 50),
-                image.pixel(0, 0),
-                s.history.undo_count()
-            );
-        }
         assert_eq!(image.pixel(12, 50), [255, 0, 0, 255], "undo removes the gradient");
+    }
+
+    #[test]
+    fn gradient_commits_to_the_layer_its_draft_captured() {
+        // Gradient.swift:88-100 commits `edit.raster`, bound to the layer from
+        // begin time — switching the active layer afterwards must not move
+        // the target.
+        let mut s = session();
+        s.tool = NavigationTool::Gradient;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "A"));
+        let a = s.active_layer_id.unwrap();
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        // The active layer changes after the draft was opened.
+        s.add_blank_layer();
+        assert_ne!(s.active_layer_id, Some(a));
+        assert!(s.apply_gradient());
+        let a_image = s
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(a)
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert!(a_image.pixel(12, 50)[0] < 60, "gradient landed on layer A");
+        // And a deleted draft target commits nothing anywhere.
+        let mut s = session();
+        s.tool = NavigationTool::Gradient;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "A"));
+        let a = s.active_layer_id.unwrap();
+        s.begin_gradient(CGPoint::new(10.0, 50.0));
+        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.add_blank_layer();
+        s.delete_layer(a);
+        let before = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .map(|a| a.image.as_ref().clone());
+        assert!(!s.apply_gradient(), "a deleted target rejects the commit");
+        let after = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .map(|a| a.image.as_ref().clone());
+        assert_eq!(before.map(|b| b.data), after.map(|b| b.data));
     }
 
     #[test]
@@ -7687,20 +7864,7 @@ mod tests {
         }
         s.commit_transform();
         let layer = s.document.as_ref().unwrap().layer(id).unwrap();
-        if std::env::var("SHP_DBG").is_ok() {
-            eprintln!(
-                "DBG after commit: layer_id={id} found={} transform={:?} asset={:?} shape={:?}",
-                layer.id == id,
-                (layer.transform.origin.x, layer.transform.origin.y, layer.transform.size.width),
-                layer.asset.as_ref().map(|a| a.image.width),
-                layer.shape.is_some()
-            );
-        }
         assert_eq!(layer.transform.size, CGSize::new(30.0, 30.0));
-        eprintln!("DBG shape test: transform={:?} asset={:?} shape={:?} id={}",
-            (layer.transform.origin.x, layer.transform.size.width, layer.transform.size.height),
-            layer.asset.as_ref().map(|a| (a.image.width, a.image.height)),
-            layer.shape.is_some(), id);
         let asset = layer.asset.as_ref().unwrap();
         assert_eq!(asset.image.width, 30, "the raster was redrawn, not stretched");
         assert_eq!(asset.image.pixel(2, 2), [255, 0, 0, 255]);
@@ -7939,6 +8103,79 @@ mod tests {
         let mut s = session();
         let first = s.document.as_ref().unwrap().layers[0].id;
         assert!(!s.delete_with_live_mask_choice(&[first], true));
+    }
+
+    #[test]
+    fn plain_delete_bakes_a_live_mask_dependent_in_one_undo_step() {
+        // deleteLayer routes through deleteWithLiveMaskChoice
+        // (EditorSession.swift:637). The core's plain path bakes: the
+        // dependent keeps its masked appearance, and the baked pixels live
+        // inside the same undo step.
+        let mut s = session();
+        let base = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        let mut target_layer = ImageLayer::blank("B", CGSize::new(100.0, 100.0));
+        target_layer.asset = Some(ImportedImage::new(Bitmap::new(20, 20), "B"));
+        let target = target_layer.id;
+        s.document.as_mut().unwrap().layers.push(target_layer);
+        s.toggle_clipping_mask(target);
+        s.delete_layer(base);
+        let doc = s.document.as_ref().unwrap();
+        assert!(doc.layer(base).is_none());
+        let kept = doc.layer(target).unwrap();
+        assert_eq!(kept.mask_source_id, None);
+        let image = kept.asset.as_ref().unwrap().image.as_ref().clone();
+        assert_eq!(image.pixel(5, 5), [255, 0, 0, 255], "the base is baked in");
+        assert_eq!(s.history.undo_name(), "Delete Layer");
+        s.undo();
+        assert!(
+            s.document.as_ref().unwrap().layer(base).is_some(),
+            "one undo step restores everything"
+        );
+        // Multi-select: the passed ids are deleted (not the selection), the
+        // baked pixels land in the "Delete Layers" after-snapshot, and undo
+        // restores them.
+        let mut s = session();
+        let base = s.document.as_ref().unwrap().layers[0].id;
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        let mut target_layer = ImageLayer::blank("B", CGSize::new(100.0, 100.0));
+        target_layer.asset = Some(ImportedImage::new(Bitmap::new(20, 20), "B"));
+        let target = target_layer.id;
+        s.document.as_mut().unwrap().layers.push(target_layer);
+        s.toggle_clipping_mask(target);
+        // Select the base plus an unrelated layer; the dependent stays.
+        s.add_blank_layer();
+        let extra = s.active_layer_id.unwrap();
+        s.selected_layer_ids = vec![base, extra];
+        s.delete_selected_layers();
+        let doc = s.document.as_ref().unwrap();
+        assert!(doc.layer(base).is_none());
+        assert!(doc.layer(extra).is_none());
+        assert!(doc.layer(target).is_some(), "the dependent stays");
+        assert_eq!(s.history.undo_name(), "Delete Layers");
+        let steps_before = s.history.undo_count();
+        s.undo();
+        assert_eq!(
+            s.history.undo_count(),
+            steps_before - 1,
+            "the whole multi-delete is one undo step"
+        );
+        let doc = s.document.as_ref().unwrap();
+        assert!(
+            doc.layer(base).is_some() && doc.layer(extra).is_some(),
+            "undo restores the deleted layers"
+        );
+        s.redo();
+        let doc = s.document.as_ref().unwrap();
+        assert!(doc.layer(base).is_none());
+        let kept = doc.layer(target).unwrap();
+        assert_eq!(
+            kept.asset.as_ref().unwrap().image.pixel(5, 5),
+            [255, 0, 0, 255],
+            "redo keeps the baked pixels (they are in the after-snapshot)"
+        );
     }
 
     #[test]
