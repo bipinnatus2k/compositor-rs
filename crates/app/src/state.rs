@@ -132,6 +132,18 @@ pub struct SheetState {
     /// channel's range at once, while the sliders only ever edit the visible
     /// channel's range on top of this.
     pub levels: compositor_core::adjust::LevelsSettings,
+    /// The JPEG export's live encoded preview (`JPEGResult.preview`),
+    /// fitted into the sheet's frame.
+    pub jpeg_preview: Option<Arc<RenderImage>>,
+    /// The (quality, matte) the ready preview was encoded from; the OK
+    /// button stays disabled while this lags the current options
+    /// (`readyOptions != options`).
+    pub jpeg_ready: Option<(f64, usize)>,
+    /// The encoded bytes the ready preview produced — Export writes them
+    /// instead of encoding a second time (`result.data`).
+    pub jpeg_data: Option<Vec<u8>>,
+    /// The encoded size for the status line (`ByteCountFormatter`).
+    pub jpeg_size_label: String,
 }
 
 /// The Curves filter sheet's editor state (`CurvesControls.swift`'s
@@ -1074,6 +1086,54 @@ impl AppState {
         cx.notify();
     }
 
+    /// Re-encodes the JPEG export sheet's live preview when the options
+    /// changed (`JPEGExportSheet.task(id: options)`): the encoded bytes are
+    /// kept so Export writes the preview's own data, and OK stays disabled
+    /// until the preview matches (`readyOptions != options`).
+    pub fn refresh_jpeg_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(sheet) = self.sheet.as_ref() else {
+            return;
+        };
+        if sheet.kind != SheetKind::ExportJpeg {
+            return;
+        }
+        let quality = self.sheet_value(cx, 0) as f64;
+        let matte = sheet.preset;
+        if sheet.jpeg_ready == Some((quality, matte)) {
+            return;
+        }
+        let Some(document) = self.session.document.clone() else {
+            return;
+        };
+        let composite = compositor_core::render::draw_live_composite(&document);
+        if compositor_core::export::check_export_size(composite.width, composite.height).is_err() {
+            return;
+        }
+        let options = compositor_core::export::JpegOptions {
+            quality,
+            red: if matte == 1 { 0.0 } else { 1.0 },
+            green: if matte == 1 { 0.0 } else { 1.0 },
+            blue: if matte == 1 { 0.0 } else { 1.0 },
+        };
+        let Some(data) =
+            compositor_core::export::jpeg_data_with_dpi(&composite, &options, document.resolution)
+        else {
+            return;
+        };
+        let preview = compositor_core::export::preview_thumbnail(&composite);
+        let (size_label, preview) = {
+            let image = bgra_render_image(&preview);
+            (byte_count_label(data.len()), image)
+        };
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.jpeg_data = Some(data);
+            sheet.jpeg_preview = Some(preview);
+            sheet.jpeg_size_label = size_label;
+            sheet.jpeg_ready = Some((quality, matte));
+        }
+        cx.notify();
+    }
+
     // MARK: View transform
 
     pub fn doc_size(&self) -> (f64, f64) {
@@ -1517,12 +1577,35 @@ pub fn bgra_render_image(bitmap: &Bitmap) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![Frame::new(buffer)]))
 }
 
+/// `ByteCountFormatter.string(fromByteCount:countStyle: .file)`: decimal
+/// units, one decimal below each unit's next step.
+pub fn byte_count_label(bytes: usize) -> String {
+    const UNITS: [(&str, f64); 4] = [
+        ("GB", 1_000_000_000.0),
+        ("MB", 1_000_000.0),
+        ("kB", 1_000.0),
+        ("bytes", 1.0),
+    ];
+    let value = bytes as f64;
+    for (unit, step) in UNITS {
+        if value >= step {
+            let scaled = value / step;
+            if unit == "bytes" {
+                return format!("{bytes} bytes");
+            }
+            let digits = if scaled < 10.0 { 1 } else { 0 };
+            return format!("{scaled:.digits$} {unit}");
+        }
+    }
+    "0 bytes".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_font_size, clamp_zoom, doc_to_screen_at, format_number, leading_from_text,
-        leading_to_text, normalize_rotation, parse_field, resize_transform, screen_to_doc_at,
-        TransformField, MAX_ZOOM, MIN_ZOOM,
+        byte_count_label, clamp_font_size, clamp_zoom, doc_to_screen_at, format_number,
+        leading_from_text, leading_to_text, normalize_rotation, parse_field, resize_transform,
+        screen_to_doc_at, TransformField, MAX_ZOOM, MIN_ZOOM,
     };
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::LayerTransform;
@@ -1534,6 +1617,18 @@ mod tests {
         assert_eq!((sx, sy), (60.0, 40.0));
         // Identity zoom and zero pan map document coordinates unchanged.
         assert_eq!(doc_to_screen_at(1.0, (0.0, 0.0), 12.5, 3.25), (12.5, 3.25));
+    }
+
+    /// ByteCountFormatter's file style: decimal units, one decimal while
+    /// under ten of the unit.
+    #[test]
+    fn byte_counts_format_like_the_swift_formatter() {
+        assert_eq!(byte_count_label(0), "0 bytes");
+        assert_eq!(byte_count_label(999), "999 bytes");
+        assert_eq!(byte_count_label(345_000), "345 kB");
+        assert_eq!(byte_count_label(1_234_000), "1.2 MB");
+        assert_eq!(byte_count_label(12_400_000), "12 MB");
+        assert_eq!(byte_count_label(2_500_000_000), "2.5 GB");
     }
 
     #[test]

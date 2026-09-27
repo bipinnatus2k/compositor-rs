@@ -963,6 +963,10 @@ impl AppState {
         if self.session.lasso_draft.is_some() {
             self.session.finish_lasso();
             self.touch(cx);
+        } else if self.session.transform_edit.is_some() {
+            // Return applies the pending transform (the inspector's Apply).
+            self.session.commit_transform();
+            self.touch(cx);
         }
     }
     fn on_cancel(&mut self, _: &keys::CancelAction, _w: &mut Window, cx: &mut Context<Self>) {

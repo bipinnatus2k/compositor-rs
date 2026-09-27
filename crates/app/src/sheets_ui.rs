@@ -128,6 +128,14 @@ impl AppState {
         // The Shortcuts sheet swaps the generic OK for its own footer
         // (KeyboardShortcuts.swift:270-278): Restore Defaults, Cancel (which
         // discards the draft) and Done (which saves it).
+        // The JPEG export's OK stays disabled until the live encoded preview
+        // matches the current options (`readyOptions != options`).
+        let ok_disabled = kind == SheetKind::ExportJpeg
+            && self
+                .sheet
+                .as_ref()
+                .map(|sheet| sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset)))
+                .unwrap_or(false);
         let footer = if kind == SheetKind::Shortcuts {
             let done_disabled = Self::shortcuts_recording_id().is_some()
                 || self.shortcuts().validate().is_err();
@@ -186,6 +194,7 @@ impl AppState {
                         .label("OK")
                         .small()
                         .primary()
+                        .disabled(ok_disabled)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_sheet(window, cx);
                         })),
@@ -834,11 +843,36 @@ impl AppState {
                 };
                 let quality_text = format!("{}%", (quality * 100.0).round() as i32);
                 let sliders = sheet.sliders.clone();
+                // The live encoded preview and its status line
+                // (JPEGExportSheet's ZStack + ByteCountFormatter row): OK
+                // stays disabled until the preview matches the options.
+                let preview = sheet.jpeg_preview.clone();
+                let ready = sheet.jpeg_ready == Some((quality as f64, matte));
+                let status = if ready {
+                    format!("{} · encoded preview, fitted to window", sheet.jpeg_size_label)
+                } else {
+                    "Updating preview…".to_string()
+                };
                 body = body
                     .child(sheet_row(
                         "Path",
                         Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
                     ))
+                    .child(
+                        gpui_kit::div()
+                            .w(px(280.0))
+                            .h(px(160.0))
+                            .bg(gpui_kit::rgb(0x1f1f1f))
+                            .rounded_sm()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(preview, |frame, image| {
+                                frame.child(gpui_kit::img(image).max_w_full().max_h_full())
+                            }),
+                    )
+                    .child(sheet_row("", text_label(status, true)))
                     .child(sheet_row("Quality", labeled_slider_sheet(&sliders, 0, &quality_text)))
                     .child(sheet_row(
                         "Matte",
@@ -852,13 +886,13 @@ impl AppState {
                                     if let Some(sheet) = state.sheet.as_mut() {
                                         sheet.preset = 0;
                                     }
-                                    state.notify_only(cx);
+                                    state.refresh_jpeg_preview(cx);
                                 }),
                                 MenuEntry::new("Black", |state: &mut AppState, _, cx| {
                                     if let Some(sheet) = state.sheet.as_mut() {
                                         sheet.preset = 1;
                                     }
-                                    state.notify_only(cx);
+                                    state.refresh_jpeg_preview(cx);
                                 }),
                             ],
                         ),
@@ -1223,7 +1257,21 @@ impl AppState {
                         sheet.preset,
                     )
                 };
-                self.export_jpeg(path, quality, matte, cx);
+                // The quality of this export starts the next one
+                // (JPEGExportSheet's UserDefaults write at Export press).
+                crate::settings::lock_global()
+                    .set_number(quality, "jpegExportQuality");
+                crate::settings::lock_global().save().ok();
+                // Export writes the ready preview's own bytes
+                // (`finish(result?.data)`); a stale preview encodes fresh.
+                let data = {
+                    let sheet = self.sheet.as_ref().unwrap();
+                    match (&sheet.jpeg_data, sheet.jpeg_ready) {
+                        (Some(data), Some(ready)) if ready == (quality, matte) => Some(data.clone()),
+                        _ => None,
+                    }
+                };
+                self.export_jpeg(path, quality, matte, data, cx);
             }
             SheetKind::Import => {
                 let path = self.sheet_path(cx);
@@ -1339,37 +1387,42 @@ impl AppState {
         path: String,
         quality: f64,
         matte: usize,
+        data: Option<Vec<u8>>,
         cx: &mut Context<Self>,
     ) {
-        let Some(document) = self.session.document.clone() else {
-            self.set_status("Nothing to export", cx);
-            return;
-        };
-        let composite = compositor_core::render::draw_live_composite(&document);
-        if let Err(error) =
-            compositor_core::export::check_export_size(composite.width, composite.height)
-        {
-            self.set_status(format!("Export failed: {}", error), cx);
-            return;
-        }
-        let options = compositor_core::export::JpegOptions {
-            quality,
-            red: if matte == 1 { 0.0 } else { 1.0 },
-            green: if matte == 1 { 0.0 } else { 1.0 },
-            blue: if matte == 1 { 0.0 } else { 1.0 },
-        };
-        // The export carries the document's resolution (Swift's DPI
-        // properties on both encoders).
-        let data = match compositor_core::export::jpeg_data_with_dpi(
-            &composite,
-            &options,
-            document.resolution,
-        ) {
-            Some(data) => data,
-            None => {
-                self.set_status("Export failed: the image could not be encoded.", cx);
+        // The ready preview's own bytes are the export (`finish(result?.data)`);
+        // a stale preview encodes fresh.
+        let data = if let Some(data) = data {
+            data
+        } else {
+            let Some(document) = self.session.document.clone() else {
+                self.set_status("Nothing to export", cx);
+                return;
+            };
+            let composite = compositor_core::render::draw_live_composite(&document);
+            if let Err(error) =
+                compositor_core::export::check_export_size(composite.width, composite.height)
+            {
+                self.set_status(format!("Export failed: {}", error), cx);
                 return;
             }
+            let options = compositor_core::export::JpegOptions {
+                quality,
+                red: if matte == 1 { 0.0 } else { 1.0 },
+                green: if matte == 1 { 0.0 } else { 1.0 },
+                blue: if matte == 1 { 0.0 } else { 1.0 },
+            };
+            // The export carries the document's resolution (Swift's DPI
+            // properties on both encoders).
+            let Some(encoded) = compositor_core::export::jpeg_data_with_dpi(
+                &composite,
+                &options,
+                document.resolution,
+            ) else {
+                self.set_status("Export failed: the image could not be encoded.", cx);
+                return;
+            };
+            encoded
         };
         match std::fs::write(&path, data) {
             Ok(()) => self.set_status(format!("Exported {}", path), cx),

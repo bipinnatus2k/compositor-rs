@@ -51,6 +51,9 @@ impl AppState {
     pub fn open_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
         let sheet = self.build_sheet(kind, window, cx);
         self.sheet = Some(sheet);
+        if kind == SheetKind::ExportJpeg {
+            self.refresh_jpeg_preview(cx);
+        }
         self.touch(cx);
     }
 
@@ -121,6 +124,10 @@ impl AppState {
             sides: [true, true, true, true],
             histogram: [0.0; 1024],
             levels: LevelsSettings::default(),
+            jpeg_preview: None,
+            jpeg_ready: None,
+            jpeg_data: None,
+            jpeg_size_label: String::new(),
         };
         match kind {
             SheetKind::NewCanvas => SheetState {
@@ -312,7 +319,15 @@ impl AppState {
             },
             SheetKind::ExportJpeg => SheetState {
                 path: self.make_input("export.jpg", window, cx),
-                sliders: vec![self.make_slider(0.0, 1.0, 0.85, SliderRole::JpegQuality, cx)],
+                // The quality of the last export, which the next one starts
+                // from (JPEGExportSheet.init's UserDefaults read).
+                sliders: vec![self.make_slider(
+                    0.0,
+                    1.0,
+                    crate::settings::lock_global().number("jpegExportQuality", 0.85) as f32,
+                    SliderRole::JpegQuality,
+                    cx,
+                )],
                 // 0 = white matte, 1 = black.
                 preset: 0,
                 ..base
@@ -357,7 +372,9 @@ impl AppState {
     pub fn apply_slider(&mut self, role: SliderRole, _value: f32, cx: &mut Context<Self>) {
         let Some(sheet) = self.sheet.as_ref() else { return };
         match role {
-            SliderRole::JpegQuality => {} // read at confirm time
+            SliderRole::JpegQuality => {
+                self.refresh_jpeg_preview(cx);
+            }
             SliderRole::LevelsInputBlack
             | SliderRole::LevelsGamma
             | SliderRole::LevelsWhite

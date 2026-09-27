@@ -84,6 +84,11 @@ const STORAGE_VERSION: u32 = 1;
 struct StoredToolDefaults {
     version: u32,
     values: BTreeMap<String, bool>,
+    /// Numeric defaults (Swift's `UserDefaults` doubles behind the
+    /// `"tool."` prefix, e.g. the JPEG export quality). Optional so files
+    /// written before numbers existed still load.
+    #[serde(default)]
+    numbers: BTreeMap<String, f64>,
 }
 
 /// The user's tool-toggle table (Swift's `UserDefaults` entries behind the
@@ -94,6 +99,7 @@ pub struct ToolDefaults {
     /// Persistence target; `None` keeps the table in memory (tests).
     path: Option<PathBuf>,
     values: BTreeMap<String, bool>,
+    numbers: BTreeMap<String, f64>,
 }
 
 impl ToolDefaults {
@@ -135,6 +141,22 @@ impl ToolDefaults {
         &self.values
     }
 
+    /// One stored number, or `fallback` when unset or non-finite (Swift's
+    /// `UserDefaults.double(forKey:)` guarded by `isFinite`).
+    pub fn number(&self, key: &str, fallback: f64) -> f64 {
+        self.numbers
+            .get(key)
+            .copied()
+            .filter(|value| value.is_finite())
+            .unwrap_or(fallback)
+    }
+
+    /// Stores one number. Saving is a separate step so a batch of changes
+    /// lands as one write.
+    pub fn set_number(&mut self, value: f64, key: &str) {
+        self.numbers.insert(key.to_string(), value);
+    }
+
     // MARK: Persistence
 
     /// Reads values from the table's file. Missing, corrupt or wrongly
@@ -153,6 +175,7 @@ impl ToolDefaults {
             return;
         }
         self.values = stored.values;
+        self.numbers = stored.numbers;
     }
 
     /// Loads from `path` and returns the table. Convenience for startup and
@@ -172,6 +195,7 @@ impl ToolDefaults {
         let stored = StoredToolDefaults {
             version: STORAGE_VERSION,
             values: self.values.clone(),
+            numbers: self.numbers.clone(),
         };
         let text = serde_json::to_string_pretty(&stored)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -409,6 +433,26 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// Numbers round-trip alongside the toggles (the JPEG export quality,
+    /// Swift's `jpegExportQuality` double), and non-finite values fall back.
+    #[test]
+    fn numbers_round_trip_and_fall_back() {
+        let dir = temp_dir("numbers");
+        let path = dir.join("tool-defaults.json");
+        let mut defaults = ToolDefaults::with_path(&path);
+        defaults.set_number(0.85, "jpegExportQuality");
+        defaults.save().unwrap();
+
+        let loaded = ToolDefaults::load_or_default(&path);
+        assert_eq!(loaded.number("jpegExportQuality", 0.5), 0.85);
+        // Unset and non-finite keys fall back, not to zero.
+        assert_eq!(loaded.number("no.such.key", 0.7), 0.7);
+        let mut bad = ToolDefaults::new();
+        bad.set_number(f64::NAN, "jpegExportQuality");
+        assert_eq!(bad.number("jpegExportQuality", 0.85), 0.85);
+        fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn corrupt_file_falls_back_to_defaults() {
         let dir = temp_dir("corrupt");
@@ -482,7 +526,7 @@ mod tests {
         // A fresh session picks the table up wholesale.
         let mut restored = EditorSession::new();
         let mut auto_select = false;
-        let defaults = ToolDefaults { path: None, values: values.clone() };
+        let defaults = ToolDefaults { path: None, values: values.clone(), numbers: BTreeMap::new() };
         apply_to_session(&defaults, &mut restored, &mut auto_select);
         assert!(auto_select);
         assert!(!restored.shows_transform_controls);
