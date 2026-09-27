@@ -44,7 +44,9 @@
 - 质量持久化：ToolDefaults 新增数值段（serde 向后兼容），`jpegExportQuality` 读写对齐 Swift UserDefaults。
 - Return（canvas.apply）现也提交挂起的变换（TransformInspector Apply）。
 
-**仍缺（本批次后续 Wave）**：~~tabs.rs/project.rs 模型层~~ ✅ 已落地（Wave 2：ProjectController 两阶段状态机 + ProjectWorkspace 全方法，23 测试）→ AppState 重组（386 处 self.session，Wave 3 进行中）→ TabBar 行 + 菜单改投 + 面板迁移（Levels 样板 → 其余 → Camera Raw Docked，Wave 4）；InlineTextEditor；TransformInspector 把手实时跟随；快捷键改键即时生效。
+**仍缺（本批次后续 Wave）**：~~tabs.rs/project.rs 模型层~~ ✅ Wave 2 → ~~AppState 重组 + TabBar + 菜单改投~~ ✅ Wave 3 → ~~面板迁移~~ ✅ Wave 4（全部 8 面板入 FloatingPanel 壳：Levels/ HueSaturation/ SelectionAmount/ Filter+Camera Raw Docked/ Effects/ ColorPicker/ Shortcuts；7 个 SheetKind 变体删除，pending 对话框保持模态对齐 Swift）。**批次收尾后的余项**：InlineTextEditor；TransformInspector 把手实时跟随；快捷键改键即时生效；面板内控件与 Swift 的微小形态差异（Effects Stroke 分段控件、SelectionAmount 旁滑杆）。
+
+**审计修复（2026-09-28，`docs/reports/2026-09-28/code-implementation-audit/`）**：11 高 + 21 中严重度项已修（undo 门控/渐变错层/删除活蒙版 bake/笔刷选区文档坐标/1×1 蒙版 panic/PSD 越界等，9 个新回归测试），5 项经 Swift 原文核实为误报不改，未修项留痕（Vision 依赖、app 接线、性能重构、需算法设计）。
 - **平台能力缺口（明确结论，不做替代品）**：`select_subject`（Select Subject）与 `subject_removal::run`（Remove Background 底层，现为 stub）都依赖 Vision 前景分割——Swift 无点击点、全画布自动找前景，无合理 1:1 替代源（点击式 Object Selection 是不同功能且已移植）。Filter 菜单的 Remove Background 入口在底层就绪前保持现状；报告记录为平台差异。
 
 ---
