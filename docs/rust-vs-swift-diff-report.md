@@ -24,7 +24,7 @@
 **§10 测试扩容（+76 集成用例）**
 - SelectionEditTests（14）、SelectionClipboard+Group+GroupingSelection（15）、TransformTests 会话流（9）、BrushTests（15）、AdjustmentLayerTests（9）、Distort/ShapeTool/CloneStamp/TypeTool 会话流（14）——六个新 `crates/core/tests/` 文件。
 
-**仍缺（后续批次）**：取色器 SV 场+色相条自绘控件（滑杆组仍在）、RAW 导入（已调研：推荐 `rawler`，但 0.8.0 的 jxl-oxide 链与本仓 image/exr 的 rayon-core `links` 锁定冲突、rsproxy 镜像缺可解版本——待切换 registry 或 rawler 升级后按调研的 `raw_to_srgb`→`import_images` 方案接入）、浮动面板系统、多窗口/标签条、InlineTextEditor、TransformInspector 的 Esc/Return 与把手实时跟随、select_subject 的 Vision 替代源、快捷键即时生效（当前重启生效）、JPEG 导出预览缩略图接线、ToolDefaults 的 f64/其余键扩展。
+**仍缺（后续批次）**：~~取色器 SV 场+色相条自绘控件~~ ✅ 已落地（color_picker_ui.rs 重写：SV 场 2x 位图缓存+hue 竖条+双环 marker+hex，滑杆组删除，10 个测试；R/G/B 数字输入待 state.rs 放开 PickerUi 结构后补）、~~RAW 导入~~ ✅ 已落地（`core::raw`，rawler 0.8.0 默认 develop=as-shot 白平衡+相机矩阵→sRGB 8bit，`decode_image` 分发、扩展名白名单 29 格式；端到端测试用手写最小 CFA DNG 走完整 import_images 管线。此前记录的 rayon-core "冲突"实为首次 `cargo add` 半途写入的污染 lock——干净 lock 下 0.12.6 正常解析统一于 1.13.0。develop 滑杆与 RawDevelopSheet 属后续批次）、浮动面板系统、多窗口/标签条、InlineTextEditor、TransformInspector 的 Esc/Return 与把手实时跟随、select_subject 的 Vision 替代源、快捷键即时生效（当前重启生效）、JPEG 导出预览缩略图接线、ToolDefaults 的 f64/其余键扩展。
 
 ---
 
