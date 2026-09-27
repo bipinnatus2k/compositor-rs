@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn catalog_ids_are_unique_and_defaults_parse() {
         let mut ids = CATALOG.iter().map(|entry| entry.id).collect::<Vec<_>>();
-        assert_eq!(ids.len(), 84, "expected the full customizable catalog");
+        assert_eq!(ids.len(), 92, "expected the full customizable catalog");
         ids.sort_unstable();
         let unique = ids.len();
         ids.dedup();
@@ -879,6 +879,14 @@ mod tests {
             ("shift-right", "compositor::NudgeRightMore", ""),
             ("shift-up", "compositor::NudgeUpMore", ""),
             ("shift-down", "compositor::NudgeDownMore", ""),
+            ("ctrl-left", "compositor::NudgePixelsLeft", ""),
+            ("ctrl-right", "compositor::NudgePixelsRight", ""),
+            ("ctrl-up", "compositor::NudgePixelsUp", ""),
+            ("ctrl-down", "compositor::NudgePixelsDown", ""),
+            ("ctrl-shift-left", "compositor::NudgePixelsLeftMore", ""),
+            ("ctrl-shift-right", "compositor::NudgePixelsRightMore", ""),
+            ("ctrl-shift-up", "compositor::NudgePixelsUpMore", ""),
+            ("ctrl-shift-down", "compositor::NudgePixelsDownMore", ""),
             // Brush size / hardness
             ("[", "compositor::BrushSmaller", ""),
             ("]", "compositor::BrushLarger", ""),
