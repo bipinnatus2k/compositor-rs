@@ -49,6 +49,8 @@
 **审计修复（2026-09-28，`docs/reports/2026-09-28/code-implementation-audit/`）**：11 高 + 21 中严重度项已修（undo 门控/渐变错层/删除活蒙版 bake/笔刷选区文档坐标/1×1 蒙版 panic/PSD 越界等，9 个新回归测试），5 项经 Swift 原文核实为误报不改，未修项留痕（Vision 依赖、app 接线、性能重构、需算法设计）。
 - **中低项与测试质量批次**（2026-09-28）：warp 增加四边形像素 coverage（Sutherland–Hodgman 解析面积，distort trim 边界与 Core Image AA 精确一致，tool_flow ±1 容差改精确断言）；change_text_style 非法回滚、hue_response 固定序求和、unpremultiply 舍入等低项；tests/ 目录对齐 Swift——clear_pixels 边缘断言部分擦除、pixel-move 三用例移植（cmd-drag 单 undo/duplicate/cmd-arrow 蒙版拒绝）、恒真断言与 let 残骸改真断言；另 5 项核实为误报（colorize 负色相/混色器归一化/Rec.601/blend_gray 舍入均与 C 内核逐字一致）。未修项维持记录（Vision/性能/需镜头档案类）。
 - **InlineTextEditor + 检查器跟随**（2026-09-28）：画布位置锚定的多行 Textarea 浮层与 textDraft 双向绑定（Return 换行/Ctrl-Return 提交/Esc 取消/Option 方向键调字距行距）；Type 手势三态（提交旧稿/编辑命中层/拖出点框文本，默认样例文本点击删除）；TransformInspector 六字段随拖拽预览实时同步。6 项 v1 偏差留痕（自绘光标/缩放把手/旋转跟随等）。
+**app 接线批次（2026-09-28）**：审计未修清单的 app 侧项全部落地——Blur 蒙版目标采样蒙版覆盖层（Swift BlurTool.swift:8-40 原义，非"蒙版后内容"）、Add Noise 种子改为**面板打开时一次生成**（Swift "fixed while the panel is open"，预览与提交共用，硬编码 7 清除）、Clone Stamp aligned 走 `clone_stroke_offset`、删除活蒙版依赖弹 Swift 三键询问（Bake and Delete / Cancel / Remove Links and Delete，文案逐字，经 Confirm sheet 通道 + `request_delete_layer` 接线）；marquee from_center 经核实为审计误报（Swift 恒传 false，Option-center 是 Shape 专属且已接线）。**快捷键改键即时生效**：keymap 增量重建（快照拆分 compositor:: 前缀/组件基线，clear 后重放——绕开 init 幂等性），Done/Restore/Cancel 三路重绑，过时"需重启"文案清除。**面板形态**：Effects Stroke 改 Swift 的分段双按钮（标题行右侧），SelectionAmount 补 1…max 双向同步滑杆 + 无效提示行（Swift LassoControls.swift:181-249）。新增 16 测试。
+
 - **平台能力缺口（明确结论，不做替代品）**：`select_subject`（Select Subject）与 `subject_removal::run`（Remove Background 底层，现为 stub）都依赖 Vision 前景分割——Swift 无点击点、全画布自动找前景，无合理 1:1 替代源（点击式 Object Selection 是不同功能且已移植）。Filter 菜单的 Remove Background 入口在底层就绪前保持现状；报告记录为平台差异。
 
 ---
