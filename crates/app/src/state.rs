@@ -71,6 +71,15 @@ pub enum CanvasDrag {
     },
     /// Crop drag; the drag lives in the session.
     Crop,
+    /// Guide drag (create from a ruler or move an existing line); the drag
+    /// lives in the session's `guide_drag`.
+    Guide,
+    /// Cmd-drag moving the selected pixels; the lifted raster lives in the
+    /// session's `pixel_move` (`EditorCanvas.pixelDragStart`).
+    PixelMove { start: CGPoint },
+    /// Plain drag moving the selection outline only; the origin lives in the
+    /// session's `selection_move_origin`.
+    SelectionMove { start: CGPoint },
 }
 
 /// Which modal sheet is open.
@@ -1151,6 +1160,17 @@ impl AppState {
             let mut doc = document.clone();
             override_pixels(&mut doc, preview, *base_transform);
             return Some(render::draw_live_composite(&doc));
+        }
+        // A pixel move shows the lifted pixels rebuilt at the offset, placed
+        // by the layer's own transform (the rebuilt grid is the layer's).
+        if let Some(move_state) = &self.session.pixel_move {
+            if let Some(pixels) = move_state.moved_pixels() {
+                if let Some(layer) = self.session.active_layer() {
+                    let mut doc = document.clone();
+                    override_pixels(&mut doc, &pixels, layer.transform);
+                    return Some(render::draw_live_composite(&doc));
+                }
+            }
         }
         // A stroke in progress overrides the active layer too.
         if let Some(CanvasDrag::Stroke(edit)) = &self.drag {

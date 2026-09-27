@@ -24,6 +24,10 @@ use compositor_core::tools::brush::{GradientShape, RasterEdit};
 
 use crate::state::{AppState, CanvasDrag, RULER_SIZE};
 
+/// `guideHitDistance` (Guides.swift): how close a Move press must land to a
+/// guide to take it, in screen points.
+const GUIDE_HIT_DISTANCE: f64 = 5.0;
+
 /// Everything the paint pass needs, computed once per frame in screen space.
 /// Coordinates are viewport-local; `paint_scene` translates them into window
 /// coordinates before painting (gpui paints in window space).
@@ -107,14 +111,34 @@ impl AppState {
         let mut transform = None;
 
         if let Some(document) = self.session.document.as_ref() {
+            // `displayedGuides`: a drag in progress replaces its own guide's
+            // position live; a new guide joins the list while it is pulled
+            // from the ruler.
+            let mut drag_drawn = false;
             for guide in &document.guides {
-                let vertical = guide.axis == GuideAxis::Vertical;
+                let (axis, position) = match &self.session.guide_drag {
+                    Some(drag) if drag.id == guide.id => (drag.axis, drag.position),
+                    _ => (guide.axis, guide.position),
+                };
+                drag_drawn |= self.session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
+                let vertical = axis == GuideAxis::Vertical;
                 let position = if vertical {
-                    self.doc_to_screen(guide.position, 0.0).0
+                    self.doc_to_screen(position, 0.0).0
                 } else {
-                    self.doc_to_screen(0.0, guide.position).1
+                    self.doc_to_screen(0.0, position).1
                 };
                 guides.push((vertical, position));
+            }
+            if let Some(drag) = &self.session.guide_drag {
+                if drag.is_new || !drag_drawn {
+                    let vertical = drag.axis == GuideAxis::Vertical;
+                    let position = if vertical {
+                        self.doc_to_screen(drag.position, 0.0).0
+                    } else {
+                        self.doc_to_screen(0.0, drag.position).1
+                    };
+                    guides.push((vertical, position));
+                }
             }
             if self.session.shows_grid {
                 for x in LayoutGrid::lines(document.width as f64) {
@@ -124,7 +148,16 @@ impl AppState {
                     grid.push((self.doc_to_screen(0.0, y).1, LayoutGrid::is_major(y), false));
                 }
             }
-            if let Some(selection_state) = &document.selection {
+            // The ants follow a pixel move or outline drag (`displayedSelection`).
+            if let Some(selection_state) = self.session.displayed_selection() {
+                for ring in &selection_state.path.rings {
+                    selection.push(
+                        ring.iter()
+                            .map(|p| self.doc_to_screen(p.x, p.y))
+                            .collect(),
+                    );
+                }
+            } else if let Some(selection_state) = &document.selection {
                 for ring in &selection_state.path.rings {
                     selection.push(
                         ring.iter()
@@ -218,6 +251,32 @@ impl AppState {
         let alt = event.modifiers.alt;
         let shift = event.modifiers.shift;
 
+        // A press on a ruler strip starts a guide at the pointer's document
+        // coordinate, whatever the tool (`CanvasRulerNSView.mouseDown`); the
+        // corner square is inert. On the canvas itself, only a Move press that
+        // lands on a guide takes it — before any layer drag
+        // (EditorCanvas.mouseDown's `beginGuideDrag`).
+        if self.session.shows_rulers {
+            if let Some(axis) = ruler_axis_at(local) {
+                self.session
+                    .begin_guide_creation(axis, guide_axis_position(axis, doc));
+                self.drag = Some(CanvasDrag::Guide);
+                self.touch(cx);
+                return;
+            }
+        }
+        if self.session.tool == NavigationTool::Move {
+            // `guideHitDistance` is 5 screen points; the core measures in
+            // document pixels.
+            let tolerance = GUIDE_HIT_DISTANCE / self.zoom.max(0.0001);
+            if let Some(guide_id) = self.session.hit_guide(doc, tolerance) {
+                self.session.begin_guide_move(guide_id);
+                self.drag = Some(CanvasDrag::Guide);
+                self.touch(cx);
+                return;
+            }
+        }
+
         match self.session.tool {
             NavigationTool::Hand => {
                 self.drag = Some(CanvasDrag::Pan {
@@ -239,6 +298,28 @@ impl AppState {
                     && self.session.lasso_kind == LassoKind::Polygonal;
                 if polygonal && self.session.lasso_draft.is_some() {
                     self.session.extend_lasso(doc);
+                    self.touch(cx);
+                    return;
+                }
+                // Cmd-drag inside the selection cuts and moves its pixels
+                // (Photoshop's temporary Move tool, Option duplicates); a
+                // plain Replace-mode drag inside it moves the outline
+                // (EditorCanvas.lassoMouseDown).
+                let ctrl = event.modifiers.control;
+                let inside = self
+                    .session
+                    .selection()
+                    .map(|s| s.path.contains(doc))
+                    .unwrap_or(false);
+                if ctrl && inside {
+                    if self.session.begin_pixel_move(alt) {
+                        self.drag = Some(CanvasDrag::PixelMove { start: doc });
+                        self.touch(cx);
+                    }
+                    return;
+                }
+                if !ctrl && !shift && !alt && inside && self.session.begin_selection_move() {
+                    self.drag = Some(CanvasDrag::SelectionMove { start: doc });
                     self.touch(cx);
                     return;
                 }
@@ -362,9 +443,24 @@ impl AppState {
                 let value = self.session.snapped_move(value, &moving, 10.0);
                 self.session.preview_transform(value);
             }
+            Some(CanvasDrag::PixelMove { start }) => {
+                self.session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
+            }
+            Some(CanvasDrag::SelectionMove { start }) => {
+                self.session
+                    .move_selection_outline(CGSize::new(doc.x - start.x, doc.y - start.y));
+            }
             Some(CanvasDrag::Crop) => {
                 let ratio = self.session.crop_ratio();
                 self.session.drag_crop(doc, ratio, false);
+            }
+            Some(CanvasDrag::Guide) => {
+                // The guide follows the pointer's document coordinate on its
+                // own axis (EditorCanvas.mouseDragged's guideDragging branch).
+                if let Some(drag) = self.session.guide_drag.as_ref() {
+                    let axis = drag.axis;
+                    self.session.move_guide_drag(guide_axis_position(axis, doc));
+                }
             }
             None => return,
         }
@@ -398,11 +494,24 @@ impl AppState {
                 CanvasDrag::MarqueeLasso => {
                     self.session.finish_lasso();
                 }
+                CanvasDrag::PixelMove { .. } => {
+                    self.session.end_pixel_move();
+                }
+                CanvasDrag::SelectionMove { .. } => {
+                    self.session.end_selection_move();
+                }
                 CanvasDrag::Crop => {
                     self.session.end_crop_drag();
                 }
                 CanvasDrag::MoveLayer { .. } => {
                     self.session.commit_transform();
+                }
+                CanvasDrag::Guide => {
+                    // Releasing on a ruler cancels a new guide or deletes an
+                    // existing one (`finishGuideDrag(delete:)`).
+                    let local = self.local_position(event.position);
+                    let delete = guide_release_deletes(self.session.shows_rulers, local);
+                    self.session.finish_guide_drag(delete);
                 }
                 CanvasDrag::Pan { .. } => {}
             }
@@ -989,6 +1098,22 @@ impl AppState {
             self.touch(cx);
             return;
         }
+        // Escape kills a guide drag before it reaches the transform edit
+        // (EditorCanvas.keyDown's `guideDrag != nil` branch).
+        if self.session.guide_drag.take().is_some() {
+            self.touch(cx);
+            return;
+        }
+        if self.session.pixel_move.take().is_some() {
+            self.session.cancel_pixel_move();
+            self.touch(cx);
+            return;
+        }
+        if self.session.selection_move_origin.take().is_some() {
+            self.session.end_selection_move();
+            self.touch(cx);
+            return;
+        }
         if self.session.transform_edit.take().is_some() {
             self.touch(cx);
             return;
@@ -1002,6 +1127,37 @@ impl AppState {
             self.touch(cx);
         }
     }
+}
+
+/// The guide axis a viewport-local point would drag from a ruler strip, or
+/// None off the rulers — the corner square between them is inert, as in
+/// Swift, where only the two ruler views handle presses
+/// (`CanvasRulerNSView.mouseDown`; `CanvasRulerCorner` has no gesture).
+fn ruler_axis_at(local: (f32, f32)) -> Option<GuideAxis> {
+    let on_top = local.1 < RULER_SIZE;
+    let on_left = local.0 < RULER_SIZE;
+    match (on_top, on_left) {
+        (true, false) => Some(GuideAxis::Horizontal),
+        (false, true) => Some(GuideAxis::Vertical),
+        _ => None,
+    }
+}
+
+/// The document coordinate a guide on `axis` follows: x for a vertical
+/// guide, y for a horizontal one (`EditorCanvas.documentPosition(axis:at:)`).
+fn guide_axis_position(axis: GuideAxis, doc: CGPoint) -> f64 {
+    if axis == GuideAxis::Vertical {
+        doc.x
+    } else {
+        doc.y
+    }
+}
+
+/// Whether releasing at a viewport-local point deletes the dragged guide:
+/// onto the ruler strip (`EditorCanvas.isOverRuler` — top or left, only when
+/// the rulers are showing).
+fn guide_release_deletes(shows_rulers: bool, local: (f32, f32)) -> bool {
+    shows_rulers && (local.0 < RULER_SIZE || local.1 < RULER_SIZE)
 }
 
 /// The drag rect for the shape tool (`ShapeTool.dragShape`): Shift squares
@@ -1484,8 +1640,12 @@ fn ruler_label(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_at, nice_tick, ruler_label, shape_drag_rect, transform_press_layer};
-    use compositor_core::document::{CanvasDocument, ImageLayer, ShapeKind};
+    use super::{
+        guide_axis_position, guide_release_deletes, handle_at, nice_tick, ruler_axis_at,
+        ruler_label, shape_drag_rect, transform_press_layer,
+    };
+    use crate::state::RULER_SIZE;
+    use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, ShapeKind};
     use compositor_core::geometry::{CGPoint, CGRect};
     use compositor_core::raster::{Bitmap, ImportedImage};
 
@@ -1551,6 +1711,49 @@ mod tests {
         assert_eq!(ruler_label(0.0), "0");
         assert_eq!(ruler_label(99.6), "100");
         assert_eq!(ruler_label(-2.5), "-3");
+    }
+
+    #[test]
+    fn ruler_axis_at_splits_the_two_strips_and_spares_the_corner() {
+        // The top strip is the horizontal ruler, the left strip the vertical
+        // one, and the corner square between them starts nothing.
+        assert_eq!(ruler_axis_at((80.0, 10.0)), Some(GuideAxis::Horizontal));
+        assert_eq!(ruler_axis_at((10.0, 80.0)), Some(GuideAxis::Vertical));
+        assert_eq!(ruler_axis_at((10.0, 10.0)), None, "the corner is inert");
+        assert_eq!(ruler_axis_at((80.0, 80.0)), None, "the canvas body is no ruler");
+        // The strip edges themselves belong to the rulers.
+        assert_eq!(ruler_axis_at((RULER_SIZE + 1.0, RULER_SIZE - 1.0)), Some(GuideAxis::Horizontal));
+    }
+
+    #[test]
+    fn guide_axis_position_reads_its_own_coordinate() {
+        let doc = CGPoint::new(33.0, 47.0);
+        // A vertical guide sits at a document x, a horizontal one at a y.
+        assert_eq!(guide_axis_position(GuideAxis::Vertical, doc), 33.0);
+        assert_eq!(guide_axis_position(GuideAxis::Horizontal, doc), 47.0);
+    }
+
+    #[test]
+    fn guide_position_converts_through_the_view_transform() {
+        // The ruler reports the document coordinate under the cursor
+        // (CanvasRulerNSView.documentPosition), so a cursor at 120 viewport
+        // pixels with the document's origin panned 20 px at 2× sits at
+        // document x = 50.
+        let doc = crate::state::screen_to_doc_at(2.0, (20.0, 10.0), 120.0, 60.0);
+        assert_eq!(guide_axis_position(GuideAxis::Vertical, doc), 50.0);
+        assert_eq!(guide_axis_position(GuideAxis::Horizontal, doc), 25.0);
+    }
+
+    #[test]
+    fn guide_release_deletes_only_on_a_shown_ruler() {
+        // Released over the top or left strip: cancel a new guide, delete an
+        // existing one (isOverRuler).
+        assert!(guide_release_deletes(true, (10.0, 80.0)));
+        assert!(guide_release_deletes(true, (80.0, 10.0)));
+        // Released on the canvas itself: the guide lands (or just moves).
+        assert!(!guide_release_deletes(true, (80.0, 80.0)));
+        // With the rulers hidden there is no strip to release on.
+        assert!(!guide_release_deletes(false, (10.0, 10.0)));
     }
 
     #[test]
