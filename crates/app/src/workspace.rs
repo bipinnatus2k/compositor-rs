@@ -14,6 +14,14 @@ use crate::ui::{text_label, FG_DIM};
 
 impl Render for AppState {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Startup load of the persisted tool toggles (ToolDefaults.swift):
+        // the first render of the freshly opened window is the earliest point
+        // this file owns, and it runs before any input can reach the app.
+        // Once per process; a no-op afterwards.
+        crate::settings::apply_startup_defaults(
+            &mut self.session,
+            &mut self.transform_auto_select,
+        );
         div()
             .id("workspace")
             .key_context("Compositor")
@@ -147,6 +155,14 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_nudge_right_more))
             .on_action(cx.listener(Self::on_nudge_up_more))
             .on_action(cx.listener(Self::on_nudge_down_more))
+            .on_action(cx.listener(Self::on_nudge_pixels_left))
+            .on_action(cx.listener(Self::on_nudge_pixels_right))
+            .on_action(cx.listener(Self::on_nudge_pixels_up))
+            .on_action(cx.listener(Self::on_nudge_pixels_down))
+            .on_action(cx.listener(Self::on_nudge_pixels_left_more))
+            .on_action(cx.listener(Self::on_nudge_pixels_right_more))
+            .on_action(cx.listener(Self::on_nudge_pixels_up_more))
+            .on_action(cx.listener(Self::on_nudge_pixels_down_more))
             .on_action(cx.listener(Self::on_brush_smaller))
             .on_action(cx.listener(Self::on_brush_larger))
             .on_action(cx.listener(Self::on_brush_softer))
@@ -258,6 +274,17 @@ impl AppState {
     /// the change.
     pub fn shortcuts(&self) -> std::sync::MutexGuard<'static, crate::shortcuts::ShortcutRegistry> {
         crate::shortcuts::lock_global()
+    }
+
+    /// Saves the persisted tool toggles (`settings.rs`): Swift's
+    /// `EditorSession` properties write each change straight through
+    /// `didSet { ToolDefaults.set(...) }`; the port snapshots the whole table
+    /// at the change point and stores it atomically. Every handler below that
+    /// flips one of the persisted switches calls this right after mutating
+    /// `self.session` / `self.transform_auto_select`, which is also why no
+    /// explicit exit save is wired: the table on disk is always current.
+    pub fn persist_tool_defaults(&mut self) {
+        crate::settings::persist_session(&self.session, self.transform_auto_select);
     }
 
     // MARK: Tools
@@ -658,42 +685,52 @@ impl AppState {
 
     fn on_toggle_rulers(&mut self, _: &keys::ToggleRulers, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.shows_rulers = !self.session.shows_rulers;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_toggle_grid(&mut self, _: &keys::ToggleGrid, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.shows_grid = !self.session.shows_grid;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_toggle_guides(&mut self, _: &keys::ToggleGuides, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.shows_guides = !self.session.shows_guides;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_toggle_pixel_grid(&mut self, _: &keys::TogglePixelGrid, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.shows_pixel_grid = !self.session.shows_pixel_grid;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_snap_guides(&mut self, _: &keys::SnapGuides, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snap_to_guides = !self.session.snap_to_guides;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_snap_toggle(&mut self, _: &keys::SnapToggle, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snapping_enabled = !self.session.snapping_enabled;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_lock_guides(&mut self, _: &keys::LockGuides, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.locks_guides = !self.session.locks_guides;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_snap_grid(&mut self, _: &keys::SnapGrid, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snap_to_grid = !self.session.snap_to_grid;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_snap_layers(&mut self, _: &keys::SnapLayers, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snap_to_layers = !self.session.snap_to_layers;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_snap_bounds(&mut self, _: &keys::SnapBounds, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.snap_to_document_bounds = !self.session.snap_to_document_bounds;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_zoom_in(&mut self, _: &keys::ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
@@ -749,6 +786,38 @@ impl AppState {
     fn on_nudge_down_more(&mut self, _: &keys::NudgeDownMore, w: &mut Window, cx: &mut Context<Self>) {
         self.nudge(0.0, 10.0, true, w, cx);
     }
+    // Cmd-arrow: the selected pixels move, not the outline or the layer
+    // (SelectionEdits.swift:141).
+    fn on_nudge_pixels_left(&mut self, _: &keys::NudgePixelsLeft, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(-1.0, 0.0, w, cx);
+    }
+    fn on_nudge_pixels_right(&mut self, _: &keys::NudgePixelsRight, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(1.0, 0.0, w, cx);
+    }
+    fn on_nudge_pixels_up(&mut self, _: &keys::NudgePixelsUp, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(0.0, -1.0, w, cx);
+    }
+    fn on_nudge_pixels_down(&mut self, _: &keys::NudgePixelsDown, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(0.0, 1.0, w, cx);
+    }
+    fn on_nudge_pixels_left_more(&mut self, _: &keys::NudgePixelsLeftMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(-10.0, 0.0, w, cx);
+    }
+    fn on_nudge_pixels_right_more(&mut self, _: &keys::NudgePixelsRightMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(10.0, 0.0, w, cx);
+    }
+    fn on_nudge_pixels_up_more(&mut self, _: &keys::NudgePixelsUpMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(0.0, -10.0, w, cx);
+    }
+    fn on_nudge_pixels_down_more(&mut self, _: &keys::NudgePixelsDownMore, w: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_pixels(0.0, 10.0, w, cx);
+    }
+    fn nudge_pixels(&mut self, dx: f64, dy: f64, w: &mut Window, cx: &mut Context<Self>) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.session.nudge_pixels(dx, dy);
+            t.touch(cx);
+        });
+    }
     fn on_brush_smaller(&mut self, _: &keys::BrushSmaller, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, w, cx| t.resize_brush(1.0 / 1.25, w, cx));
     }
@@ -775,6 +844,7 @@ impl AppState {
     }
     fn on_show_transform_controls(&mut self, _: &keys::ShowTransformControls, _w: &mut Window, cx: &mut Context<Self>) {
         self.session.shows_transform_controls = !self.session.shows_transform_controls;
+        self.persist_tool_defaults();
         self.touch(cx);
     }
     fn on_invert_pixels(&mut self, _: &keys::InvertPixels, _w: &mut Window, cx: &mut Context<Self>) {

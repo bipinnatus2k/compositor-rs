@@ -589,6 +589,7 @@ impl AppState {
                         // transformAutoSelect (EditorSession.swift:198). The
                         // canvas click-through itself is canvas-side wiring.
                         state.transform_auto_select = checked;
+                        state.persist_tool_defaults();
                         state.touch(cx);
                     },
                 ))

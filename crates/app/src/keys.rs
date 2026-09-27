@@ -56,6 +56,8 @@ actions!(compositor, [
     // Canvas keys
     NudgeLeft, NudgeRight, NudgeUp, NudgeDown,
     NudgeLeftMore, NudgeRightMore, NudgeUpMore, NudgeDownMore,
+    NudgePixelsLeft, NudgePixelsRight, NudgePixelsUp, NudgePixelsDown,
+    NudgePixelsLeftMore, NudgePixelsRightMore, NudgePixelsUpMore, NudgePixelsDownMore,
     BrushSmaller, BrushLarger, FinishLasso, CancelAction,
 ]);
 
@@ -192,6 +194,15 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "nudge.right-10", NudgeRightMore);
     bind!(out, ids, registry, "nudge.up-10", NudgeUpMore);
     bind!(out, ids, registry, "nudge.down-10", NudgeDownMore);
+    // Cmd-arrow moves the selected pixels (SelectionEdits.swift:141).
+    bind!(out, ids, registry, "nudge.pixels-left", NudgePixelsLeft);
+    bind!(out, ids, registry, "nudge.pixels-right", NudgePixelsRight);
+    bind!(out, ids, registry, "nudge.pixels-up", NudgePixelsUp);
+    bind!(out, ids, registry, "nudge.pixels-down", NudgePixelsDown);
+    bind!(out, ids, registry, "nudge.pixels-left-10", NudgePixelsLeftMore);
+    bind!(out, ids, registry, "nudge.pixels-right-10", NudgePixelsRightMore);
+    bind!(out, ids, registry, "nudge.pixels-up-10", NudgePixelsUpMore);
+    bind!(out, ids, registry, "nudge.pixels-down-10", NudgePixelsDownMore);
     // Brush size / hardness
     bind!(out, ids, registry, "brush.smaller", BrushSmaller);
     bind!(out, ids, registry, "brush.larger", BrushLarger);
