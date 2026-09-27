@@ -8,6 +8,7 @@ pub mod color_picker_ui;
 pub mod keys;
 pub mod layers_panel;
 pub mod menu;
+pub mod panels;
 pub mod settings;
 pub mod sheets;
 pub mod sheets_ui;
