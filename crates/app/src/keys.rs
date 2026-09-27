@@ -80,6 +80,66 @@ pub fn bindings_with(registry: &crate::shortcuts::ShortcutRegistry) -> Vec<KeyBi
     bindings_tracked(registry, None)
 }
 
+/// The action-name prefix of every binding this app generates
+/// (`actions!(compositor, ...)`). The keymap rebuild keeps every binding
+/// whose action does not carry this prefix — gpui-component's input, menu
+/// and list navigation bindings, which [`gpui_kit::init`] installed once at
+/// startup and a plain [`gpui_kit::App::clear_key_bindings`] would lose.
+const APP_ACTION_PREFIX: &str = "compositor::";
+
+/// Whether a binding's action is one of this app's own (as opposed to the
+/// component baseline shipped by gpui-kit).
+pub(crate) fn is_app_action(action_name: &str) -> bool {
+    action_name.starts_with(APP_ACTION_PREFIX)
+}
+
+/// Splits a keymap snapshot into `(component baseline, app bindings)`. The
+/// rebuild replays the baseline verbatim and regenerates the app half from
+/// the shortcut registry, so custom chords replace — never duplicate — the
+/// previous app bindings.
+pub(crate) fn split_bindings<'a>(
+    bindings: impl IntoIterator<Item = &'a KeyBinding>,
+) -> (Vec<KeyBinding>, Vec<KeyBinding>) {
+    let (baseline, app): (Vec<&KeyBinding>, Vec<&KeyBinding>) = bindings
+        .into_iter()
+        .partition(|binding| !is_app_action(binding.action().name()));
+    (
+        baseline.into_iter().cloned().collect(),
+        app.into_iter().cloned().collect(),
+    )
+}
+
+/// Rebuilds the app keymap in place from the live shortcut registry: the
+/// component baseline is snapshotted, everything is cleared, the baseline is
+/// re-added and [`bindings_with`] regenerates the app's bindings. Called
+/// after the shortcuts panel saves (Done) or restores defaults, so a changed
+/// chord takes effect on the next keystroke without a restart.
+pub fn rebuild_bindings(cx: &mut gpui_kit::App) {
+    let registry = crate::shortcuts::lock_global();
+    rebuild_with(cx, &registry);
+}
+
+/// [`rebuild_bindings`] against an explicit registry (tests and callers that
+/// already hold the lock).
+pub(crate) fn rebuild_with(
+    cx: &mut gpui_kit::App,
+    registry: &crate::shortcuts::ShortcutRegistry,
+) {
+    // Snapshot before clearing: the keymap also holds gpui-kit's component
+    // bindings, which nothing re-installs automatically.
+    let (baseline, _) = split_bindings(
+        cx.key_bindings()
+            .borrow()
+            .bindings()
+            .cloned()
+            .collect::<Vec<_>>()
+            .iter(),
+    );
+    cx.clear_key_bindings();
+    cx.bind_keys(baseline);
+    cx.bind_keys(bindings_with(registry));
+}
+
 /// Same as [`bindings_with`], optionally recording the shortcut id behind
 /// every emitted binding so tests can prove the binding table and the
 /// shortcut catalog never drift apart.
@@ -219,4 +279,93 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "canvas.apply", FinishLasso);
     bind!(out, ids, registry, "canvas.cancel", CancelAction);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shortcuts::ShortcutRegistry;
+
+    /// The (keystrokes, action, context) identity of one binding, for
+    /// order-sensitive comparisons.
+    fn identity(binding: &KeyBinding) -> (String, &'static str, Option<String>) {
+        let keystrokes = binding
+            .keystrokes()
+            .iter()
+            .map(|key| key.inner().unparse())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            keystrokes,
+            binding.action().name(),
+            binding.predicate().map(|p| p.to_string()),
+        )
+    }
+
+    /// `rebuild_with`'s precondition: regenerating the app bindings from the
+    /// same registry always produces the same table, so a clear + replay
+    /// cannot drift.
+    #[test]
+    fn bindings_with_is_idempotent() {
+        let mut registry = ShortcutRegistry::new();
+        registry.set_override("edit.undo", "ctrl-alt-z").unwrap();
+        registry.set_override("tool.brush", "f").unwrap();
+
+        let first = bindings_with(&registry);
+        let second = bindings_with(&registry);
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(identity(a), identity(b));
+        }
+    }
+
+    /// The rebuild replays the app half wholesale, so a duplicate binding
+    /// (same action bound twice to the same chord) would shadow itself.
+    #[test]
+    fn bindings_have_no_duplicate_action_key_pairs() {
+        let registry = ShortcutRegistry::new();
+        let bindings = bindings_with(&registry);
+        let mut seen: Vec<(String, &'static str)> = Vec::new();
+        for binding in &bindings {
+            let (keystrokes, action, _) = identity(binding);
+            assert!(
+                !seen.contains(&(keystrokes.clone(), action)),
+                "duplicate binding: {action} <- {keystrokes}"
+            );
+            seen.push((keystrokes, action));
+        }
+    }
+
+    /// The rebuild keeps only the component baseline and regenerates every
+    /// `compositor::` binding: the split must separate the two sets without
+    /// losing either.
+    #[test]
+    fn split_bindings_separates_app_from_baseline() {
+        use gpui_kit::NoAction;
+        let registry = ShortcutRegistry::new();
+        let app_bindings = bindings_with(&registry);
+        // A stand-in for gpui-kit's component baseline (any non-`compositor::`
+        // action), as the keymap would hold it after startup.
+        let baseline = vec![
+            KeyBinding::new("up", NoAction, None),
+            KeyBinding::new("down", NoAction, Some("Input")),
+        ];
+        let mut mixed: Vec<KeyBinding> = baseline.clone();
+        mixed.extend(app_bindings.iter().cloned());
+
+        let (kept_baseline, regenerated) = split_bindings(mixed.iter());
+        assert_eq!(kept_baseline.len(), baseline.len());
+        assert_eq!(regenerated.len(), app_bindings.len());
+        for (a, b) in kept_baseline.iter().zip(baseline.iter()) {
+            assert_eq!(identity(a), identity(b));
+        }
+        for (a, b) in regenerated.iter().zip(app_bindings.iter()) {
+            assert_eq!(identity(a), identity(b));
+        }
+        // Every regenerated binding is app-owned; every kept one is not.
+        assert!(regenerated.iter().all(|b| is_app_action(b.action().name())));
+        assert!(kept_baseline
+            .iter()
+            .all(|b| !is_app_action(b.action().name())));
+    }
 }
