@@ -28,6 +28,26 @@
 
 ---
 
+## 修复进度（2026-09-27 第二十二轮：工作区批次 Wave 1 + 快赢收尾）
+
+两个子代理并行（core 工作区增补 / 浮动面板基础设施），主线完成 JPEG 预览等快赢。测试 761 → **781** 全绿（core lib 586 + 集成 104 + app lib 91）。设计蓝图：`docs/workspace-api-design.md`。
+
+**§2 FloatingPanel 整文件落地（panels.rs）**
+- 面板注册表：叠放序（re-show 置顶+改标题）、窗口坐标位置记忆（**Docked 恒不记忆**，:99-104）、首次 Automatic 开在画布中心且**面板中心对齐画布中心**（:110-115，设计稿的 window_size 参数经原文核对改为 panel_size）、440 宽右停靠逐帧重算（:127-136）、拖动 plumbing（Global 拖动状态 + 窗口级事件 + 双重窗口钳制）。渲染壳暴露内容槽，sheet 内容可直接搬入。10 个测试（FloatingPanelTests 状态侧）。
+
+**§2 ProjectWorkspace core 增补（§7）**
+- `session.project_url` + `install_project`（document_from_project 再校验后整体替换、清编辑会话、**history.reset()**——设计稿误写 mark_saved，按 Swift EditorSession+Projects.swift:38 修正）+ `clear_project`。
+- `project::copy_layers_between`（ProjectWorkspace.swift:157-209 逐行）：根子树拷贝、预算=图层 asset 像素 ≤100MP（弯撇号文案按原文）、出集合的活蒙版烘焙/调整层摘链、UUID 全量重映射（parent/maskSource 出集合置 None）、锚点平移含蒙版 placement、空目标按源尺寸建文档、一条 "Copy Layers from Project" undo。7 个测试。
+
+**§9.1-2 JPEG 导出对齐 JPEGExportSheet.swift**
+- 实时编码预览：打开/质量/哑光变更即重编码（选项未变跳过），预览图适配显示 + ByteCountFormatter 风格字节数行 + "Updating preview…"，OK 在预览落后于选项时禁用（readyOptions 语义），Export 写预览自身的字节（finish(result?.data)）。
+- 质量持久化：ToolDefaults 新增数值段（serde 向后兼容），`jpegExportQuality` 读写对齐 Swift UserDefaults。
+- Return（canvas.apply）现也提交挂起的变换（TransformInspector Apply）。
+
+**仍缺（本批次后续 Wave）**：tabs.rs/project.rs 模型层（Wave 2 进行中）→ AppState 重组（386 处 self.session，Wave 3）→ TabBar 行 + 菜单改投 + 面板迁移（Levels 样板 → 其余 → Camera Raw Docked，Wave 4）；InlineTextEditor；TransformInspector 把手实时跟随；select_subject 的 Vision 替代源；快捷键改键即时生效。
+
+---
+
 ## 修复进度（2026-09-26 第十九轮：AdjustmentEditing + 面板系统 + 快捷键自定义 + 选区混合修复）
 
 三个子代理并行（AdjustmentEditing+pixel 修复 / Curves+面板 / 快捷键自定义），主线完成接线。测试 595 → 659 全绿（core lib 563 + 集成 28 + app lib 52 + bin 16）。
