@@ -13,8 +13,9 @@ name = "compositor"
 path = "src/main.rs"
 
 [dependencies]
+smol.workspace = true
 compositor-core = { path = "../core" }
-gpui-kit = "0.6.6"
+gpui-kit = "0.7.0"
 image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

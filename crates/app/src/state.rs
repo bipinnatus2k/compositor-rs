@@ -394,6 +394,10 @@ pub struct AppState {
     /// The last text pushed into the inline input; keeps the two-way
     /// binding from echoing the user's own keystrokes back.
     pub inline_text_pushed: Option<String>,
+    /// The inline caret's blink phase anchor: any keystroke or caret move
+    /// resets it, so the caret holds solid while the user is working
+    /// (Swift's `caretBlinkTimer` invalidation on text change).
+    pub inline_text_caret_phase: std::time::Instant,
     /// The Type tool's in-progress box drag (`textBoxRect`).
     pub text_box_rect: Option<CGRect>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
@@ -584,6 +588,7 @@ impl AppState {
             inline_text_input,
             inline_text_open: false,
             inline_text_pushed: None,
+            inline_text_caret_phase: std::time::Instant::now(),
             text_box_rect: None,
             key_epoch: std::time::Instant::now(),
             pending_save: None,

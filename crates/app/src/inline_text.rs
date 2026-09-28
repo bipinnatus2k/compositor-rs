@@ -421,10 +421,12 @@ impl AppState {
         if !self.inline_text_open {
             self.inline_text_open = true;
             self.inline_text_pushed = Some(content.clone());
+            self.inline_text_caret_phase = std::time::Instant::now();
             self.inline_text_input.update(cx, |state, cx| {
                 state.set_value(content.clone(), window, cx);
                 state.focus(window, cx);
             });
+            self.spawn_caret_blink(cx);
             return;
         }
         if self.inline_text_pushed.as_deref() != Some(content.as_str()) {
@@ -445,6 +447,7 @@ impl AppState {
     /// draft's content and the canvas re-renders (`textDidChange`).
     pub fn inline_text_changed(&mut self, text: &str, cx: &mut Context<Self>) {
         self.inline_text_pushed = Some(text.to_string());
+        self.inline_text_caret_phase = std::time::Instant::now();
         let Some(draft) = self.tab().session.text_draft.as_mut() else {
             return;
         };
@@ -469,6 +472,38 @@ impl AppState {
             self.inline_text_open = false;
             self.touch(cx);
         }
+    }
+
+    /// Keeps the inline caret blinking while its editor is open: a background
+    /// loop wakes at the blink cadence and nudges a redraw (`caretBlinkTimer`).
+    fn spawn_caret_blink(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_millis(530)).await;
+                let ok = this.update(cx, |this, cx| {
+                    if !this.inline_text_open {
+                        return false;
+                    }
+                    this.inline_text_caret_phase = std::time::Instant::now();
+                    cx.notify();
+                    true
+                })
+                .ok();
+                if ok == Some(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The inline caret paints on the first half of the blink cycle and on
+    /// every keystroke (the phase resets with each change).
+    pub fn inline_text_caret_visible(&self) -> bool {
+        if !self.inline_text_open {
+            return false;
+        }
+        self.inline_text_caret_phase.elapsed().as_millis() % 1060 < 530
     }
 
     /// Escape in the inline editor (`cancelText`): the draft is dropped and
@@ -512,6 +547,32 @@ impl AppState {
             color: (rgb(draft.style.red) << 16) | (rgb(draft.style.green) << 8) | rgb(draft.style.blue),
             font_family: draft.style.font_name.clone(),
         })
+    }
+
+    /// The self-drawn caret: an opaque bar pinned to the exact bounds the
+    /// input reports for its built-in caret (`cursor_layout`, window space →
+    /// canvas-area space), covering it with the Swift editor's solid bar.
+    /// The built-in one blinks underneath and stays covered either way.
+    fn render_inline_caret(&self, cx: &gpui_kit::App) -> Option<gpui_kit::AnyElement> {
+        if !self.inline_text_caret_visible() {
+            return None;
+        }
+        let (bounds, _line_height) = self.inline_text_input.read(cx).cursor_layout()?;
+        let origin = self.viewport.origin;
+        let left = bounds.origin.x - origin.x;
+        let top = bounds.origin.y - origin.y;
+        let (left, top) = (f32::from(left), f32::from(top));
+        Some(
+            gpui_kit::div()
+                .id("inline-text-caret")
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(2.0))
+                .h(px(f32::from(bounds.size.height) + 2.0))
+                .bg(gpui_kit::rgb(0x1a1a1a))
+                .into_any_element(),
+        )
     }
 
     /// The overlay element: the multi-line input over the canvas. The frame
@@ -583,6 +644,7 @@ impl AppState {
                         .text_size(px(overlay.font_px))
                         .text_color(gpui_kit::rgb(overlay.color)),
                 )
+                .children(self.render_inline_caret(cx))
                 .into_any_element(),
         )
     }
