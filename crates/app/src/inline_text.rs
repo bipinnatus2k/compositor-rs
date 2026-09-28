@@ -10,7 +10,7 @@
 //! break (the text system's own behavior), ⌘Return commits, Escape cancels.
 
 use gpui_kit::component::input::{Textarea, TextareaState};
-use gpui_kit::{px, Focusable, InteractiveElement, IntoElement, ParentElement, Styled};
+use gpui_kit::{px, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
 use gpui_kit::MouseButton;
 use gpui_kit::{Context, Entity, Window};
 
@@ -27,28 +27,64 @@ pub const INLINE_TEXT_MAX_CHARS: usize = 100_000;
 /// The screen-space box the inline editor occupies: origin and size in
 /// viewport pixels, plus the on-canvas typeface (size and color follow the
 /// draft's style at the current zoom).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct InlineTextOverlay {
     pub origin: (f32, f32),
     pub size: (f32, f32),
     pub font_px: f32,
     pub color: u32,
+    pub font_family: String,
 }
 
-/// `InlineTextEditor.synchronize`'s geometry, as a pure function. Point text
-/// has no box: it measures as whatever `measured` says (the Swift editor
-/// grows the layer as it types; the overlay only follows the draft's box or
-/// measurement). Boxed text sits where the draft's transform puts it.
+/// The transform the editor actually shows (`synchronize`'s shownTransform,
+/// InlineTextEditor.swift:107-118). Boxed text sits where the draft's
+/// transform puts it. Point text with no layer transform is a fresh box at
+/// the draft's origin measuring whatever `measured` says. Point text already
+/// on a layer grows as it is typed, keeping whatever scale the layer was
+/// given: the new size is the fresh measurement times the layer's own scale
+/// (`factor = transform.size.width / asset.image.width`), and because a
+/// rotated layer turns about its center, growing it would swing its corner
+/// away — the top-left corner is put back where it was, which is where the
+/// commit leaves it too (`applyText` scales the raster against the old asset
+/// with the same anchor correction, TypeTool.swift:118-127). The draft's own
+/// transform is never rewritten while typing: the factor is measured against
+/// the layer's original raster, so updating it every keystroke would
+/// compound the scale. `asset_width` is the draft layer's raster width, 0
+/// when there is no layer or asset (no growth).
+pub fn inline_text_shown_transform(
+    origin: CGPoint,
+    transform: Option<LayerTransform>,
+    box_size: Option<CGSize>,
+    measured: CGSize,
+    asset_width: f64,
+) -> LayerTransform {
+    let logical = box_size.unwrap_or(measured);
+    let grew_from_layer = box_size.is_none() && transform.is_some() && asset_width > 0.0;
+    let mut transform = transform.unwrap_or_else(|| LayerTransform::new(origin, logical));
+    if grew_from_layer {
+        let factor = transform.size.width / asset_width;
+        let anchor = transform.point(CGPoint::ZERO);
+        transform.size = CGSize::new(logical.width * factor, logical.height * factor);
+        let moved = transform.point(CGPoint::ZERO);
+        transform.origin.x += anchor.x - moved.x;
+        transform.origin.y += anchor.y - moved.y;
+    }
+    transform
+}
+
+/// `InlineTextEditor.synchronize`'s geometry, as a pure function: the shown
+/// transform mapped through the view transform (origin through doc_to_screen,
+/// size scaled by the zoom).
 pub fn inline_text_box(
     origin: CGPoint,
     transform: Option<LayerTransform>,
     box_size: Option<CGSize>,
     measured: CGSize,
+    asset_width: f64,
     zoom: f64,
     pan: (f64, f64),
 ) -> ((f32, f32), (f32, f32)) {
-    let logical = box_size.unwrap_or(measured);
-    let transform = transform.unwrap_or_else(|| LayerTransform::new(origin, logical));
+    let transform = inline_text_shown_transform(origin, transform, box_size, measured, asset_width);
     let (sx, sy) = crate::state::doc_to_screen_at(zoom, pan, transform.origin.x, transform.origin.y);
     (
         (sx, sy),
@@ -64,6 +100,73 @@ pub fn inline_text_box(
 pub fn inline_text_measured_size(style: &LayerTextStyle) -> CGSize {
     let size = compositor_core::tools::text::text_box_size(style);
     CGSize::new(size.width.max(16.0), size.height.max(16.0))
+}
+
+/// The word-wrapped line widths of the content inside `container_width`,
+/// mirroring core's `layout_lines` (tools/text.rs:140): by-word wrapping, a
+/// line breaks at the last space that fits, measured with the style's font,
+/// size and tracking. Core keeps this layout private, so the app repeats it
+/// here — the one algorithm deliberately duplicated (see the module note).
+fn wrapped_line_widths(style: &LayerTextStyle, container_width: f64) -> Vec<f64> {
+    let font = compositor_core::tools::text::load_font(&style.font_name);
+    let size = style.font_size as f32;
+    let advance_of = |text: &str| -> f64 {
+        match &font {
+            Some(font) => {
+                let mut width = 0.0;
+                for ch in text.chars() {
+                    width += font.metrics(ch, size).advance_width as f64 + style.tracking;
+                }
+                width
+            }
+            None => text.chars().count() as f64 * style.font_size * 0.6,
+        }
+    };
+    let mut widths = Vec::new();
+    for paragraph in style.content.split('\n') {
+        let mut current = String::new();
+        let mut current_width = 0.0;
+        for word in paragraph.split_inclusive(' ') {
+            let word_width = advance_of(word.trim_end_matches(' '))
+                + advance_of(" ") * word.matches(' ').count() as f64;
+            if !current.is_empty() && current_width + word_width > container_width {
+                widths.push(current_width);
+                current = word.trim_start().to_string();
+                current_width = advance_of(current.trim_start());
+            } else {
+                current.push_str(word);
+                current_width += word_width;
+            }
+        }
+        widths.push(current_width);
+    }
+    if widths.is_empty() {
+        widths.push(0.0);
+    }
+    widths
+}
+
+/// Whether the text does not fit its fixed box — `draw`'s overflow marker,
+/// InlineTextEditor.swift:311-326: glyphs the layout cannot place inside the
+/// text container are clipped (`NSMaxRange(glyphRange) < numberOfGlyphs`),
+/// and a black plus is drawn on the bottom-right handle, as in Photoshop.
+/// The container is the box inset by the style's padding; it overflows when
+/// the wrapped lines' height passes the container's height or when a line is
+/// wider than it (an unbreakable word). Point text grows with its content,
+/// so it never overflows — false without a box, like the Swift editor whose
+/// point-text container always matches the measurement.
+pub fn inline_text_overflows(style: &LayerTextStyle) -> bool {
+    let Some(box_size) = style.box_size else {
+        return false;
+    };
+    let container_width = box_size.width - 2.0 * LayerTextStyle::PADDING;
+    let container_height = box_size.height - 2.0 * LayerTextStyle::PADDING;
+    if container_width < 1.0 || container_height < 1.0 {
+        return true;
+    }
+    let widths = wrapped_line_widths(style, container_width);
+    let total_height = widths.len() as f64 * style.line_height();
+    total_height > container_height || widths.iter().any(|width| *width > container_width)
 }
 
 /// The editor box's four screen corners (TL, TR, BR, BL in `HANDLES` corner
@@ -257,6 +360,42 @@ pub fn inline_text_key(
 }
 
 impl AppState {
+    /// The draft's layer raster width (`layer?.asset.image.width`), 0 when
+    /// the draft has no layer or asset yet — the scale point-text growth
+    /// measures against.
+    pub fn inline_text_asset_width(&self, draft: &compositor_core::session::TextDraft) -> f64 {
+        draft
+            .layer_id
+            .and_then(|id| {
+                self.current_tab()
+                    .session
+                    .document
+                    .as_ref()?
+                    .layer(id)
+                    .cloned()
+            })
+            .and_then(|layer| layer.asset)
+            .map(|asset| asset.image.width as f64)
+            .unwrap_or(0.0)
+    }
+
+    /// The editor's shown geometry for a draft (`synchronize`): the logical
+    /// size the text lays out at and the transform displayed — for point text
+    /// on a layer, the growth-compensated one (`inline_text_shown_transform`).
+    pub fn inline_text_shown(&self, draft: &compositor_core::session::TextDraft) -> (CGSize, LayerTransform) {
+        let measured = inline_text_measured_size(&draft.style);
+        let logical = draft.style.box_size.unwrap_or(measured);
+        let asset_width = self.inline_text_asset_width(draft);
+        let transform = inline_text_shown_transform(
+            draft.origin,
+            draft.transform,
+            draft.style.box_size,
+            measured,
+            asset_width,
+        );
+        (logical, transform)
+    }
+
     /// Whether the inline editor's input currently owns the keyboard.
     pub fn inline_text_focused(&self, window: &mut Window, cx: &gpui_kit::App) -> bool {
         self.current_tab().session.text_draft.is_some()
@@ -314,6 +453,11 @@ impl AppState {
         }
         if draft.style.content != text {
             draft.style.content = text.to_string();
+            // Point text's shown box grows with the measurement on the next
+            // frame (`inline_text_shown_transform`); the draft's own
+            // transform stays as the layer left it — the commit scales the
+            // fresh raster against the old asset (`apply_text`), exactly as
+            // Swift's `textDidChange` only refreshes the display.
             self.touch(cx);
         }
     }
@@ -343,12 +487,12 @@ impl AppState {
     /// module note on `render_inline_text_overlay`).
     pub fn inline_text_overlay(&self) -> Option<InlineTextOverlay> {
         let draft = self.current_tab().session.text_draft.as_ref()?;
-        let measured = inline_text_measured_size(&draft.style);
         let ((ox, oy), (w, h)) = inline_text_box(
             draft.origin,
             draft.transform,
             draft.style.box_size,
-            measured,
+            inline_text_measured_size(&draft.style),
+            self.inline_text_asset_width(draft),
             self.zoom,
             self.pan,
         );
@@ -366,6 +510,7 @@ impl AppState {
             size: ((max_x - min_x).max(24.0), (max_y - min_y).max(24.0)),
             font_px: (draft.style.font_size * self.zoom).max(6.0) as f32,
             color: (rgb(draft.style.red) << 16) | (rgb(draft.style.green) << 8) | rgb(draft.style.blue),
+            font_family: draft.style.font_name.clone(),
         })
     }
 
@@ -410,6 +555,10 @@ impl AppState {
                         .appearance(false)
                         .bordered(false)
                         .aria_label("Canvas text")
+                        // The draft's own typeface (`textAttributes`'s
+                        // `.font: NSFont(name: style.fontName, ...)`). A name
+                        // gpui cannot resolve falls back to the UI font.
+                        .font_family(SharedString::from(overlay.font_family.clone()))
                         .text_size(px(overlay.font_px))
                         .text_color(gpui_kit::rgb(overlay.color)),
                 )
@@ -418,23 +567,24 @@ impl AppState {
     }
 
     /// Which resize handle a press at `doc` lands on, if a draft is open
-    /// (`InlineTextEditor.hitTest`/`handle(at:)`).
+    /// (`InlineTextEditor.hitTest`/`handle(at:)`). The editor is hit-tested
+    /// against what is on screen, so point text that has grown while typing
+    /// uses its shown transform, not the draft's stale one.
     pub fn inline_text_handle_hit(&self, doc: CGPoint) -> Option<usize> {
         let draft = self.current_tab().session.text_draft.as_ref()?;
-        let measured = inline_text_measured_size(&draft.style);
-        let logical = draft.style.box_size.unwrap_or(measured);
-        let transform = draft
-            .transform
-            .unwrap_or_else(|| LayerTransform::new(draft.origin, logical));
+        let (logical, transform) = self.inline_text_shown(draft);
         let handle_size = inline_text_handle_size(&transform, logical, self.zoom);
         let local = inline_text_local_point(&transform, logical, doc);
         inline_text_handle_at(local, logical, handle_size)
     }
 
     /// Starts a resize drag from a handle
-    /// (`InlineTextEditor.mouseDown`): point text first becomes a box of the
-    /// size it has right now, which then holds and wraps the text — its
-    /// scale and rotation are whatever the draft already carried.
+    /// (`InlineTextEditor.mouseDown`): the drag starts from the transform
+    /// actually shown — point text may have grown past the draft's stale
+    /// one (`shownTransform ?? draft.transform ?? ...`). Point text first
+    /// becomes a box of the size it has right now, which then holds and
+    /// wraps the text — its scale and rotation are whatever the draft
+    /// already carried.
     pub fn begin_inline_text_resize(
         &mut self,
         doc: CGPoint,
@@ -444,10 +594,7 @@ impl AppState {
         let Some(mut draft) = self.current_tab().session.text_draft.clone() else {
             return;
         };
-        let measured = inline_text_measured_size(&draft.style);
-        let transform = draft
-            .transform
-            .unwrap_or_else(|| LayerTransform::new(draft.origin, measured));
+        let (measured, transform) = self.inline_text_shown(&draft);
         if draft.style.box_size.is_none() {
             draft.style.box_size = Some(measured);
             draft.transform = Some(transform);
@@ -470,8 +617,8 @@ impl AppState {
 mod tests {
     use super::{
         inline_text_box, inline_text_box_corners, inline_text_handle_at, inline_text_handle_size,
-        inline_text_key, inline_text_local_point, inline_text_measured_size, inline_text_resize,
-        InlineTextKey,
+        inline_text_key, inline_text_local_point, inline_text_measured_size, inline_text_overflows,
+        inline_text_resize, inline_text_shown_transform, InlineTextKey,
     };
     use crate::state::doc_to_screen_at;
     use compositor_core::document::LayerTextStyle;
@@ -487,6 +634,7 @@ mod tests {
             Some(transform),
             Some(box_size),
             CGSize::new(999.0, 999.0),
+            0.0,
             2.0,
             (5.0, 7.0),
         );
@@ -510,6 +658,7 @@ mod tests {
             None,
             None,
             measured,
+            0.0,
             1.0,
             (0.0, 0.0),
         );
@@ -520,18 +669,141 @@ mod tests {
     #[test]
     fn point_text_with_a_layer_transform_scales_from_the_layer() {
         // Editing existing point text: the draft carries the layer's
-        // transform; the overlay follows it, not the raw measurement.
+        // transform; while the text matches the raster the overlay shows the
+        // transform itself (measurement 60 x 24, asset 60 wide → factor 5).
         let transform = LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 120.0));
         let ((ox, oy), (w, h)) = inline_text_box(
             CGPoint::new(0.0, 0.0),
             Some(transform),
             None,
             CGSize::new(60.0, 24.0),
+            60.0,
             0.5,
             (0.0, 0.0),
         );
         assert_eq!((ox, oy), (0.0, 0.0));
         assert_eq!((w, h), (150.0, 60.0));
+    }
+
+    #[test]
+    fn point_text_grows_with_the_fresh_measurement_keeping_the_layer_scale() {
+        // synchronize, InlineTextEditor.swift:109-118: the shown size is the
+        // fresh measurement times the layer's own scale
+        // (factor = transform.width / asset.width), and the rotated top-left
+        // corner is put back where it was.
+        let transform = LayerTransform::new(CGPoint::new(100.0, 50.0), CGSize::new(300.0, 120.0));
+        // One character typed: the measurement grew 60 → 90 wide, 24 → 36 tall.
+        let shown = inline_text_shown_transform(
+            transform.origin,
+            Some(transform),
+            None,
+            CGSize::new(90.0, 36.0),
+            60.0,
+        );
+        assert_eq!(shown.size, CGSize::new(450.0, 180.0));
+        // The top-left corner never moves (axis-aligned box: it is the origin).
+        let corner = shown.point(CGPoint::ZERO);
+        let before = transform.point(CGPoint::ZERO);
+        assert!((corner.x - before.x).abs() < 0.001 && (corner.y - before.y).abs() < 0.001);
+        // The draft's own transform is untouched (the function is pure).
+        assert_eq!(transform.size, CGSize::new(300.0, 120.0));
+    }
+
+    #[test]
+    fn grown_point_text_keeps_its_rotated_top_left_corner() {
+        // A rotated layer turns about its center, so growing it swings its
+        // corner away — the anchor correction puts the corner back
+        // (InlineTextEditor.swift:112-117).
+        let mut transform = LayerTransform::new(CGPoint::new(100.0, 50.0), CGSize::new(300.0, 120.0));
+        transform.rotation = 30.0;
+        let shown = inline_text_shown_transform(
+            transform.origin,
+            Some(transform),
+            None,
+            CGSize::new(90.0, 36.0),
+            60.0,
+        );
+        assert_eq!(shown.size, CGSize::new(450.0, 180.0));
+        let corner = shown.point(CGPoint::ZERO);
+        let before = transform.point(CGPoint::ZERO);
+        assert!((corner.x - before.x).abs() < 0.001, "corner {corner:?}");
+        assert!((corner.y - before.y).abs() < 0.001, "corner {corner:?}");
+        // So the origin had to move to compensate the swing about the center.
+        assert!(shown.origin != transform.origin);
+        // Rotation and flips are the layer's own, untouched.
+        assert_eq!(shown.rotation, 30.0);
+    }
+
+    #[test]
+    fn growth_needs_a_layer_and_an_asset() {
+        // No layer transform: point text is a fresh box at the origin sized
+        // to the measurement — no factor applies.
+        let shown = inline_text_shown_transform(
+            CGPoint::new(4.0, 6.0),
+            None,
+            None,
+            CGSize::new(90.0, 36.0),
+            60.0,
+        );
+        assert_eq!(shown.size, CGSize::new(90.0, 36.0));
+        assert_eq!(shown.origin, CGPoint::new(4.0, 6.0));
+        // A layer without a raster (asset width 0) cannot be scaled against.
+        let transform = LayerTransform::new(CGPoint::ZERO, CGSize::new(300.0, 120.0));
+        let shown = inline_text_shown_transform(
+            transform.origin,
+            Some(transform),
+            None,
+            CGSize::new(90.0, 36.0),
+            0.0,
+        );
+        assert_eq!(shown, transform);
+        // Boxed text never grows, whatever the measurement says.
+        let shown = inline_text_shown_transform(
+            transform.origin,
+            Some(transform),
+            Some(CGSize::new(300.0, 120.0)),
+            CGSize::new(90.0, 36.0),
+            60.0,
+        );
+        assert_eq!(shown, transform);
+    }
+
+    #[test]
+    fn boxed_text_overflow_follows_the_container() {
+        // Text that does not fit its fixed box overflows
+        // (InlineTextEditor.swift:311-326); point text grows, so it never
+        // does.
+        let fits = LayerTextStyle {
+            content: "Hi".into(),
+            font_size: 12.0,
+            box_size: Some(CGSize::new(200.0, 100.0)),
+            ..LayerTextStyle::default()
+        };
+        assert!(!inline_text_overflows(&fits));
+        // Too many lines for the container height: overflow, whatever font
+        // is installed (line height 14.4, 10 lines in a 76-tall container).
+        let too_tall = LayerTextStyle {
+            content: "a\na\na\na\na\na\na\na\na\na".into(),
+            font_size: 12.0,
+            box_size: Some(CGSize::new(200.0, 100.0)),
+            ..LayerTextStyle::default()
+        };
+        assert!(inline_text_overflows(&too_tall));
+        // One unbreakable word wider than the container.
+        let too_wide = LayerTextStyle {
+            content: "AAAAAAAAAAAAAA".into(),
+            font_size: 72.0,
+            box_size: Some(CGSize::new(200.0, 400.0)),
+            ..LayerTextStyle::default()
+        };
+        assert!(inline_text_overflows(&too_wide));
+        // Point text has no fixed container: never an overflow.
+        let point = LayerTextStyle {
+            content: "AAAAAAAAAAAAAA".into(),
+            font_size: 72.0,
+            ..LayerTextStyle::default()
+        };
+        assert!(!inline_text_overflows(&point));
     }
 
     #[test]
@@ -584,6 +856,7 @@ mod tests {
                 Some(transform),
                 Some(transform.size),
                 CGSize::new(999.0, 999.0),
+                999.0,
                 zoom,
                 pan,
             );

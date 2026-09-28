@@ -22,7 +22,10 @@ use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::tools::brush::{GradientShape, RasterEdit};
 
-use crate::inline_text::{inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_resize};
+use crate::inline_text::{
+    inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_overflows,
+    inline_text_resize,
+};
 use crate::state::{AppState, CanvasDrag, RULER_SIZE};
 
 /// `guideHitDistance` (Guides.swift): how close a Move press must land to a
@@ -51,6 +54,10 @@ pub struct CanvasScene {
     /// (`InlineTextEditor.draw`): four screen corners plus the edge
     /// midpoints painted as handles.
     pub inline_text_frame: Option<[(f32, f32); 4]>,
+    /// Whether the draft's text does not fit its fixed box — a black plus on
+    /// the bottom-right handle (`draw`'s overflow marker,
+    /// InlineTextEditor.swift:311-326).
+    pub inline_text_overflow: bool,
 }
 
 impl AppState {
@@ -132,6 +139,7 @@ impl AppState {
         let mut transform = None;
         let mut text_box = None;
         let mut inline_text_frame = None;
+        let mut inline_text_overflow = false;
 
         if let Some(document) = self.current_tab().session.document.as_ref() {
             // `displayedGuides`: a drag in progress replaces its own guide's
@@ -229,20 +237,25 @@ impl AppState {
                     self.doc_to_screen(rect.max_x(), rect.max_y()),
                 ));
             }
-            // The inline text editor's frame and handles: the draft's frame
-            // rotated about its center (`frameRotation`).
+            // The inline text editor's frame and handles: the draft's shown
+            // frame (`synchronize`'s shownTransform — for point text on a
+            // layer, grown with the fresh measurement and anchored back at
+            // its top-left corner) rotated about its center.
             if let Some(draft) = &self.current_tab().session.text_draft {
                 let measured = inline_text_measured_size(&draft.style);
+                let asset_width = self.inline_text_asset_width(draft);
                 let ((ox, oy), (w, h)) = inline_text_box(
                     draft.origin,
                     draft.transform,
                     draft.style.box_size,
                     measured,
+                    asset_width,
                     self.zoom,
                     self.pan,
                 );
                 let rotation = draft.transform.map(|t| t.rotation).unwrap_or(0.0);
                 inline_text_frame = Some(inline_text_box_corners((ox, oy), (w, h), rotation));
+                inline_text_overflow = inline_text_overflows(&draft.style);
             }
         }
 
@@ -261,6 +274,7 @@ impl AppState {
             transform,
             text_box,
             inline_text_frame,
+            inline_text_overflow,
         }
     }
 
@@ -1623,6 +1637,13 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         for corner in corners {
             paint_handle(window, point(px(corner.0), px(corner.1)));
         }
+        // Text that doesn't fit is marked by a black plus on the
+        // bottom-right handle, as in Photoshop (`draw`'s overflow marker,
+        // InlineTextEditor.swift:311-326: handles[4], the bottom-right
+        // corner; arm 0.42 of the handle size, a stroke a sixth as wide).
+        if scene.inline_text_overflow {
+            paint_overflow_plus(window, corners[2]);
+        }
     }
 
     // Rulers on top.
@@ -1788,6 +1809,27 @@ fn paint_handle(window: &mut Window, at: Point<Pixels>) {
     );
     window.paint_quad(gpui_kit::fill(rect, rgb(0xffffff)));
     paint_rect_outline(window, rect, rgba(0x000000cc));
+}
+
+/// The overflow plus: a black cross centered on the bottom-right handle,
+/// `arm` half its length and the handle's stroke a sixth of its size wide
+/// (`draw`'s overflow marker, InlineTextEditor.swift:316-325 — the same
+/// proportions at the port's fixed 8-pixel handle).
+fn paint_overflow_plus(window: &mut Window, at: (f32, f32)) {
+    const SIZE: f32 = 8.0;
+    let arm = SIZE * 0.42;
+    let stroke = SIZE / 6.0;
+    let color = rgba(0x000000ff);
+    let horizontal = Bounds::<Pixels>::new(
+        point(px(at.0 - arm), px(at.1 - stroke / 2.0)),
+        size(px(arm * 2.0), px(stroke)),
+    );
+    let vertical = Bounds::<Pixels>::new(
+        point(px(at.0 - stroke / 2.0), px(at.1 - arm)),
+        size(px(stroke), px(arm * 2.0)),
+    );
+    window.paint_quad(gpui_kit::fill(horizontal, color));
+    window.paint_quad(gpui_kit::fill(vertical, color));
 }
 
 fn paint_darken_outside(window: &mut Window, viewport: Bounds<Pixels>, rect: Bounds<Pixels>) {
