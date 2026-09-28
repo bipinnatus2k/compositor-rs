@@ -22,7 +22,7 @@ use crate::selection::{
     drag_box_rect, DocumentSelection, LassoDraft, LassoKind, SelectionMode, SelectionPath,
 };
 use crate::tools::brush::RasterEdit;
-use crate::transform::{LayerSampling, LayerTransform, TransformEdit};
+use crate::transform::{LayerSampling, LayerTransform, TransformEdit, TransformGroup};
 use crate::document::PickerHSB;
 use uuid::Uuid;
 
@@ -322,6 +322,16 @@ impl ColorPickerState {
     }
 }
 
+/// `transformDuplicate` (EditorSession.swift) — an Option-drag duplicate in
+/// progress: the copies being transformed, the selection they were duplicated
+/// from, and the primary selection then.
+#[derive(Debug, Clone)]
+pub struct TransformDuplicate {
+    pub copies: Vec<Uuid>,
+    pub source: Vec<Uuid>,
+    pub primary: Option<Uuid>,
+}
+
 /// `@Observable`; here the UI reads the fields directly and mutation methods
 /// keep the same guards and undo names.
 pub struct EditorSession {
@@ -332,6 +342,9 @@ pub struct EditorSession {
     pub is_mask_selected: bool,
     pub collapsed_group_ids: std::collections::HashSet<Uuid>,
     pub history: DocumentHistory,
+    /// An Option-drag duplicate in progress (`transformDuplicate`): the
+    /// copies, the selection they came from, and the primary then.
+    pub transform_duplicate: Option<TransformDuplicate>,
 
     /// The `.comp` package this project was loaded from or last saved to
     /// (`projectURL`, EditorSession.swift:114). Written by the app's project
@@ -463,6 +476,7 @@ impl Default for EditorSession {
             selected_layer_ids: Vec::new(),
             is_mask_selected: false,
             collapsed_group_ids: std::collections::HashSet::new(),
+            transform_duplicate: None,
             pixel_clipboard: None,
             text_draft: None,
             canvas_focus_request: 0,
@@ -4691,6 +4705,21 @@ impl EditorSession {
     // MARK: Transforms
 
     pub fn commit_transform(&mut self) {
+        // Swift declares the duplicate cleanup after `guard let edit`, so a
+        // commit with no open transform leaves the folded edit alone.
+        let had_edit = self.transform_edit.is_some();
+        self.commit_transform_inner();
+        // An Option-drag duplicate folds the duplication and the move into
+        // one undo step: the edit opened in `begin_duplicate_transform` closes
+        // here, whatever the transform commit decided (commitTransform's
+        // defer, EditorSession.swift:423-426).
+        if had_edit && self.transform_duplicate.is_some() {
+            self.transform_duplicate = None;
+            self.end_edit();
+        }
+    }
+
+    fn commit_transform_inner(&mut self) {
         self.finish_opacity_edit();
         self.snap_guides = (Vec::new(), Vec::new());
         // A blend preview never survives a commit (EditorSession.swift:425).
@@ -4722,6 +4751,47 @@ impl EditorSession {
         // its layer stays put (commitMaskTransform).
         if edit.mask {
             self.commit_mask_transform(&edit);
+            return;
+        }
+        // A group transform carries every member from the box to the draft in
+        // one undo step (commitTransform's group branch, EditorSession.swift:437-449).
+        if let Some(group) = edit.group.clone() {
+            if !edit.draft.is_valid() {
+                return;
+            }
+            let Some(document) = self.document.as_mut() else {
+                return;
+            };
+            self.begin_edit("Transform Layers");
+            let document = self.document.as_mut().unwrap();
+            for (id, original) in &group.originals {
+                let Some(index) = document.layer_index(*id) else {
+                    continue;
+                };
+                let moved = original.following(&group.box_, &edit.draft);
+                if !moved.is_valid() {
+                    continue;
+                }
+                let layer = &mut document.layers[index];
+                if let Some(mask) = layer.mask.as_mut() {
+                    mask.placement = mask.placement_moving_layer(original, &moved);
+                }
+                if let Some(shape) = layer.shape.clone() {
+                    let new_w = moved.size.width.round().max(1.0) as usize;
+                    let new_h = moved.size.height.round().max(1.0) as usize;
+                    if new_w <= 10_000 && new_h <= 10_000 {
+                        let name = layer
+                            .asset
+                            .as_ref()
+                            .map(|a| a.name.clone())
+                            .unwrap_or_default();
+                        let raster = crate::render::render_shape_image(&shape, new_w, new_h);
+                        layer.asset = Some(ImportedImage::new(raster, name));
+                    }
+                }
+                layer.transform = moved;
+            }
+            self.end_edit();
             return;
         }
         if !edit.draft.is_valid() {
@@ -4927,9 +4997,96 @@ impl EditorSession {
         let Some(edit) = self.transform_edit.take() else {
             return;
         };
+        // Cancelling an Option-drag duplicate removes the copies, puts the
+        // selection back, and closes the folded edit (cancelTransform,
+        // EditorSession.swift:462-470).
+        if let Some(duplicate) = self.transform_duplicate.take() {
+            let mut removed: std::collections::HashSet<Uuid> =
+                duplicate.copies.iter().copied().collect();
+            if let Some(document) = self.document.as_ref() {
+                for copy in &duplicate.copies {
+                    removed.extend(document.descendant_ids(*copy));
+                }
+            }
+            if let Some(document) = self.document.as_mut() {
+                document.layers.retain(|l| !removed.contains(&l.id));
+                self.collapsed_group_ids.retain(|id| !removed.contains(id));
+            }
+            self.select_layers(&duplicate.source, duplicate.primary);
+            self.end_edit();
+        }
         if let Some(floating) = edit.floating {
             self.cancel_floating_transform(&floating);
         }
+    }
+
+    /// `beginDuplicateTransform` (EditorSession.swift:402-421) — Option-drag
+    /// duplicates the selected roots with their descendants and starts a
+    /// transient transform on the copies, all folded into one undo step.
+    pub fn begin_duplicate_transform(&mut self) {
+        if self.transform_duplicate.is_some() {
+            return;
+        }
+        let Some(primary) = self.active_layer_id else {
+            return;
+        };
+        self.commit_transform();
+        if !self.can_transform() {
+            return;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let selection: std::collections::HashSet<Uuid> =
+            self.selected_layer_ids.iter().copied().collect();
+        // The descendants of a selected root are carried by its duplicate, not
+        // duplicated again on their own. (Swift's descendantIDs(of:) excludes
+        // the id itself; the Rust one includes it.)
+        let mut carried: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for id in &selection {
+            carried.extend(document.descendant_ids(*id));
+            carried.remove(id);
+        }
+        // Bottom to top, so the copies keep the order they had.
+        let targets: Vec<Uuid> = document
+            .layers
+            .iter()
+            .filter(|l| selection.contains(&l.id) && !carried.contains(&l.id))
+            .map(|l| l.id)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.begin_edit(if targets.len() > 1 {
+            "Duplicate Layers"
+        } else {
+            "Duplicate Layer"
+        });
+        let mut copies: Vec<Uuid> = Vec::new();
+        for id in targets {
+            self.select_layer(Some(id));
+            self.duplicate_active_layer();
+            if let Some(copy) = self.active_layer_id {
+                if copy != id {
+                    copies.push(copy);
+                }
+            }
+        }
+        if copies.is_empty() {
+            self.end_edit();
+            let source: Vec<Uuid> = selection.into_iter().collect();
+            self.select_layers(&source, Some(primary));
+            return;
+        }
+        let source: Vec<Uuid> = selection.into_iter().collect();
+        let primary = copies.last().copied();
+        self.transform_duplicate = Some(TransformDuplicate {
+            copies: copies.clone(),
+            source,
+            primary,
+        });
+        self.select_layers(&copies, primary);
+        self.begin_transform_persistent(false);
     }
 
     /// `beginTransform()` — the common case: a user-opened transform that
@@ -4955,6 +5112,33 @@ impl EditorSession {
             return;
         };
         self.tool = NavigationTool::Move;
+        // Several selected layers transform together in one box
+        // (EditorSession.swift:379-386).
+        if self.transforms_as_group() {
+            let Some(box_) = self.group_transform_box() else {
+                return;
+            };
+            let originals = self
+                .group_transform_member_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    self.document
+                        .as_ref()
+                        .and_then(|d| d.layer(id))
+                        .map(|l| (id, l.transform))
+                })
+                .collect();
+            self.transform_edit = Some(TransformEdit {
+                layer_id: layer.id,
+                draft: box_,
+                persistent,
+                floating: None,
+                corners: None,
+                mask: false,
+                group: Some(TransformGroup { box_: box_, originals }),
+            });
+            return;
+        }
         let mask_alone = self
             .is_mask_selected
             && layer.mask.as_ref().map(|m| !m.is_linked).unwrap_or(false);
@@ -4983,10 +5167,89 @@ impl EditorSession {
     }
 
     pub fn can_transform(&self) -> bool {
+        if !self.can_edit_layers() {
+            return false;
+        }
+        // Several selected layers, or a folder's contents, transform together
+        // (EditorSession.swift:295-299).
+        if self.transforms_as_group() {
+            return !self.group_transform_member_ids().is_empty();
+        }
         let Some(layer) = self.active_layer() else {
             return false;
         };
         layer.asset.is_some() && !layer.is_group
+    }
+
+    /// `transformsAsGroup` (EditorSession.swift:300) — several layers selected,
+    /// or a single selected folder.
+    pub fn transforms_as_group(&self) -> bool {
+        self.selected_layer_ids.len() > 1
+            || (self.selected_layer_ids.len() == 1
+                && self.active_layer().map(|l| l.is_group).unwrap_or(false))
+    }
+
+    /// `groupTransformMembers` (EditorSession.swift:304-317) — the visible
+    /// pixel layers selected or inside selected folders, bottom to top.
+    pub fn group_transform_member_ids(&self) -> Vec<Uuid> {
+        let Some(document) = self.document.as_ref() else {
+            return Vec::new();
+        };
+        if !self.transforms_as_group() {
+            return Vec::new();
+        }
+        let selected: std::collections::HashSet<Uuid> =
+            self.selected_layer_ids.iter().copied().collect();
+        let visible = document.effective_visible_ids();
+        let mut members = Vec::new();
+        for layer in &document.layers {
+            if layer.asset.is_none() || layer.is_group || !visible.contains(&layer.id) {
+                continue;
+            }
+            let mut current = Some(layer.id);
+            for _ in 0..64 {
+                let Some(id) = current else {
+                    break;
+                };
+                if selected.contains(&id) {
+                    members.push(layer.id);
+                    break;
+                }
+                current = document.layers
+                    .iter()
+                    .find(|l| l.id == id)
+                    .and_then(|l| l.parent_id);
+            }
+        }
+        members
+    }
+
+    /// `groupTransformBox` (EditorSession.swift:320-327) — the upright box
+    /// around the group members.
+    pub fn group_transform_box(&self) -> Option<LayerTransform> {
+        let Some(document) = self.document.as_ref() else {
+            return None;
+        };
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for id in self.group_transform_member_ids() {
+            let layer = document.layer(id)?;
+            for corner in layer.transform.corners() {
+                min_x = min_x.min(corner.x);
+                max_x = max_x.max(corner.x);
+                min_y = min_y.min(corner.y);
+                max_y = max_y.max(corner.y);
+            }
+        }
+        if !min_x.is_finite() {
+            return None;
+        }
+        Some(LayerTransform::new(
+            CGPoint::new(min_x, min_y),
+            CGSize::new((max_x - min_x).max(1.0), (max_y - min_y).max(1.0)),
+        ))
     }
 
     pub fn nudge_layer(&mut self, dx: f64, dy: f64) {
@@ -5517,13 +5780,22 @@ impl EditorSession {
     }
 
     /// `displayedTransform(for:)` — the transform a layer draws with right
-    /// now: the pending transform draft while it is being transformed.
+    /// now: the pending transform draft while it is being transformed. For a
+    /// group edit each member follows the box to the draft
+    /// (`pendingTransform`, EditorSession.swift:498-502).
     pub fn displayed_transform(&self, layer: &ImageLayer) -> LayerTransform {
-        self.transform_edit
-            .as_ref()
-            .filter(|edit| edit.layer_id == layer.id && edit.draft.is_valid())
-            .map(|edit| edit.draft)
-            .unwrap_or(layer.transform)
+        if let Some(edit) = self.transform_edit.as_ref() {
+            if edit.draft.is_valid() && !edit.mask {
+                if let Some(group) = edit.group.as_ref() {
+                    if let Some(original) = group.original(layer.id) {
+                        return original.following(&group.box_, &edit.draft);
+                    }
+                } else if edit.layer_id == layer.id {
+                    return edit.draft;
+                }
+            }
+        }
+        layer.transform
     }
 
     /// `toggleShapeKind` — cycles the Shape tool's draw kind

@@ -14,9 +14,8 @@
 //!   nudge/escape session behavior it exercises is covered by
 //!   `preview_commit_cancel_and_undo_preserve_sources` and
 //!   `no_op_invalid_values_and_switching_tools`.
-//! - Swift's `beginDuplicateTransform` and the commit-on-tool-switch are
-//!   expressed through their core pieces (`duplicate_active_layer`,
-//!   `commit_transform`), noted per test.
+//! - Swift's commit-on-tool-switch is expressed through `commit_transform`,
+//!   which is what the app's tool switch calls.
 
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::{Bitmap, ImportedImage};
@@ -42,16 +41,12 @@ fn painted_session(width: usize, height: usize) -> (EditorSession, uuid::Uuid) {
 }
 
 /// Swift `duplicateTransformPreservesOriginalAndSupportsUndoAndCancel`.
-///
-/// `beginDuplicateTransform` is app-composed from `duplicateActiveLayer` plus
-/// a transform on the copy; the port drives those pieces directly.
 #[test]
 fn duplicate_transform_preserves_original_and_supports_undo_and_cancel() {
     let (mut session, original_id) = painted_session(400, 200);
     let original = session.active_layer().expect("layer").clone();
     let count = session.history.undo_count();
-    session.duplicate_active_layer();
-    session.begin_transform();
+    session.begin_duplicate_transform();
     let mut moved = original.transform;
     moved.origin.x += 50.0;
     session.preview_transform(moved);
@@ -60,24 +55,54 @@ fn duplicate_transform_preserves_original_and_supports_undo_and_cancel() {
     assert_eq!(document.layers.len(), 2);
     assert_eq!(document.layers[0].transform, original.transform);
     assert_eq!(session.active_layer().unwrap().transform, moved);
-    // Swift's `beginDuplicateTransform` folds the duplicate and the move into
-    // ONE undo step; the core composes them from `duplicate_active_layer` +
-    // `begin_transform`, which record separately — recorded as a gap.
-    assert_eq!(session.history.undo_count(), count + 2);
-    session.undo();
+    // `beginDuplicateTransform` folds the duplicate and the move into ONE
+    // undo step ("Duplicate Layer").
+    assert_eq!(session.history.undo_count(), count + 1);
+    assert_eq!(session.history.undo_name(), "Duplicate Layer");
     session.undo();
     assert_eq!(session.document.as_ref().unwrap().layers.len(), 1);
     assert_eq!(session.active_layer_id, Some(original_id));
-    session.duplicate_active_layer();
-    session.begin_transform();
+    session.begin_duplicate_transform();
     session.preview_transform(moved);
     session.cancel_transform();
-    // Cancel drops only the transform; the composed duplicate leaves with its
-    // own undo step (Swift's fold covers both).
-    session.undo();
+    // Cancel removes the copies, restores the selection, and the folded edit
+    // leaves no undo entry behind (nothing changed).
     assert_eq!(session.document.as_ref().unwrap().layers.len(), 1);
     assert_eq!(session.active_layer_id, Some(original_id));
     assert_eq!(session.history.undo_count(), count, "cancel adds nothing");
+}
+
+/// Swift `beginDuplicateTransform` with several layers selected: every
+/// selected root is duplicated and the copies transform together as a group,
+/// all folded into one undo step ("Duplicate Layers").
+#[test]
+fn duplicate_transform_with_multi_select_copies_every_root() {
+    let (mut session, first_id) = painted_session(400, 200);
+    let mut second = Bitmap::new(40, 40);
+    for chunk in second.data.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&[0, 255, 0, 255]);
+    }
+    session.insert_image(ImportedImage::with_thumbnail(second.clone(), second, "Second"), None);
+    let second_id = session.active_layer_id.unwrap();
+    session.select_layers(&[first_id, second_id], Some(first_id));
+    let count = session.history.undo_count();
+    session.begin_duplicate_transform();
+    // The copies are selected and transform as a group.
+    let edit = session.transform_edit.as_ref().expect("group transform opens");
+    assert!(edit.group.is_some());
+    let mut draft = edit.draft;
+    draft.origin.x += 20.0;
+    session.preview_transform(draft);
+    session.commit_transform();
+    // The folded edit is one "Duplicate Layers" step (the name lands when
+    // the edit ends, as in Swift's beginEdit/endEdit pair).
+    assert_eq!(session.history.undo_name(), "Duplicate Layers");
+    assert_eq!(session.document.as_ref().unwrap().layers.len(), 4);
+    assert_eq!(session.history.undo_count(), count + 1);
+    session.undo();
+    let document = session.document.as_ref().unwrap();
+    assert_eq!(document.layers.len(), 2);
+    assert!(document.layer(first_id).is_some() && document.layer(second_id).is_some());
 }
 
 /// Swift `blankLayersHaveNoTransformHandlesOrEditing` — the session half; the
@@ -335,4 +360,111 @@ fn rendering_rotates_scales_and_flips_without_replacing_pixels() {
     );
     session.undo();
     assert_eq!(session.active_layer().unwrap().size(), CGSize::new(8.0, 8.0));
+}
+
+/// Swift's multi-select group transform (`transformsAsGroup`,
+/// `groupTransformMembers`/`groupTransformBox`, `beginTransform`'s group
+/// branch and `commitTransform`'s group branch): several selected layers
+/// transform together in one box, keep their relative placement, and undo in
+/// a single step ("Transform Layers").
+#[test]
+fn multi_select_transform_moves_members_together_in_one_undo_step() {
+    let (mut session, first_id) = painted_session(400, 200);
+    // Give the second layer its own offset, so relative placement is visible.
+    let mut second = Bitmap::new(60, 40);
+    for chunk in second.data.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&[0, 0, 255, 255]);
+    }
+    session.insert_image(
+        ImportedImage::with_thumbnail(second.clone(), second, "Second"),
+        None,
+    );
+    let second_id = session.active_layer_id.unwrap();
+    session.begin_transform();
+    let mut placed = session.transform_edit.as_ref().unwrap().draft;
+    placed.origin = CGPoint::new(120.0, 40.0);
+    session.preview_transform(placed);
+    session.commit_transform();
+
+    session.select_layers(&[first_id, second_id], Some(first_id));
+    let document = session.document.as_ref().unwrap();
+    let first_before = document.layer(first_id).unwrap().transform;
+    let second_before = document.layer(second_id).unwrap().transform;
+    let count = session.history.undo_count();
+
+    session.begin_transform();
+    let edit = session.transform_edit.as_ref().expect("group transform opens");
+    let group = edit.group.as_ref().expect("multi-select transforms as a group");
+    assert_eq!(group.originals.len(), 2);
+    assert_eq!(edit.draft, session.group_transform_box().unwrap());
+    // The box spans both layers (second sits at 120,40 and first at 0,0).
+    assert_eq!(edit.draft.origin, CGPoint::new(0.0, 0.0));
+
+    // Drag the box: both members follow it, preview included.
+    let mut draft = edit.draft;
+    draft.origin.x += 30.0;
+    draft.origin.y += 10.0;
+    session.preview_transform(draft);
+    let document = session.document.as_ref().unwrap();
+    let first = document.layer(first_id).unwrap();
+    let shown_first = session.displayed_transform(first);
+    assert_eq!(shown_first.origin.x, first_before.origin.x + 30.0);
+    assert_eq!(shown_first.origin.y, first_before.origin.y + 10.0);
+
+    session.commit_transform();
+    let document = session.document.as_ref().unwrap();
+    let first_after = document.layer(first_id).unwrap().transform;
+    let second_after = document.layer(second_id).unwrap().transform;
+    assert_eq!(first_after.origin.x, first_before.origin.x + 30.0);
+    assert_eq!(first_after.origin.y, first_before.origin.y + 10.0);
+    assert_eq!(second_after.origin.x, second_before.origin.x + 30.0);
+    assert_eq!(second_after.origin.y, second_before.origin.y + 10.0);
+    // Relative placement between the two layers is unchanged.
+    assert_eq!(
+        second_after.origin.x - first_after.origin.x,
+        second_before.origin.x - first_before.origin.x
+    );
+    assert_eq!(
+        second_after.origin.y - first_after.origin.y,
+        second_before.origin.y - first_before.origin.y
+    );
+    // The whole group commit is one undo step.
+    assert_eq!(session.history.undo_count(), count + 1);
+    session.undo();
+    let document = session.document.as_ref().unwrap();
+    assert_eq!(document.layer(first_id).unwrap().transform, first_before);
+    assert_eq!(document.layer(second_id).unwrap().transform, second_before);
+}
+
+/// Cancelling a group transform drops the whole edit and touches nothing.
+#[test]
+fn cancel_group_transform_leaves_members_untouched() {
+    let (mut session, first_id) = painted_session(300, 200);
+    let mut second = Bitmap::new(30, 30);
+    for chunk in second.data.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&[0, 255, 0, 255]);
+    }
+    session.insert_image(ImportedImage::with_thumbnail(second.clone(), second, "Second"), None);
+    let second_id = session.active_layer_id.unwrap();
+    session.select_layers(&[first_id, second_id], Some(first_id));
+    let before: Vec<_> = session
+        .document
+        .as_ref()
+        .unwrap()
+        .layers
+        .iter()
+        .map(|l| (l.id, l.transform))
+        .collect();
+    let count = session.history.undo_count();
+    session.begin_transform();
+    let draft = session.transform_edit.as_ref().unwrap().draft;
+    let mut moved = draft;
+    moved.origin.x += 25.0;
+    session.preview_transform(moved);
+    session.cancel_transform();
+    let document = session.document.as_ref().unwrap();
+    for (id, transform) in &before {
+        assert_eq!(&document.layer(*id).unwrap().transform, transform);
+    }
+    assert_eq!(session.history.undo_count(), count, "cancel adds nothing");
 }
