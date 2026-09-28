@@ -245,13 +245,30 @@ fn mask_alpha_at(mask_grid: &Bitmap, placement: &LayerTransform, doc: CGPoint) -
 /// top, blended in place. `blend_overrides` lets the UI preview a pending
 /// blend mode; `preview_overrides` lets it draw pending pixel results.
 pub fn draw_live_composite(document: &CanvasDocument) -> Bitmap {
+    draw_live_composite_interactive(document, false)
+}
+
+/// The composite with `interactive` set while a transform edit is open:
+/// mask resamples cap at 2048 pixels across for frame rate
+/// (`LayerMask.clipImage`'s `limit: 2048` during mask drags).
+pub fn draw_live_composite_interactive(document: &CanvasDocument, interactive: bool) -> Bitmap {
     let mut canvas = Bitmap::new(document.width.max(1), document.height.max(1));
-    composite_onto(&mut canvas, document);
+    composite_onto_interactive(&mut canvas, document, interactive);
     canvas
 }
 
 /// Composites the document onto an existing canvas-sized bitmap.
 pub fn composite_onto(canvas: &mut Bitmap, document: &CanvasDocument) {
+    composite_onto_interactive(canvas, document, false)
+}
+
+/// `composite_onto` with the interactive flag: mask resamples cap at 2048
+/// pixels across while a transform edit drives the placements.
+pub fn composite_onto_interactive(
+    canvas: &mut Bitmap,
+    document: &CanvasDocument,
+    interactive: bool,
+) {
     clear_effects_cache();
     let order = document.render_layers();
     let by_id: HashMap<uuid::Uuid, &crate::document::ImageLayer> =
@@ -270,6 +287,7 @@ pub fn composite_onto(canvas: &mut Bitmap, document: &CanvasDocument) {
         coverage: HashMap::new(),
         visiting: std::collections::HashSet::new(),
         canvas_size: (canvas.width, canvas.height),
+        interactive,
     };
     let mut i = 0;
     while i < order.len() {
@@ -311,6 +329,9 @@ struct RenderContext<'a> {
     stacks: HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
     stacked: std::collections::HashSet<uuid::Uuid>,
     coverage: HashMap<uuid::Uuid, Option<Bitmap>>,
+    /// A transform edit is driving placements: mask resamples cap for frame
+    /// rate (`LayerMask.clipImage`'s `limit: 2048` during mask drags).
+    interactive: bool,
     visiting: std::collections::HashSet<uuid::Uuid>,
     canvas_size: (usize, usize),
 }
@@ -429,10 +450,13 @@ fn draw_layer_full(
         },
     };
     // The layer's own mask, in its pixel grid.
-    let mut own_mask = layer
-        .mask
-        .as_ref()
-        .and_then(|mask| mask_clip_image(mask, &layer.transform, pixels.width, pixels.height));
+    let mut own_mask = layer.mask.as_ref().and_then(|mask| {
+        if ctx.interactive {
+            mask_clip_image_limited(mask, &layer.transform, pixels.width, pixels.height, Some(2048))
+        } else {
+            mask_clip_image(mask, &layer.transform, pixels.width, pixels.height)
+        }
+    });
 
     // Effects grow the drawn image; the mask is baked into the effect render
     // and drawn with `mask: nil`, so it must not clip the result again.
@@ -483,7 +507,12 @@ fn draw_layer_full(
                         .map(|a| a.image.height)
                         .unwrap_or(folder.transform.size.height.round() as usize)
                         .max(1);
-                    if let Some(placed) = mask_clip_image(mask, &folder.transform, grid_w, grid_h) {
+                    let placed = if ctx.interactive {
+                        mask_clip_image_limited(mask, &folder.transform, grid_w, grid_h, Some(2048))
+                    } else {
+                        mask_clip_image(mask, &folder.transform, grid_w, grid_h)
+                    };
+                    if let Some(placed) = placed {
                         folder_masks.push((placed, mask.placement.unwrap_or(folder.transform)));
                     }
                 }
@@ -579,32 +608,31 @@ fn apply_adjustment_layer(
         for x in 0..target.width {
             let o = (y * target.width + x) * 4;
             let mut src = adjusted.pixel_at(o);
-            if scope.is_some() {
-                let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5);
-                let m = scope
-                    .as_ref()
-                    .map(|(grid, placement)| mask_alpha_at(grid, placement, doc))
-                    .unwrap_or(1.0);
-                for c in 0..4 {
-                    src[c] = (src[c] as f32 * m) as u8;
-                }
-            }
             if opacity < 1.0 {
                 // The pending adjustment shows at the layer's effective
-                // opacity; below that the original content shows through.
+                // opacity; below that the original content shows through
+                // (CIBlendWithMask against the original).
                 for c in 0..4 {
                     let mixed = original.data[o + c] as f32
                         + (src[c] as f32 - original.data[o + c] as f32) * opacity;
                     src[c] = mixed.round().clamp(0.0, 255.0) as u8;
                 }
             }
-            if src[3] == 0 {
-                continue;
+            // BrushRaster.draw uses .copy: the adjusted pixels REPLACE the
+            // backdrop — coverage is whatever the adjustment produced, never
+            // stacked (Swift's 128/32 stay 128/32). The adjustment's clip
+            // blends the copy over the backdrop by the mask's soft edge
+            // (`adjustmentClip`).
+            let clip = scope
+                .as_ref()
+                .map(|(grid, placement)| {
+                    mask_alpha_at(grid, placement, CGPoint::new(x as f64 + 0.5, y as f64 + 0.5))
+                })
+                .unwrap_or(1.0);
+            for c in 0..4 {
+                let out = src[c] as f32 * clip + target.data[o + c] as f32 * (1.0 - clip);
+                target.data[o + c] = out.round().clamp(0.0, 255.0) as u8;
             }
-            let s = crate::raster::unpremultiply_f32(src);
-            let dst = crate::raster::unpremultiply_f32(target.pixel_at(o));
-            let out = composite_pixel(crate::blend::LayerBlendMode::Normal, dst, s);
-            target.data[o..o + 4].copy_from_slice(&crate::raster::premultiply_f32(out));
         }
     }
 }
@@ -1079,6 +1107,38 @@ mod tests {
         assert_eq!(thumb.pixel(2, 2)[0], 0);
         // A 1×1 reveal-all solid keeps edge tone 255 (empty-frame default).
         assert_eq!(mask_edge_tone(&Bitmap::new(0, 0)), 255);
+    }
+
+    /// The interactive composite caps mask resamples at 2048 pixels across
+    /// while a transform edit drives the placements (`clipImage`'s
+    /// `limit: 2048` during mask drags); the plain path keeps full size.
+    #[test]
+    fn interactive_composite_caps_mask_resamples() {
+        let mut doc = CanvasDocument::new(4000, 2000);
+        let mut image = Bitmap::new(400, 200);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        let mut layer = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(image, Bitmap::new(4, 2), "G"),
+            CGPoint::ZERO,
+        );
+        let mut mask = crate::document::LayerMask::solid(true);
+        {
+            let big = std::sync::Arc::make_mut(&mut mask.asset.image);
+            *big = Bitmap::new(4096, 2048);
+        }
+        // The mask moved apart: its resample spans the layer grid.
+        mask.placement = Some(LayerTransform::new(
+            CGPoint::new(100.0, 100.0),
+            CGSize::new(3600.0, 1800.0),
+        ));
+        layer.mask = Some(mask);
+        doc.layers = vec![layer];
+        let plain = draw_live_composite(&doc);
+        assert_eq!((plain.width, plain.height), (4000, 2000));
+        let interactive = draw_live_composite_interactive(&doc, true);
+        assert_eq!((interactive.width, interactive.height), (4000, 2000));
     }
 
     /// A placed mask resampled into its layer grid repeats identically from
@@ -1602,3 +1662,4 @@ mod tests {
         assert_eq!(out.pixel(12, 5)[3], 0);
     }
 }
+

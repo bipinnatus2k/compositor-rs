@@ -229,10 +229,7 @@ fn curves_identity_preserves_alpha() {
 
 /// Swift `adjustmentBlendAndSoftMaskPreserveCoverage` — the live-adjustment
 /// half: the hue rotation reworks the composite while preserving each pixel's
-/// coverage. Swift's multiply and soft-mask steps are not reproduced: the
-/// Rust compositor stacks the masked/blended adjustment over the base instead
-/// of bounding the result to the base's coverage (alphas 160/60 rather than
-/// 128/32) — recorded as a gap.
+/// coverage (`BrushRaster.draw`'s .copy replace, not a stacking source-over).
 #[test]
 fn adjustment_preserves_coverage() {
     let mut s = EditorSession::new();
@@ -249,11 +246,10 @@ fn adjustment_preserves_coverage() {
     // Opaque coverage is reworked in place.
     assert_eq!(p[0..4], [0, 255, 0, 255]);
     assert_eq!(p[12..16], [0, 0, 0, 0]);
-    // Swift keeps the semi-transparent pixels' coverage too (alphas 128/32);
-    // the Rust compositor stacks the adjusted copy over the base (alphas
-    // 192/60) — recorded as a gap.
-    assert_eq!(p[7], 192);
-    assert_eq!(p[11], 60);
+    // The semi-transparent pixels keep their coverage too (alphas 128/32):
+    // the adjusted pixels replace the backdrop instead of stacking over it.
+    assert_eq!(p[7], 128);
+    assert_eq!(p[11], 32);
 }
 
 /// Swift `AdjustmentEditorTests.invertAppliesWithoutAnEditor`. In Swift the

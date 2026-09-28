@@ -1296,6 +1296,17 @@ impl AppState {
         cx.notify();
     }
 
+    /// The composite for canvas display: mask resamples cap at 2048 pixels
+    /// while a transform edit drives the placements (`clipImage`'s
+    /// interactive `limit`).
+    pub fn composite_bitmap(&self, document: &CanvasDocument) -> Bitmap {
+        if self.current_tab().session.transform_edit.is_some() {
+            compositor_core::render::draw_live_composite_interactive(document, true)
+        } else {
+            compositor_core::render::draw_live_composite(document)
+        }
+    }
+
     /// Re-encodes the JPEG export sheet's live preview when the options
     /// changed (`JPEGExportSheet.task(id: options)`): the encoded bytes are
     /// kept so Export writes the preview's own data, and OK stays disabled
@@ -1437,7 +1448,7 @@ impl AppState {
         {
             let mut doc = document.clone();
             override_pixels(&mut doc, preview, *base_transform);
-            return Some(render::draw_live_composite(&doc));
+            return Some(self.composite_bitmap(&doc));
         }
         // A pixel move shows the lifted pixels rebuilt at the offset, placed
         // by the layer's own transform (the rebuilt grid is the layer's).
@@ -1446,7 +1457,7 @@ impl AppState {
                 if let Some(layer) = self.current_tab().session.active_layer() {
                     let mut doc = document.clone();
                     override_pixels(&mut doc, &pixels, layer.transform);
-                    return Some(render::draw_live_composite(&doc));
+                    return Some(self.composite_bitmap(&doc));
                 }
             }
         }
@@ -1455,7 +1466,7 @@ impl AppState {
             let result = edit.result();
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(render::draw_live_composite(&doc));
+            return Some(self.composite_bitmap(&doc));
         }
         // A Smudge / Liquify stroke shows its document-size working copy in
         // place of the layer, exactly as the Swift canvas does.
@@ -1469,7 +1480,7 @@ impl AppState {
                     document.size(),
                 ),
             );
-            return Some(render::draw_live_composite(&doc));
+            return Some(self.composite_bitmap(&doc));
         }
         // The Shape tool previews its layer live while dragging.
         if let Some(CanvasDrag::Shape { .. }) = &self.drag {
@@ -1482,7 +1493,7 @@ impl AppState {
                 );
                 layer.transform = compositor_core::transform::LayerTransform::new(rect.origin, rect.size);
                 doc.layers.push(layer);
-                return Some(render::draw_live_composite(&doc));
+                return Some(self.composite_bitmap(&doc));
             }
         }
         // A gradient drag previews the fill.
@@ -1490,7 +1501,7 @@ impl AppState {
             let result = self.gradient_result(edit, *start);
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(render::draw_live_composite(&doc));
+            return Some(self.composite_bitmap(&doc));
         }
         Some(render::draw_live_composite(document))
     }
