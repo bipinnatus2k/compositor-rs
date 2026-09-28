@@ -902,6 +902,16 @@ mod tests {
             // Canvas keys
             ("enter", "compositor::FinishLasso", "Compositor"),
             ("escape", "compositor::CancelAction", "Compositor"),
+            // Inline text editor spacing (not user-rebindable, no context so
+            // they outrank the input's own alt-arrow bindings).
+            ("alt-left", "compositor::InlineTextTrackingTighten", ""),
+            ("alt-right", "compositor::InlineTextTrackingLoosen", ""),
+            ("alt-up", "compositor::InlineTextLeadingTighten", ""),
+            ("alt-down", "compositor::InlineTextLeadingLoosen", ""),
+            ("alt-shift-left", "compositor::InlineTextTrackingTightenMore", ""),
+            ("alt-shift-right", "compositor::InlineTextTrackingLoosenMore", ""),
+            ("alt-shift-up", "compositor::InlineTextLeadingTightenMore", ""),
+            ("alt-shift-down", "compositor::InlineTextLeadingLoosenMore", ""),
         ];
 
         let registry = ShortcutRegistry::new();

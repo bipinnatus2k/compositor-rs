@@ -727,6 +727,12 @@ impl AppState {
         // While the inline canvas text editor owns the keyboard, its keys
         // route first (`CanvasTextView.keyDown`): ⌘Return finishes, Escape
         // cancels, Option-arrows step the spacing, everything else types.
+        // The Option-arrows normally arrive as actions instead —
+        // `keys::inline_text_bindings` binds them above the text system's
+        // own alt-arrow bindings and the overlay div's handlers consume
+        // them — so this gate's spacing arms are a fallback that only fires
+        // when no binding matched (they can never double-step: a consumed
+        // keystroke never reaches this listener).
         if self.inline_text_focused(window, cx) {
             use crate::inline_text::InlineTextKey;
             if let Some(action) = inline_text_key(

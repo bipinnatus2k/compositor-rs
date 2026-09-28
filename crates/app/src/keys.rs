@@ -59,6 +59,15 @@ actions!(compositor, [
     NudgePixelsLeft, NudgePixelsRight, NudgePixelsUp, NudgePixelsDown,
     NudgePixelsLeftMore, NudgePixelsRightMore, NudgePixelsUpMore, NudgePixelsDownMore,
     BrushSmaller, BrushLarger, FinishLasso, CancelAction,
+    // Inline text editor spacing (CanvasTextView.keyDown's Option-arrows).
+    // Their bindings carry no context, so they outrank the input's own
+    // alt-arrow bindings (word move / extra cursors) whenever the inline
+    // editor's overlay div sits on the dispatch path; elsewhere nothing
+    // handles them and the next binding (the input's) still applies.
+    InlineTextTrackingTighten, InlineTextTrackingLoosen,
+    InlineTextTrackingTightenMore, InlineTextTrackingLoosenMore,
+    InlineTextLeadingTighten, InlineTextLeadingLoosen,
+    InlineTextLeadingTightenMore, InlineTextLeadingLoosenMore,
 ]);
 
 /// Every key binding, bound globally so menus show hints and canvas keys work
@@ -278,7 +287,32 @@ pub(crate) fn bindings_tracked(
     // Finish a polygonal lasso / cancel the active canvas edit or sheet.
     bind!(out, ids, registry, "canvas.apply", FinishLasso);
     bind!(out, ids, registry, "canvas.cancel", CancelAction);
+    out.extend(inline_text_bindings());
     out
+}
+
+/// The inline editor's Option-arrow spacing chords, bound without a context
+/// on purpose. gpui ranks bindings by the depth of the context they match
+/// and then by insertion order; a context-less binding matches the full
+/// stack, so these outrank gpui-base's input bindings (`alt-left` moves by
+/// word, `shift-alt-up` adds a cursor) which would otherwise consume the
+/// keystroke before the canvas's bubble-phase key listener ever ran —
+/// starving tracking/leading while the inline editor is focused
+/// (`CanvasTextView.keyDown`, InlineTextEditor.swift:12-22). When the focus
+/// is elsewhere no handler is on the dispatch path, the binding falls
+/// through, and the input keeps its own word movement.
+pub(crate) fn inline_text_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("alt-left", InlineTextTrackingTighten, None),
+        KeyBinding::new("alt-right", InlineTextTrackingLoosen, None),
+        KeyBinding::new("alt-up", InlineTextLeadingTighten, None),
+        KeyBinding::new("alt-down", InlineTextLeadingLoosen, None),
+        // Shift makes each step ten, as in the Swift editor.
+        KeyBinding::new("alt-shift-left", InlineTextTrackingTightenMore, None),
+        KeyBinding::new("alt-shift-right", InlineTextTrackingLoosenMore, None),
+        KeyBinding::new("alt-shift-up", InlineTextLeadingTightenMore, None),
+        KeyBinding::new("alt-shift-down", InlineTextLeadingLoosenMore, None),
+    ]
 }
 
 #[cfg(test)]
@@ -300,6 +334,61 @@ mod tests {
             binding.action().name(),
             binding.predicate().map(|p| p.to_string()),
         )
+    }
+
+    /// The inline spacing chords are bound without a context (the full
+    /// context stack matches, so they outrank the input's `Input`-scoped
+    /// alt-arrow bindings), every step chord is present, and none of them
+    /// collides with a registry chord.
+    #[test]
+    fn inline_text_spacing_bindings_shadow_the_input() {
+        let registry = ShortcutRegistry::new();
+        let registry_chords: Vec<String> = bindings_with(&registry)
+            .iter()
+            .filter(|b| {
+                !b.action()
+                    .name()
+                    .starts_with("compositor::InlineTextTracking")
+                    && !b.action().name().starts_with("compositor::InlineTextLeading")
+            })
+            .map(|b| {
+                b.keystrokes()
+                    .iter()
+                    .map(|k| k.inner().unparse())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        let bindings = inline_text_bindings();
+        assert_eq!(bindings.len(), 8);
+        let expected = [
+            ("alt-left", "InlineTextTrackingTighten"),
+            ("alt-right", "InlineTextTrackingLoosen"),
+            ("alt-up", "InlineTextLeadingTighten"),
+            ("alt-down", "InlineTextLeadingLoosen"),
+            ("alt-shift-left", "InlineTextTrackingTightenMore"),
+            ("alt-shift-right", "InlineTextTrackingLoosenMore"),
+            ("alt-shift-up", "InlineTextLeadingTightenMore"),
+            ("alt-shift-down", "InlineTextLeadingLoosenMore"),
+        ];
+        for (keystroke, action) in expected {
+            let binding = bindings
+                .iter()
+                .find(|b| b.action().name() == &format!("compositor::{action}"))
+                .unwrap_or_else(|| panic!("missing binding for {action}"));
+            assert_eq!(
+                binding.keystrokes()[0].inner().unparse(),
+                keystroke,
+                "{action}"
+            );
+            // No context: the binding matches the full context stack, which
+            // is what ranks it above the input's own alt-arrow bindings.
+            assert!(binding.predicate().is_none(), "{action}");
+            assert!(
+                !registry_chords.contains(&keystroke.to_string()),
+                "{keystroke} is also a registry chord"
+            );
+        }
     }
 
     /// `rebuild_with`'s precondition: regenerating the app bindings from the

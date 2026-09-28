@@ -541,6 +541,19 @@ impl AppState {
                 cx.stop_propagation();
             },
         );
+        // Option-arrow spacing while the input owns the keyboard
+        // (`CanvasTextView.keyDown`): the chords are bound to these actions
+        // (`keys::inline_text_bindings`) so they outrank the text system's
+        // own alt-arrow bindings; the handlers stop propagation, or the
+        // caret would also jump by words / grow extra cursors.
+        let on_tracking_tighten = cx.listener(Self::on_inline_tracking_tighten);
+        let on_tracking_loosen = cx.listener(Self::on_inline_tracking_loosen);
+        let on_tracking_tighten_more = cx.listener(Self::on_inline_tracking_tighten_more);
+        let on_tracking_loosen_more = cx.listener(Self::on_inline_tracking_loosen_more);
+        let on_leading_tighten = cx.listener(Self::on_inline_leading_tighten);
+        let on_leading_loosen = cx.listener(Self::on_inline_leading_loosen);
+        let on_leading_tighten_more = cx.listener(Self::on_inline_leading_tighten_more);
+        let on_leading_loosen_more = cx.listener(Self::on_inline_leading_loosen_more);
         Some(
             gpui_kit::div()
                 .id("inline-text-editor")
@@ -550,6 +563,14 @@ impl AppState {
                 .w(px(overlay.size.0))
                 .h(px(overlay.size.1))
                 .on_mouse_down(MouseButton::Left, on_press)
+                .on_action(on_tracking_tighten)
+                .on_action(on_tracking_loosen)
+                .on_action(on_tracking_tighten_more)
+                .on_action(on_tracking_loosen_more)
+                .on_action(on_leading_tighten)
+                .on_action(on_leading_loosen)
+                .on_action(on_leading_tighten_more)
+                .on_action(on_leading_loosen_more)
                 .child(
                     Textarea::new(&input)
                         .appearance(false)
@@ -564,6 +585,96 @@ impl AppState {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Option-left tightens the tracking by one step; Shift makes ten
+    /// (`CanvasTextView.keyDown`, InlineTextEditor.swift:18-19).
+    pub fn on_inline_tracking_tighten(
+        &mut self,
+        _: &crate::keys::InlineTextTrackingTighten,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_tracking(-1.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Option-right loosens the tracking by one step; Shift makes ten.
+    pub fn on_inline_tracking_loosen(
+        &mut self,
+        _: &crate::keys::InlineTextTrackingLoosen,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_tracking(1.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Shift-Option-left tightens the tracking by ten.
+    pub fn on_inline_tracking_tighten_more(
+        &mut self,
+        _: &crate::keys::InlineTextTrackingTightenMore,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_tracking(-10.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Shift-Option-right loosens the tracking by ten.
+    pub fn on_inline_tracking_loosen_more(
+        &mut self,
+        _: &crate::keys::InlineTextTrackingLoosenMore,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_tracking(10.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Option-up closes the leading by one step; Shift makes ten
+    /// (`adjust_text_leading`'s `down = false`).
+    pub fn on_inline_leading_tighten(
+        &mut self,
+        _: &crate::keys::InlineTextLeadingTighten,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_leading(false, 1.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Option-down opens the leading by one step; Shift makes ten.
+    pub fn on_inline_leading_loosen(
+        &mut self,
+        _: &crate::keys::InlineTextLeadingLoosen,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_leading(true, 1.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Shift-Option-up closes the leading by ten.
+    pub fn on_inline_leading_tighten_more(
+        &mut self,
+        _: &crate::keys::InlineTextLeadingTightenMore,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_leading(false, 10.0, cx);
+        cx.stop_propagation();
+    }
+
+    /// Shift-Option-down opens the leading by ten.
+    pub fn on_inline_leading_loosen_more(
+        &mut self,
+        _: &crate::keys::InlineTextLeadingLoosenMore,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_text_leading(true, 10.0, cx);
+        cx.stop_propagation();
     }
 
     /// Which resize handle a press at `doc` lands on, if a draft is open
