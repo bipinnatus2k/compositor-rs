@@ -49,9 +49,7 @@ fn sheet_title(kind: SheetKind) -> &'static str {
         SheetKind::CanvasSize => "Canvas Size",
         SheetKind::ExportPng => "Export PNG",
         SheetKind::ExportJpeg => "Export JPEG",
-        SheetKind::Import => "Import Images",
         SheetKind::SaveComp => "Save Project",
-        SheetKind::Open => "Open",
         SheetKind::Trim => "Trim",
         SheetKind::About => "About Compositor",
         // Confirm/Alert titles come from the presenting flow at render time.
@@ -369,22 +367,7 @@ impl AppState {
                     ))
                     .child(sheet_row("Anchor", anchor_picker(anchor, cx)));
             }
-            SheetKind::Import => {
-                let sheet = self.sheet.as_ref().unwrap();
-                body = body
-                    .child(sheet_row(
-                        "Path",
-                        Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
-                    ))
-                    .child(sheet_row(
-                        "",
-                        text_label(
-                            "PNG/JPEG files import as new layers, centered; separate several paths with ';'. A .psd imports as Photoshop layers.",
-                            true,
-                        ),
-                    ));
-            }
-            SheetKind::ExportPng | SheetKind::SaveComp | SheetKind::Open => {
+            SheetKind::ExportPng | SheetKind::SaveComp => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let hint = match kind {
                     SheetKind::ExportPng => "The composited canvas is written as a PNG.",
@@ -611,8 +594,7 @@ impl AppState {
                 return;
             }
             Some(
-                SheetKind::Open
-                | SheetKind::SaveComp
+                SheetKind::SaveComp
                 | SheetKind::ExportPng
                 | SheetKind::ExportJpeg
                 | SheetKind::ImageSize
@@ -879,50 +861,9 @@ impl AppState {
                 let url = path_or_none(&path);
                 self.finish_pending_export_jpeg(url, &data, window, cx);
             }
-            SheetKind::Import => {
-                let path = self.sheet_path(cx);
-                let paths: Vec<std::path::PathBuf> = path
-                    .split(';')
-                    .map(|part| part.trim())
-                    .filter(|part| !part.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                let failures = self.tab().session.import_images(&paths, None);
-                if failures.is_empty() {
-                    if !paths.is_empty() {
-                        self.set_status(format!("Imported {}", path), cx);
-                    }
-                } else {
-                    self.set_status(failures.join("; "), cx);
-                }
-                self.fit_for = (0, 0);
-            }
             SheetKind::SaveComp => {
                 let url = path_or_none(&self.sheet_path(cx));
                 self.finish_pending_save(url, window, cx);
-            }
-            SheetKind::Open => {
-                let path = self.sheet_path(cx);
-                let paths: Vec<std::path::PathBuf> = path
-                    .split(';')
-                    .map(|part| part.trim())
-                    .filter(|part| !part.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                // `.comp` paths go through the workspace's open flow
-                // (two-phase finish); anything else keeps the legacy image /
-                // Photoshop import into the current tab.
-                let (projects, others): (Vec<_>, Vec<_>) = paths
-                    .into_iter()
-                    .partition(|p| crate::project::is_project_file(p));
-                let opened = self.workspace.finish_open(projects);
-                if opened {
-                    self.request_refit();
-                }
-                for other in others {
-                    self.open_document(&other.to_string_lossy(), cx);
-                }
-                self.touch(cx);
             }
             SheetKind::Trim => {
                 let (based_on, sides, tolerance) = {

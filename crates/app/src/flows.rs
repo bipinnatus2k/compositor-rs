@@ -18,6 +18,31 @@ use crate::tabs::ProjectTab;
 pub(crate) const DELETE_LIVE_MASK_INFO: &str = "Bake keeps the current masked appearance in the dependent layers’ pixels. Remove Links reveals their pixels. You can undo either choice.";
 
 impl AppState {
+    /// Canvas / tab-bar file drops route through the workspace's `receive`:
+    /// `.comp` packages open as projects, images import at the drop point of
+    /// the current tab (`ImageFileDrop.importProviders` -> `workspace.receive`).
+    /// Failures surface in the status line.
+    pub fn receive_dropped_files(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let at = self.drop_point_doc.take();
+        let destination = self.workspace.selected_id();
+        let failures = self
+            .workspace
+            .receive(&paths, Some(destination), at);
+        if !failures.is_empty() {
+            self.set_status(failures.join("; "), cx);
+        }
+        self.fit_for = (0, 0);
+        self.touch(cx);
+    }
+
+
     /// Runs a closure with the current tab's (controller, session, busy)
     /// triple — the shape every controller entry point takes.
     pub(crate) fn with_current_tab<R>(
@@ -92,7 +117,28 @@ impl AppState {
                 self.open_sheet(sheet_kind, window, cx);
             }
             Pending::Open => {
-                self.open_sheet(SheetKind::Open, window, cx);
+                // The native multi-select panel (Swift's NSOpenPanel): .comp
+                // packages and images, multiple allowed.
+                let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+                    files: true,
+                    directories: true,
+                    multiple: true,
+                    prompt: None,
+                });
+                cx.spawn(async move |this, cx| {
+                    let picked = receiver
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    this.update(cx, |this, cx| {
+                        this.workspace.finish_open(picked);
+                        this.touch(cx);
+                    })
+                    .ok();
+                })
+                .detach();
             }
             Pending::Confirm { step, message, .. } => {
                 self.open_sheet(SheetKind::Confirm, window, cx);
@@ -426,9 +472,6 @@ impl AppState {
     /// guard (Swift's panel Cancel runs the same completion with nil).
     pub(crate) fn cancel_pending_sheet(&mut self, cx: &mut Context<Self>) {
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
-            Some(SheetKind::Open) => {
-                self.workspace.finish_open(Vec::new());
-            }
             Some(SheetKind::SaveComp) => {
                 self.pending_save = None;
                 self.with_current_tab(|controller, session, busy| {

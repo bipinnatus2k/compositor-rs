@@ -11,6 +11,7 @@ use gpui_kit::{
     ScrollWheelEvent, ScrollDelta, Window,
 };
 use gpui_kit::Styled;
+use gpui_kit::{DragMoveEvent, ExternalPaths};
 
 use compositor_core::canvas::CropDragMode;
 use compositor_core::document::LayoutGrid;
@@ -80,6 +81,25 @@ impl AppState {
             .flex_1()
             .overflow_hidden()
             .bg(rgb(0x232326))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                // File drags tint the canvas (Swift highlights the drop area).
+                style.bg(gpui_kit::rgb(0x2a2f3a))
+            })
+            .on_drag_move::<ExternalPaths>(cx.listener(
+                |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {
+                    // Remember the hover point in document coordinates: the
+                    // drop lands its imports there (ImageFileDrop's point).
+                    let local =
+                        this.local_position(event.event.position);
+                    this.drop_point_doc = Some(this.screen_to_doc(local.0, local.1));
+                },
+            ))
+            .on_drop::<ExternalPaths>(cx.listener(
+                |this, dropped: &ExternalPaths, _window, cx| {
+                    let paths = dropped.paths().to_vec();
+                    this.receive_dropped_files(paths, cx);
+                },
+            ))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.canvas_mouse_down(event, window, cx);
             }))

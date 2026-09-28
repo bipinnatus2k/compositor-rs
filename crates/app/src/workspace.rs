@@ -322,6 +322,7 @@ impl AppState {
         use gpui_kit::component::button::{Button, ButtonVariants};
         use gpui_kit::component::tab::{Tab, TabBar};
         use gpui_kit::component::{Disableable, Selectable};
+        use gpui_kit::{DragMoveEvent, ExternalPaths};
 
         let can_switch = self.workspace.can_switch();
         let selected = self.workspace.selected_id();
@@ -387,6 +388,7 @@ impl AppState {
         );
 
         gpui_kit::div()
+            .id("tab-strip")
             .flex()
             .items_center()
             .h(px(34.0))
@@ -395,6 +397,22 @@ impl AppState {
             .bg(crate::ui::panel_bg())
             .border_b_1()
             .border_color(gpui_kit::black().opacity(0.4))
+            // Dropping files on the strip opens them (into=nil: images get
+            // their own tabs, packages load) — `ProjectTabs`' strip target.
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.bg(gpui_kit::rgb(0x33383f))
+            })
+            .on_drop::<ExternalPaths>(cx.listener(
+                |this, dropped: &ExternalPaths, _window, cx| {
+                    let paths = dropped.paths().to_vec();
+                    let failures = this.workspace.receive(&paths, None, None);
+                    if !failures.is_empty() {
+                        this.set_status(failures.join("; "), cx);
+                    }
+                    this.fit_for = (0, 0);
+                    this.touch(cx);
+                },
+            ))
             .child(bar)
             .into_any_element()
     }
@@ -564,7 +582,36 @@ impl AppState {
         }
     }
     fn on_import_images(&mut self, _: &keys::ImportImages, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::Import, _w, cx);
+        // The native multi-select panel (Swift's showsImporter flow).
+        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = receiver
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default()
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                if picked.is_empty() {
+                    return;
+                }
+                let failures = this.tab().session.import_images(&picked, None);
+                if failures.is_empty() {
+                    this.set_status(format!("Imported {} images", picked.len()), cx);
+                } else {
+                    this.set_status(failures.join("; "), cx);
+                }
+                this.fit_for = (0, 0);
+                this.touch(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
     fn on_close_document(&mut self, _: &keys::CloseDocument, w: &mut Window, cx: &mut Context<Self>) {
         // `close(_:)` (:89-96): confirm unsaved changes, then remove the tab.

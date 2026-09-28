@@ -108,9 +108,7 @@ pub enum SheetKind {
     CanvasSize,
     ExportPng,
     ExportJpeg,
-    Import,
     SaveComp,
-    Open,
     Trim,
     About,
     /// The unsaved-changes alert (`Pending::Confirm`): Save / Cancel /
@@ -400,6 +398,9 @@ pub struct AppState {
     pub inline_text_caret_phase: std::time::Instant,
     /// The Type tool's in-progress box drag (`textBoxRect`).
     pub text_box_rect: Option<CGRect>,
+    /// Where an external file drag hovers, in document coordinates — the
+    /// import lands there on drop (`ImageFileDrop`'s drop point).
+    pub drop_point_doc: Option<CGPoint>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
     key_epoch: std::time::Instant,
     /// A save panel raised mid-flow (a confirmation's Save button): the tab
@@ -590,6 +591,7 @@ impl AppState {
             inline_text_pushed: None,
             inline_text_caret_phase: std::time::Instant::now(),
             text_box_rect: None,
+            drop_point_doc: None,
             key_epoch: std::time::Instant::now(),
             pending_save: None,
             filter_seed: time_seed(),

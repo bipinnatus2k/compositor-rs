@@ -165,16 +165,8 @@ impl AppState {
                 preset: 0,
                 ..base
             },
-            SheetKind::Import => SheetState {
-                path: self.make_input("./image.png", window, cx),
-                ..base
-            },
             SheetKind::SaveComp => SheetState {
                 path: self.make_input("./project.comp", window, cx),
-                ..base
-            },
-            SheetKind::Open => SheetState {
-                path: self.make_input("./image.png", window, cx),
                 ..base
             },
             SheetKind::Trim | SheetKind::About | SheetKind::Confirm | SheetKind::Alert => base,
