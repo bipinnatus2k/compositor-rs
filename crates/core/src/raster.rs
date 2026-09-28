@@ -897,7 +897,7 @@ fn gaussian_kernel(sigma: f64, radius: usize) -> Vec<f32> {
 }
 
 /// Tight bounds of nonzero coverage in a mask region: port of
-/// `heal_coverage_bounds` (HealPixels.c). Returns None when empty.
+/// `raster::coverage_bounds`
 pub fn coverage_bounds(mask: &GrayMask) -> Option<CGRect> {
     let mut min_x = mask.width as isize;
     let mut min_y = mask.height as isize;

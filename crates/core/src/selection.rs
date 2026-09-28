@@ -301,7 +301,8 @@ fn offset_ring(ring: &[CGPoint], d: f64, outward: bool) -> Vec<CGPoint> {
     result
 }
 
-fn line_to_points(line: &LineString<f64>) -> Vec<CGPoint> {    let mut pts: Vec<CGPoint> = line
+fn line_to_points(line: &LineString<f64>) -> Vec<CGPoint> {
+    let mut pts: Vec<CGPoint> = line
         .coords()
         .map(|c| CGPoint::new(c.x, c.y))
         .collect();

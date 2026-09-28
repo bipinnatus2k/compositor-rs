@@ -11,19 +11,6 @@ const OUTSIDE: u8 = 0;
 const RING: u8 = 1;
 const HOLE: u8 = 2;
 
-/// Tight bounds of nonzero coverage (`heal_coverage_bounds`). Returns
-/// (x0, y0, x1, y1) or None when empty.
-pub fn heal_coverage_bounds(gray: &GrayMask) -> Option<(usize, usize, usize, usize)> {
-    crate::raster::coverage_bounds(gray).map(|r| {
-        (
-            r.min_x() as usize,
-            r.min_y() as usize,
-            r.max_x() as usize,
-            r.max_y() as usize,
-        )
-    })
-}
-
 #[inline]
 fn heal_hash(mut x: u32) -> u32 {
     x ^= x >> 16;

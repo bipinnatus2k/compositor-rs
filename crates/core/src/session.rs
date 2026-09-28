@@ -4965,8 +4965,29 @@ impl EditorSession {
             .map(|a| a.image.as_ref().clone())?;
         let source = document.layer(floating.source_id).cloned()?;
         let (asset, merged_transform, merged_mask) = floating_merge(&pixels, &edit.draft, &source)?;
-        // The selection moves with the pixels.
+        // The selection moves with the pixels: a distortion carries the
+        // outline through DistortWarp.mapPath, an affine through the matrix
+        // (FloatingSelection.swift:80-100).
         let moved = self.selection().and_then(|selection| {
+            if let Some(corners) = edit.corners {
+                let placement = crate::raster::pixel_to_document(
+                    &floating.original,
+                    floating.pixel_size.width.max(1.0),
+                    floating.pixel_size.height.max(1.0),
+                );
+                return crate::tools::distort::map_path(
+                    &selection.path,
+                    &placement,
+                    floating.pixel_size,
+                    &edit.draft,
+                    &corners,
+                )
+                .map(|path| crate::selection::DocumentSelection {
+                    path,
+                    antialiased: selection.antialiased,
+                    feather: selection.feather,
+                });
+            }
             let matrix = Self::floating_selection_transform(edit)?;
             Some(crate::selection::DocumentSelection {
                 path: selection.path.transformed(&matrix),

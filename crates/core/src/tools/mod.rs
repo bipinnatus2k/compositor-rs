@@ -4,7 +4,6 @@
 //! `SubjectRemoval.swift`, `HealPixels.c`, `WandPixels.c`, `ContentFill.c`.
 
 pub mod brush;
-pub mod clone_stamp;
 pub mod distort;
 pub mod content_fill;
 pub mod heal;

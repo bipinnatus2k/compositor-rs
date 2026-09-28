@@ -1579,11 +1579,12 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         paint_line(window, bounds, *position, *vertical, rgba(0x00c8ffcc));
     }
 
-    // Selection outline: dark under-stroke + white dashes ("marching ants").
+    // Selection outline: a white solid line under an animated black dash
+    // (TransformOverlay.drawSelection's marching ants).
     for ring in &scene.selection {
         if ring.len() >= 3 {
-            paint_polygon(window, ring, rgba(0x000000aa), false);
-            paint_polygon(window, ring, rgba(0xffffffff), true);
+            paint_polygon(window, ring, rgba(0xffffffff), false);
+            paint_polygon(window, ring, rgba(0x000000ff), true);
         }
     }
 
@@ -1591,8 +1592,8 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
     if let Some(rings) = &scene.lasso {
         for ring in rings {
             if ring.len() >= 2 {
-                paint_polygon(window, ring, rgba(0x000000aa), false);
-                paint_polygon(window, ring, rgba(0xffffffff), true);
+                paint_polygon(window, ring, rgba(0xffffffff), false);
+                paint_polygon(window, ring, rgba(0x000000ff), true);
             }
         }
     }

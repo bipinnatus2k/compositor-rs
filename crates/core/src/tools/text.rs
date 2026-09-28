@@ -38,14 +38,16 @@ fn font_cache() -> &'static Mutex<HashMap<String, Option<fontdue::Font>>> {
 /// any installed font so text never hard-fails on an unknown name.
 pub fn load_font(name: &str) -> Option<fontdue::Font> {
     let key = name.to_lowercase();
-    if let Some(cached) = font_cache().lock().ok()?.get(&key) {
+    // The cache holds only plain values, so a poisoned lock (a parse panic)
+    // is recovered instead of masquerading as "no font".
+    let mut cache = font_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
     let loaded = find_font_file(&key).and_then(parse_font_file);
-    font_cache()
-        .lock()
-        .ok()?
-        .insert(key, loaded.clone());
+    cache.insert(key, loaded.clone());
     loaded
 }
 

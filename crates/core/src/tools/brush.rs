@@ -102,8 +102,6 @@ pub struct RasterEdit {
     /// deposition engine (`MetalBrushCoverage`): every sample but the newest
     /// has been through the Catmull–Rom subdivision.
     segments: Vec<StrokeSegment>,
-    /// Solid fill color overriding the brush color (`fill`).
-    fill_color: Option<[u8; 4]>,
     /// The provisional straight tail from the newest settled sample to the
     /// cursor. Preview only: the engine renders it separately, so the next
     /// sample replaces it exactly (`drawTail`/`removeTail`).
@@ -218,7 +216,6 @@ impl RasterEdit {
             distance_to_next: 0.0,
             samples: Vec::new(),
             segments: Vec::new(),
-            fill_color: None,
             tail_segment: None,
             selection_clip,
             clone: None,
@@ -310,7 +307,8 @@ impl RasterEdit {
 
     /// Mouse samples arrive sparsely, so dabs follow a Catmull–Rom curve
     /// through them, with a provisional straight tail until the next sample.
-    pub fn append(&mut self, point: CGPoint) {        if !point.x.is_finite()
+    pub fn append(&mut self, point: CGPoint) {
+        if !point.x.is_finite()
             || !point.y.is_finite()
             || point.x.abs() > 10_000_000.0
             || point.y.abs() > 10_000_000.0
@@ -718,12 +716,12 @@ impl RasterEdit {
     pub fn result(&self) -> Bitmap {
         let mut out = self.base.clone();
         let opacity = self.settings.opacity as f32;
-        let color: [u8; 4] = self.fill_color.unwrap_or([
+        let color: [u8; 4] = [
             (self.settings.red * 255.0).round() as u8,
             (self.settings.green * 255.0).round() as u8,
             (self.settings.blue * 255.0).round() as u8,
             255,
-        ]);
+        ];
         let erase = self.settings.erasing && !self.is_mask;
         let heal = self.settings.healing && !self.is_mask;
         let coverage = self.effective_coverage();
@@ -883,7 +881,8 @@ impl RasterEdit {
                 let o = (y * self.width + x) * 4;
                 let mut c = [0u8; 4];
                 for k in 0..4 {
-                    c[k] = (colors[0][k] as f32 * (1.0 - t) + colors[1][k] as f32 * t) as u8;
+                    c[k] =
+                        (colors[0][k] as f32 * (1.0 - t) + colors[1][k] as f32 * t).round() as u8;
                 }
                 source_over_scaled(&mut out.data[o..o + 4], c, 255, alpha);
             }
@@ -1191,6 +1190,7 @@ fn segment_density(p: CGPoint, segment: &StrokeSegment, params: &ContinuousParam
 }
 
 
+#[cfg(test)]
 fn render_one(params: &ContinuousParams, w: usize, h: usize) -> ContinuousTile {
     let mut tile = ContinuousTile {
         permanent: vec![0.0; w * h],
