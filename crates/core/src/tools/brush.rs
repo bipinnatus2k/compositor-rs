@@ -600,6 +600,13 @@ impl RasterEdit {
     /// nearby texture (`HealPixels.c`) into the stroke's starting pixels —
     /// never the dark wash shown while painting — and clears the coverage, so
     /// `result()` is the healed pixels. False when there was nothing to heal.
+    ///
+    /// Instead of materializing the whole `(max side + 32) * 3.2` search
+    /// region (hundreds of megabytes for a long stroke), only the kernel's
+    /// reachable area is copied — the work box plus its patch-search reach
+    /// (`heal::trim_heal_region`) — with the grain keys kept in the full
+    /// region's coordinate system, so the healed pixels are bit-identical to
+    /// the full-region copy (`heal_reference` in tests locks this).
     pub fn heal(&mut self, mode: i32, seed: u32) -> bool {
         if self.is_mask || !self.settings.healing || !self.has_paint() {
             return false;
@@ -612,8 +619,10 @@ impl RasterEdit {
             return false;
         };
         let region = heal_region(painted, self.width, self.height);
-        let (rx, ry) = (region.min_x() as usize, region.min_y() as usize);
-        let (rw, rh) = (region.width() as usize, region.height() as usize);
+        let trimmed = crate::tools::heal::trim_heal_region(painted, region);
+        let work = trimmed.as_ref().map(|t| t.rect).unwrap_or(region);
+        let (rx, ry) = (work.min_x() as usize, work.min_y() as usize);
+        let (rw, rh) = (work.width() as usize, work.height() as usize);
         let mut sub_base = Bitmap::new(rw, rh);
         let mut sub_coverage = GrayMask::new(rw, rh);
         for row in 0..rh {
@@ -625,7 +634,20 @@ impl RasterEdit {
             );
         }
         let opacity = self.settings.opacity as f32;
-        if !crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed) {
+        let healed = match &trimmed {
+            Some(t) => crate::tools::heal::spot_heal_offset(
+                &mut sub_base,
+                &sub_coverage,
+                opacity,
+                mode,
+                seed,
+                t.key_dx,
+                t.key_dy,
+                t.key_w,
+            ),
+            None => crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed),
+        };
+        if !healed {
             // The heal failed (e.g. no RING pixels inside the work box). The
             // dark wash preview must not survive as real pixels — the caller
             // ignores this return value and paints the snapshot regardless —
@@ -1212,7 +1234,207 @@ fn segment_distance_squared(p: CGPoint, segment: &StrokeSegment) -> f64 {
 /// The `continuousBrush` kernel, per tile: permanent paint and the
 /// replaceable tail stay separate — tail previews never accumulate into
 /// permanent paint, including at self-intersections.
+///
+/// Segments are culled per tile: each is bucketed into the tile rows its
+/// influence capsule (grid-space AABB) can touch, so a pixel only visits
+/// segments whose capsule can reach it. Outside a segment's capsule both the
+/// hard tip's coverage and the soft tip's integrated density are exactly 0,
+/// and buckets keep the segments in their original order — so every pixel
+/// performs the same arithmetic over the same values as the uncalled kernel
+/// (`render_continuous_tile_reference`) and the output is bit-identical.
 pub fn render_continuous_tile(tile: &mut ContinuousTile, params: &ContinuousParams) {
+    let settled_len = params.settled.len();
+    let total = settled_len + params.tail.len();
+    let hard = params.hardness >= 1.0;
+    // A segment's contribution is exactly 0 outside its support: the tip
+    // radius for soft tips (density is 0 at and beyond the rim), radius +
+    // antialias/2 for hard tips (pixel-edge coverage clamps to 0). The
+    // padding absorbs floating-point slack in the distance arithmetic; a
+    // segment inside the padding still gets computed, only skipped segments
+    // are provably zero.
+    let reach = params.radius + if hard { params.antialias * 0.5 } else { 0.0 } + 1.0e-3;
+
+    // Grid-space (tile pixel) AABB per segment: the document-space capsule
+    // bounds pushed through the inverse grid mapping. A pixel contributes
+    // only if its center maps inside the capsule, hence inside this AABB.
+    let det = params.axis_x.x * params.axis_y.y - params.axis_x.y * params.axis_y.x;
+    let invertible = det.is_finite() && det != 0.0;
+    let w_max = tile.width as i64;
+    let h_max = tile.height as i64;
+    let mut seg_x0 = vec![0i64; total];
+    let mut seg_x1 = vec![0i64; total];
+    let mut seg_y0 = vec![0usize; total];
+    let mut seg_y1 = vec![0usize; total];
+    let mut seg_active = vec![false; total];
+    for i in 0..total {
+        let segment = segment_at(params, i, settled_len);
+        let (mut x_lo, mut x_hi, mut y_lo, mut y_hi) =
+            (0i64, w_max - 1, 0usize, h_max.saturating_sub(1) as usize);
+        // A non-invertible grid mapping (or a degenerate tile) keeps every
+        // segment in every row: culling is an optimization, never a filter
+        // that could drop a contributing segment.
+        let mut active = !invertible || w_max == 0 || h_max == 0;
+        if invertible && w_max > 0 && h_max > 0 {
+            let (s0x, s0y, s1x, s1y) = (
+                segment[0] as f64,
+                segment[1] as f64,
+                segment[2] as f64,
+                segment[3] as f64,
+            );
+            let dx0 = s0x.min(s1x) - reach;
+            let dx1 = s0x.max(s1x) + reach;
+            let dy0 = s0y.min(s1y) - reach;
+            let dy1 = s0y.max(s1y) + reach;
+            // Map the AABB's corners back to grid coordinates; the image of
+            // the rectangle is their convex hull, contained in the corners'
+            // grid-space AABB.
+            let (ax, ay) = (params.axis_x.x, params.axis_x.y);
+            let (bx, by) = (params.axis_y.x, params.axis_y.y);
+            let mut gx_lo = f64::INFINITY;
+            let mut gx_hi = f64::NEG_INFINITY;
+            let mut gy_lo = f64::INFINITY;
+            let mut gy_hi = f64::NEG_INFINITY;
+            let mut ok = true;
+            for (cx, cy) in [(dx0, dy0), (dx0, dy1), (dx1, dy0), (dx1, dy1)] {
+                let ddx = cx - params.origin.x;
+                let ddy = cy - params.origin.y;
+                let lx = (by * ddx - bx * ddy) / det;
+                let ly = (ax * ddy - ay * ddx) / det;
+                if !lx.is_finite() || !ly.is_finite() {
+                    ok = false;
+                    break;
+                }
+                gx_lo = gx_lo.min(lx);
+                gx_hi = gx_hi.max(lx);
+                gy_lo = gy_lo.min(ly);
+                gy_hi = gy_hi.max(ly);
+            }
+            if ok {
+                // Pixel x covers grid coordinate x + 0.5; round outward.
+                let px_lo = ((gx_lo - 0.5).floor() as i64).max(0);
+                let px_hi = ((gx_hi - 0.5).ceil() as i64).min(w_max - 1);
+                let py_lo = ((gy_lo - 0.5).floor() as i64).max(0);
+                let py_hi = ((gy_hi - 0.5).ceil() as i64).min(h_max - 1);
+                if px_lo <= px_hi && py_lo <= py_hi {
+                    x_lo = px_lo;
+                    x_hi = px_hi;
+                    y_lo = py_lo as usize;
+                    y_hi = py_hi as usize;
+                    active = true;
+                }
+            }
+        }
+        seg_x0[i] = x_lo;
+        seg_x1[i] = x_hi;
+        seg_y0[i] = y_lo;
+        seg_y1[i] = y_hi;
+        seg_active[i] = active;
+    }
+
+    // Row buckets: rows are filled by walking the segments in order, so each
+    // row's list keeps the original segment order.
+    let mut row_offsets = vec![0u32; tile.height + 1];
+    for i in 0..total {
+        if seg_active[i] {
+            for count in &mut row_offsets[seg_y0[i] + 1..=seg_y1[i] + 1] {
+                *count += 1;
+            }
+        }
+    }
+    for i in 1..row_offsets.len() {
+        row_offsets[i] += row_offsets[i - 1];
+    }
+    let mut cursor = row_offsets.clone();
+    let mut entries = vec![0u32; row_offsets[tile.height] as usize];
+    for i in 0..total {
+        if seg_active[i] {
+            for y in seg_y0[i]..=seg_y1[i] {
+                entries[cursor[y] as usize] = i as u32;
+                cursor[y] += 1;
+            }
+        }
+    }
+
+    for y in 0..tile.height {
+        let row = &entries[row_offsets[y] as usize..row_offsets[y + 1] as usize];
+        for x in 0..tile.width {
+            let index = y * tile.width + x;
+            let local = (x as f64 + 0.5, y as f64 + 0.5);
+            let p = CGPoint::new(
+                params.origin.x + local.0 * params.axis_x.x + local.1 * params.axis_y.x,
+                params.origin.y + local.0 * params.axis_x.y + local.1 * params.axis_y.y,
+            );
+            if p.x < 0.0
+                || p.y < 0.0
+                || p.x >= params.canvas.width
+                || p.y >= params.canvas.height
+            {
+                tile.preview[index] = 0;
+                continue;
+            }
+            if params.hardness >= 1.0 {
+                let mut settled = f64::INFINITY;
+                let mut tail = f64::INFINITY;
+                for &i in row {
+                    let i = i as usize;
+                    if (x as i64) < seg_x0[i] || (x as i64) > seg_x1[i] {
+                        continue;
+                    }
+                    let d = segment_distance_squared(p, segment_at(params, i, settled_len));
+                    if i < settled_len {
+                        settled = settled.min(d);
+                    } else {
+                        tail = tail.min(d);
+                    }
+                }
+                let value = (tile.permanent[index] as f64)
+                    .max(brush_coverage(settled, params.radius, params.hardness, params.antialias));
+                tile.permanent[index] = value as f32;
+                tile.preview[index] = (255.0
+                    * value.max(brush_coverage(tail, params.radius, params.hardness, params.antialias)))
+                    .round() as u8;
+            } else {
+                let mut value = tile.permanent[index] as f64;
+                let mut tail = 0.0;
+                for &i in row {
+                    let i = i as usize;
+                    if (x as i64) < seg_x0[i] || (x as i64) > seg_x1[i] {
+                        continue;
+                    }
+                    let d = segment_density(p, segment_at(params, i, settled_len), params);
+                    if i < settled_len {
+                        value += d;
+                    } else {
+                        tail += d;
+                    }
+                }
+                tile.permanent[index] = (value.min(20.0)) as f32;
+                tile.preview[index] =
+                    (255.0 * (1.0 - (-(value + tail).min(20.0)).exp())).round() as u8;
+            }
+        }
+    }
+}
+
+/// The bucketed kernel visits `params.settled` and `params.tail` as one
+/// index space in original order.
+#[inline]
+fn segment_at<'a>(
+    params: &'a ContinuousParams<'a>,
+    i: usize,
+    settled_len: usize,
+) -> &'a StrokeSegment {
+    if i < settled_len {
+        &params.settled[i]
+    } else {
+        &params.tail[i - settled_len]
+    }
+}
+
+/// The uncalled kernel, kept as the bit-exactness reference the bucketed
+/// `render_continuous_tile` is tested against.
+#[cfg(test)]
+fn render_continuous_tile_reference(tile: &mut ContinuousTile, params: &ContinuousParams) {
     for y in 0..tile.height {
         for x in 0..tile.width {
             let index = y * tile.width + x;
@@ -2009,5 +2231,251 @@ mod heal_tests {
             [220, 30, 30, 255],
             "the failed heal leaves the layer untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod cull_tests {
+    use super::*;
+
+    /// Bit-exactness of the row-bucketed kernel against the uncalled
+    /// reference: every pixel must produce identical `permanent` and
+    /// `preview` bytes.
+    fn assert_bit_identical(params: &ContinuousParams, w: usize, h: usize, permanent_seed: f32) {
+        let mut culled = ContinuousTile {
+            permanent: vec![permanent_seed; w * h],
+            preview: vec![0; w * h],
+            width: w,
+            height: h,
+        };
+        for (i, v) in culled.permanent.iter_mut().enumerate() {
+            *v = ((i % 13) as f32) * 0.37;
+        }
+        let mut reference = ContinuousTile {
+            permanent: culled.permanent.clone(),
+            preview: culled.preview.clone(),
+            width: w,
+            height: h,
+        };
+        render_continuous_tile(&mut culled, params);
+        render_continuous_tile_reference(&mut reference, params);
+        assert_eq!(culled.permanent, reference.permanent, "permanent diverged");
+        assert_eq!(culled.preview, reference.preview, "preview diverged");
+    }
+
+    fn lcg(seed: u32) -> impl FnMut() -> f64 {
+        let mut s = seed;
+        move || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 8) as f64 / 16777216.0
+        }
+    }
+
+    fn polyline(n: usize, spread: f64, seed: u32) -> Vec<StrokeSegment> {
+        let mut rnd = lcg(seed);
+        let mut points = Vec::with_capacity(n);
+        for _ in 0..n {
+            points.push([(rnd() * spread) as f32, (rnd() * spread) as f32]);
+        }
+        points.windows(2).map(|w| [w[0][0], w[0][1], w[1][0], w[1][1]]).collect()
+    }
+
+    #[test]
+    fn culled_kernel_is_bit_identical_to_the_reference() {
+        // Hard and soft tips, straight and rotated/scaled grid axes, segments
+        // crossing the canvas edge, a live tail, and pre-existing permanent
+        // paint.
+        for &hardness in &[1.0f64, 0.5, 0.0] {
+            for &(ax, ay, bx, by) in &[
+                (1.0, 0.0, 0.0, 1.0),
+                (0.7071067811865476, 0.7071067811865476, -0.7071067811865476, 0.7071067811865476),
+                (2.0, 0.0, 0.0, 0.5),
+                (-1.0, 0.0, 0.0, -1.0),
+            ] {
+                let settled = polyline(24, 180.0, 0xC0FFEE + (hardness * 100.0) as u32);
+                let tail = vec![[40.0f32, 170.0, 190.0, 20.0]];
+                let params = ContinuousParams {
+                    settled: &settled,
+                    tail: &tail,
+                    origin: CGPoint::new(3.0, -2.0),
+                    axis_x: CGPoint::new(ax, ay),
+                    axis_y: CGPoint::new(bx, by),
+                    radius: 9.0,
+                    hardness,
+                    antialias: 1.25,
+                    spacing: 3.0,
+                    // Smaller than the tile: out-of-canvas pixels take the
+                    // zero-preview early path.
+                    canvas: CGSize::new(150.0, 150.0),
+                };
+                assert_bit_identical(&params, 200, 160, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn culled_kernel_matches_with_clicks_and_degenerate_axes() {
+        // Zero-length click segments and a degenerate (non-invertible) grid
+        // mapping fall back to the uncalled path exactly.
+        let settled = vec![[10.0f32, 10.0, 10.0, 10.0], [50.0, 50.0, 50.0, 50.0]];
+        for &hardness in &[1.0f64, 0.3] {
+            let params = ContinuousParams {
+                settled: &settled,
+                tail: &[],
+                origin: CGPoint::ZERO,
+                axis_x: CGPoint::new(1.0, 0.0),
+                axis_y: CGPoint::new(0.0, 1.0),
+                radius: 12.0,
+                hardness,
+                antialias: 1.0,
+                spacing: 2.0,
+                canvas: CGSize::new(80.0, 80.0),
+            };
+            assert_bit_identical(&params, 80, 80, 0.0);
+        }
+        let params = ContinuousParams {
+            settled: &settled,
+            tail: &[],
+            origin: CGPoint::ZERO,
+            axis_x: CGPoint::new(1.0, 0.0),
+            axis_y: CGPoint::new(1.0, 0.0), // singular: no culling
+            radius: 12.0,
+            hardness: 0.5,
+            antialias: 1.0,
+            spacing: 2.0,
+            canvas: CGSize::new(80.0, 80.0),
+        };
+        assert_bit_identical(&params, 80, 80, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod heal_trim_tests {
+    use super::*;
+
+    /// The pre-optimization heal: the full `(max side + 32) * 3.2` region is
+    /// copied and handed to `spot_heal`. The trimmed `heal()` must reproduce
+    /// it byte for byte.
+    fn heal_reference(edit: &mut RasterEdit, mode: i32, seed: u32) -> bool {
+        if edit.is_mask || !edit.settings.healing || !edit.has_paint() {
+            return false;
+        }
+        let coverage_mask = edit.effective_coverage();
+        let painted = match crate::raster::coverage_bounds(&coverage_mask) {
+            Some(p) => p,
+            None => return false,
+        };
+        let region = heal_region(painted, edit.width, edit.height);
+        let (rx, ry) = (region.min_x() as usize, region.min_y() as usize);
+        let (rw, rh) = (region.width() as usize, region.height() as usize);
+        let mut sub_base = Bitmap::new(rw, rh);
+        let mut sub_coverage = GrayMask::new(rw, rh);
+        for row in 0..rh {
+            let src = ((ry + row) * edit.width + rx) * 4;
+            sub_base.data[row * rw * 4..row * rw * 4 + rw * 4]
+                .copy_from_slice(&edit.base.data[src..src + rw * 4]);
+            sub_coverage.data[row * rw..row * rw + rw].copy_from_slice(
+                &coverage_mask.data[(ry + row) * edit.width + rx..(ry + row) * edit.width + rx + rw],
+            );
+        }
+        let opacity = edit.settings.opacity as f32;
+        if !crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed) {
+            edit.coverage = GrayMask::new(edit.width, edit.height);
+            edit.segments.clear();
+            edit.tail_segment = None;
+            return false;
+        }
+        for row in 0..rh {
+            let dst = ((ry + row) * edit.width + rx) * 4;
+            let src = row * rw * 4;
+            edit.base.data[dst..dst + rw * 4].copy_from_slice(&sub_base.data[src..src + rw * 4]);
+        }
+        edit.coverage = GrayMask::new(edit.width, edit.height);
+        edit.segments.clear();
+        edit.tail_segment = None;
+        true
+    }
+
+    fn textured_source(w: usize, h: usize, seed: u32) -> Bitmap {
+        let mut s = seed;
+        let mut img = Bitmap::new(w, h);
+        for px in img.data.chunks_exact_mut(4) {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[0] = 100 + (s >> 24) as u8 / 4;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[1] = 80 + (s >> 24) as u8 / 4;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[2] = 60 + (s >> 24) as u8 / 4;
+            px[3] = 255;
+        }
+        img
+    }
+
+    fn healed_stroke(
+        canvas: CGSize,
+        points: &[(f64, f64)],
+        diameter: f64,
+        hardness: f64,
+    ) -> RasterEdit {
+        let mut edit = RasterEdit::new(
+            Some(textured_source(canvas.width as usize, canvas.height as usize, 7)),
+            LayerTransform::new(CGPoint::ZERO, canvas),
+            false,
+            BrushSettings::default(),
+            canvas,
+            None,
+        );
+        edit.settings.healing = true;
+        edit.settings.diameter = diameter;
+        edit.settings.hardness = hardness;
+        for (x, y) in points {
+            edit.append(CGPoint::new(*x, *y));
+        }
+        edit.flush();
+        edit
+    }
+
+    #[test]
+    fn trimmed_heal_is_bit_identical_to_the_full_region_reference() {
+        let cases: [(CGSize, Vec<(f64, f64)>, f64, f64); 5] = [
+            // Elongated mid-canvas stroke on a tall canvas: the trim bites.
+            (CGSize::new(600.0, 900.0), vec![(80.0, 450.0), (520.0, 450.0)], 10.0, 0.5),
+            // Vertical stroke.
+            (CGSize::new(500.0, 700.0), vec![(250.0, 100.0), (250.0, 600.0)], 8.0, 0.5),
+            // Stroke touching the canvas corner: the work box clips there.
+            (CGSize::new(300.0, 300.0), vec![(4.0, 4.0), (120.0, 6.0)], 8.0, 1.0),
+            // Short click, small canvas.
+            (CGSize::new(60.0, 60.0), vec![(30.0, 30.0)], 12.0, 0.5),
+            // Diagonal stroke.
+            (CGSize::new(400.0, 400.0), vec![(50.0, 50.0), (350.0, 350.0)], 10.0, 0.0),
+        ];
+        for (canvas, points, diameter, hardness) in cases {
+            for mode in 0..3 {
+                for seed in [1u32, 42, 777] {
+                    let mut a = healed_stroke(canvas, &points, diameter, hardness);
+                    let mut b = healed_stroke(canvas, &points, diameter, hardness);
+                    let healed = a.heal(mode, seed);
+                    assert_eq!(healed, heal_reference(&mut b, mode, seed), "return value diverged, mode {mode} seed {seed}");
+                    assert_eq!(a.result().data, b.result().data, "pixels diverged, mode {mode} seed {seed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trim_shrinks_the_elongated_search_region() {
+        // A 440px stroke on a tall canvas: the full region insets by
+        // (max side + 32) * 3.2 on every axis; the trim's vertical extent
+        // follows the stroke's own (small) height instead.
+        let edit = healed_stroke(CGSize::new(600.0, 900.0), &vec![(80.0, 450.0), (520.0, 450.0)], 10.0, 0.5);
+        let coverage = edit.effective_coverage();
+        let painted = crate::raster::coverage_bounds(&coverage).unwrap();
+        let region = heal_region(painted, edit.width, edit.height);
+        let trim = crate::tools::heal::trim_heal_region(painted, region).expect("trim applies");
+        assert!(trim.rect.width() <= region.width() + 1e-9);
+        assert!(trim.rect.height() < region.height() - 1.0, "vertical extent must shrink: {} vs {}", trim.rect.height(), region.height());
+        let trim_area = trim.rect.width() * trim.rect.height();
+        let region_area = region.width() * region.height();
+        assert!(trim_area < region_area * 0.6, "trim {trim_area} vs region {region_area}");
     }
 }

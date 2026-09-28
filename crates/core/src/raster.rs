@@ -431,20 +431,44 @@ pub fn lanczos_sample(src: &Bitmap, x: f64, y: f64) -> [u8; 4] {
     }
     let x0 = x.floor() as isize;
     let y0 = y.floor() as isize;
+    let mut wx = [0.0f64; 6];
+    for (i, tx) in ((x0 - 2)..=(x0 + 3)).enumerate() {
+        wx[i] = lanczos3(tx as f64 - x);
+    }
+    let mut wy = [0.0f64; 6];
+    for (i, ty) in ((y0 - 2)..=(y0 + 3)).enumerate() {
+        wy[i] = lanczos3(ty as f64 - y);
+    }
+    lanczos_taps(src, x, y, x0, &wx, y0, &wy)
+}
+
+/// The 6×6 tap accumulation behind `lanczos_sample`, factored out so callers
+/// with precomputed per-axis weights (`draw_affine`'s axis-aligned
+/// enlargement path) run the identical arithmetic without recomputing
+/// sin/cos per pixel.
+fn lanczos_taps(
+    src: &Bitmap,
+    x: f64,
+    y: f64,
+    x0: isize,
+    wx: &[f64; 6],
+    y0: isize,
+    wy: &[f64; 6],
+) -> [u8; 4] {
     let mut acc = [0.0f64; 4];
     let mut sum = 0.0f64;
-    for ty in (y0 - 2)..=(y0 + 3) {
-        let wy = lanczos3(ty as f64 - y);
-        if wy == 0.0 {
+    for (j, ty) in ((y0 - 2)..=(y0 + 3)).enumerate() {
+        let wyv = wy[j];
+        if wyv == 0.0 {
             continue;
         }
         let yi = clamp_i(ty, 0, src.height as isize - 1) as usize;
-        for tx in (x0 - 2)..=(x0 + 3) {
-            let wx = lanczos3(tx as f64 - x);
-            if wx == 0.0 {
+        for (i, tx) in ((x0 - 2)..=(x0 + 3)).enumerate() {
+            let wxv = wx[i];
+            if wxv == 0.0 {
                 continue;
             }
-            let w = wx * wy;
+            let w = wxv * wyv;
             let p = src.pixel(clamp_i(tx, 0, src.width as isize - 1) as usize, yi);
             for c in 0..4 {
                 acc[c] += p[c] as f64 * w;
@@ -463,23 +487,51 @@ pub fn lanczos_sample(src: &Bitmap, x: f64, y: f64) -> [u8; 4] {
     ]
 }
 
+/// One output line's Lanczos taps: the first tap index and the `2a` kernel
+/// weights (`TapLine::build`).
+struct TapLine {
+    lo: i64,
+    weights: Vec<f64>,
+}
+
+impl TapLine {
+    fn build(center: f64, scale: f64, a: i32) -> TapLine {
+        let span = (a as f64 / scale.min(1.0)).ceil().max(1.0) as i64;
+        let lo = (center - span as f64).ceil() as i64;
+        let hi = (center + span as f64).floor() as i64;
+        let mut weights = Vec::with_capacity((hi - lo + 1).max(0) as usize);
+        for tap in lo..=hi {
+            weights.push(lanczos3((tap as f64 - center) / scale));
+        }
+        TapLine { lo, weights }
+    }
+}
+
 /// Separable Lanczos resize with radius `a` and clamped edges.
+///
+/// Each output column (horizontal pass) and row (vertical pass) owns a fixed
+/// source coordinate, so its tap indices and kernel weights are computed once
+/// into a table and reused for every pixel on that line — the pixel loop only
+/// multiplies and adds, in the same tap order as the uncached kernel.
 pub fn lanczos_resize(src: &Bitmap, w: usize, h: usize, a: i32) -> Bitmap {
     let sx = w as f64 / src.width as f64;
     let sy = h as f64 / src.height as f64;
-    // Horizontal pass.
-    let fx_scale = (a as f64 / sx.min(1.0)).ceil().max(1.0) as i64;
+    // Horizontal pass: one tap table for all `src.height` rows.
+    let htable: Vec<TapLine> = (0..w)
+        .map(|x| TapLine::build((x as f64 + 0.5) / sx - 0.5, sx, a))
+        .collect();
     let mut tmp = Bitmap::new(w, src.height);
     for y in 0..src.height {
         for x in 0..w {
-            let center = (x as f64 + 0.5) / sx - 0.5;
-            let lo = (center - fx_scale as f64).ceil() as i64;
-            let hi = (center + fx_scale as f64).floor() as i64;
+            let line = &htable[x];
             let mut acc = [0.0f64; 4];
             let mut sum = 0.0f64;
-            for tap in lo..=hi {
+            for (k, tap) in (line.lo..).enumerate() {
+                if k >= line.weights.len() {
+                    break;
+                }
+                let lw = line.weights[k];
                 let tap_c = tap.clamp(0, src.width as i64 - 1) as usize;
-                let lw = lanczos3((tap as f64 - center) / sx);
                 let px = src.pixel(tap_c, y);
                 for c in 0..4 {
                     acc[c] += px[c] as f64 * lw;
@@ -492,19 +544,21 @@ pub fn lanczos_resize(src: &Bitmap, w: usize, h: usize, a: i32) -> Bitmap {
             }
         }
     }
-    // Vertical pass.
-    let fy_scale = (a as f64 / sy.min(1.0)).ceil().max(1.0) as i64;
+    // Vertical pass: one tap table for all `w` columns.
+    let vtable: Vec<TapLine> = (0..h)
+        .map(|y| TapLine::build((y as f64 + 0.5) / sy - 0.5, sy, a))
+        .collect();
     let mut out = Bitmap::new(w, h);
-    for y in 0..h {
-        let center = (y as f64 + 0.5) / sy - 0.5;
-        let lo = (center - fy_scale as f64).ceil() as i64;
-        let hi = (center + fy_scale as f64).floor() as i64;
+    for (y, line) in vtable.iter().enumerate() {
         for x in 0..w {
             let mut acc = [0.0f64; 4];
             let mut sum = 0.0f64;
-            for tap in lo..=hi {
+            for (k, tap) in (line.lo..).enumerate() {
+                if k >= line.weights.len() {
+                    break;
+                }
+                let lw = line.weights[k];
                 let tap_c = tap.clamp(0, src.height as i64 - 1) as usize;
-                let lw = lanczos3((tap as f64 - center) / sy);
                 let px = tmp.pixel(x, tap_c);
                 for c in 0..4 {
                     acc[c] += px[c] as f64 * lw;
@@ -650,6 +704,69 @@ pub fn draw_affine(
         && (t.d - 1.0).abs() < 1e-9
         && t.tx.fract() == 0.0
         && t.ty.fract() == 0.0;
+    // Axis-aligned High enlargement: each output column/row owns a fixed
+    // source coordinate, so its six Lanczos weights are computed once per
+    // axis instead of per pixel (the audit's per-pixel sin/cos hot path).
+    // The per-axis weights are exactly the ones `lanczos_sample` would
+    // compute, and `lanczos_taps` accumulates in the same order, so the
+    // output is bit-identical.
+    let axis_aligned_enlarge = !exact
+        && sampling == LayerSampling::High
+        && scale_x.min(scale_y) > 1.0
+        && t.b == 0.0
+        && t.c == 0.0;
+    if axis_aligned_enlarge {
+        let x_lo = clip_rect.min_x() as usize;
+        let x_hi = clip_rect.max_x() as usize;
+        let y_lo = clip_rect.min_y() as usize;
+        let y_hi = clip_rect.max_y() as usize;
+        let mut col_px = vec![0.0f64; x_hi - x_lo];
+        let mut col_x0 = vec![0isize; x_hi - x_lo];
+        let mut col_wx = vec![[0.0f64; 6]; x_hi - x_lo];
+        for (i, x) in (x_lo..x_hi).enumerate() {
+            // t.c == 0 makes the source x independent of the row.
+            let px = CGPoint::new(x as f64 + 0.5, 0.5).applying(&inverse).x;
+            let x0 = px.floor() as isize;
+            let mut wx = [0.0f64; 6];
+            for (k, tx) in ((x0 - 2)..=(x0 + 3)).enumerate() {
+                wx[k] = lanczos3(tx as f64 - px);
+            }
+            col_px[i] = px;
+            col_x0[i] = x0;
+            col_wx[i] = wx;
+        }
+        let mut row_py = vec![0.0f64; y_hi - y_lo];
+        let mut row_y0 = vec![0isize; y_hi - y_lo];
+        let mut row_wy = vec![[0.0f64; 6]; y_hi - y_lo];
+        for (i, y) in (y_lo..y_hi).enumerate() {
+            // t.b == 0 makes the source y independent of the column.
+            let py = CGPoint::new(0.5, y as f64 + 0.5).applying(&inverse).y;
+            let y0 = py.floor() as isize;
+            let mut wy = [0.0f64; 6];
+            for (k, ty) in ((y0 - 2)..=(y0 + 3)).enumerate() {
+                wy[k] = lanczos3(ty as f64 - py);
+            }
+            row_py[i] = py;
+            row_y0[i] = y0;
+            row_wy[i] = wy;
+        }
+        for y in y_lo..y_hi {
+            let i = y - y_lo;
+            let (py, y0, wy) = (row_py[i], row_y0[i], &row_wy[i]);
+            for x in x_lo..x_hi {
+                let j = x - x_lo;
+                let (px, x0, wx) = (col_px[j], col_x0[j], &col_wx[j]);
+                if px < 0.0 || py < 0.0 || px >= source.width as f64 || py >= source.height as f64 {
+                    continue;
+                }
+                let s = lanczos_taps(source, px, py, x0, wx, y0, wy);
+                let d = dst.pixel(x, y);
+                dst.set_pixel(x, y, source_over_u8(d, s));
+            }
+        }
+        use crate::geometry::CGPoint;
+        return;
+    }
     for y in clip_rect.min_y() as usize..clip_rect.max_y() as usize {
         for x in clip_rect.min_x() as usize..clip_rect.max_x() as usize {
             let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&inverse);
@@ -1068,5 +1185,152 @@ mod tests {
         draw_over(&mut dst, &src, crate::geometry::CGRect::new(1.0, 0.0, 1.0, 1.0), LayerSampling::Nearest);
         assert_eq!(dst.pixel(0, 0)[0], 255);
         assert_eq!(dst.pixel(1, 0), [127, 128, 0, 255]);
+    }
+}
+
+#[cfg(test)]
+mod lanczos_opt_tests {
+    use super::*;
+    use crate::geometry::CGPoint;
+
+    fn noise_bitmap(w: usize, h: usize, seed: u32) -> Bitmap {
+        let mut s = seed;
+        let mut img = Bitmap::new(w, h);
+        for px in img.data.chunks_exact_mut(4) {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[0] = (s >> 16) as u8;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[1] = (s >> 16) as u8;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[2] = (s >> 16) as u8;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            px[3] = (s >> 21) as u8 / 2 + 64;
+        }
+        img
+    }
+
+    /// The uncached kernel: every output line recomputes its taps and
+    /// weights. The table-driven `lanczos_resize` must be byte-identical.
+    fn lanczos_resize_reference(src: &Bitmap, w: usize, h: usize, a: i32) -> Bitmap {
+        let sx = w as f64 / src.width as f64;
+        let sy = h as f64 / src.height as f64;
+        let fx_scale = (a as f64 / sx.min(1.0)).ceil().max(1.0) as i64;
+        let mut tmp = Bitmap::new(w, src.height);
+        for y in 0..src.height {
+            for x in 0..w {
+                let center = (x as f64 + 0.5) / sx - 0.5;
+                let lo = (center - fx_scale as f64).ceil() as i64;
+                let hi = (center + fx_scale as f64).floor() as i64;
+                let mut acc = [0.0f64; 4];
+                let mut sum = 0.0f64;
+                for tap in lo..=hi {
+                    let tap_c = tap.clamp(0, src.width as i64 - 1) as usize;
+                    let lw = lanczos3((tap as f64 - center) / sx);
+                    let px = src.pixel(tap_c, y);
+                    for c in 0..4 {
+                        acc[c] += px[c] as f64 * lw;
+                    }
+                    sum += lw;
+                }
+                let o = (y * w + x) * 4;
+                for c in 0..4 {
+                    tmp.data[o + c] = (acc[c] / sum).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        let fy_scale = (a as f64 / sy.min(1.0)).ceil().max(1.0) as i64;
+        let mut out = Bitmap::new(w, h);
+        for y in 0..h {
+            let center = (y as f64 + 0.5) / sy - 0.5;
+            let lo = (center - fy_scale as f64).ceil() as i64;
+            let hi = (center + fy_scale as f64).floor() as i64;
+            for x in 0..w {
+                let mut acc = [0.0f64; 4];
+                let mut sum = 0.0f64;
+                for tap in lo..=hi {
+                    let tap_c = tap.clamp(0, src.height as i64 - 1) as usize;
+                    let lw = lanczos3((tap as f64 - center) / sy);
+                    let px = tmp.pixel(x, tap_c);
+                    for c in 0..4 {
+                        acc[c] += px[c] as f64 * lw;
+                    }
+                    sum += lw;
+                }
+                let o = (y * w + x) * 4;
+                for c in 0..4 {
+                    out.data[o + c] = (acc[c] / sum).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn table_driven_lanczos_resize_is_byte_identical() {
+        // Enlargements and shrinks, integer and fractional ratios, and the
+        // degenerate one-pixel inputs the halving chain can hit.
+        for &(sw, sh, dw, dh) in &[
+            (9usize, 7usize, 23usize, 15usize),
+            (16usize, 16usize, 8usize, 8usize),
+            (7usize, 5usize, 3usize, 11usize),
+            (1usize, 4usize, 5usize, 9usize),
+            (5usize, 1usize, 13usize, 2usize),
+        ] {
+            let src = noise_bitmap(sw, sh, 0xABCD);
+            let a = lanczos_resize(&src, dw, dh, 3);
+            let b = lanczos_resize_reference(&src, dw, dh, 3);
+            assert_eq!(a.data, b.data, "{sw}x{sh} -> {dw}x{dh}");
+        }
+    }
+
+    #[test]
+    fn axis_aligned_high_draw_matches_per_pixel_lanczos() {
+        // The axis-aligned fast path must sample exactly what the general
+        // inverse-mapped loop samples: a per-pixel `lanczos_sample`.
+        let src = noise_bitmap(11, 9, 0x1234);
+        let mut dst = Bitmap::new(33, 25);
+        let t = CGAffineTransform { a: 2.5, b: 0.0, c: 0.0, d: 2.0, tx: 1.25, ty: -0.75 };
+        draw_affine(&mut dst, &src, &t, LayerSampling::High, None);
+        let inverse = t.inverted();
+        let mut reference = Bitmap::new(33, 25);
+        for y in 0..25usize {
+            for x in 0..33usize {
+                let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&inverse);
+                if p.x < 0.0 || p.y < 0.0 || p.x >= src.width as f64 || p.y >= src.height as f64 {
+                    continue;
+                }
+                let s = lanczos_sample(&src, p.x, p.y);
+                let d = reference.pixel(x, y);
+                reference.set_pixel(x, y, source_over_u8(d, s));
+            }
+        }
+        assert_eq!(dst.data, reference.data);
+    }
+
+    #[test]
+    fn rotated_high_draw_still_samples_like_the_general_path() {
+        // A rotated transform must not take the axis-aligned fast path; it
+        // still has to agree with a straight per-pixel `lanczos_sample`
+        // recomposition (guards the fast path's applicability condition).
+        let src = noise_bitmap(9, 7, 0xBEEF);
+        let c = (30.0f64).to_radians().cos();
+        let s = (30.0f64).to_radians().sin();
+        let t = CGAffineTransform { a: 2.0 * c, b: 2.0 * s, c: -2.0 * c, d: 2.0 * s, tx: 3.0, ty: 1.0 };
+        let mut dst = Bitmap::new(24, 24);
+        draw_affine(&mut dst, &src, &t, LayerSampling::High, None);
+        let inverse = t.inverted();
+        let mut reference = Bitmap::new(24, 24);
+        for y in 0..24usize {
+            for x in 0..24usize {
+                let p = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&inverse);
+                if p.x < 0.0 || p.y < 0.0 || p.x >= src.width as f64 || p.y >= src.height as f64 {
+                    continue;
+                }
+                let samp = lanczos_sample(&src, p.x, p.y);
+                let d = reference.pixel(x, y);
+                reference.set_pixel(x, y, source_over_u8(d, samp));
+            }
+        }
+        assert_eq!(dst.data, reference.data);
     }
 }

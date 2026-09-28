@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use crate::geometry::CGRect;
 use crate::raster::{Bitmap, GrayMask};
 
 const OUTSIDE: u8 = 0;
@@ -195,6 +196,26 @@ pub fn spot_heal(
     opacity: f32,
     mode: i32,
     seed: u32,
+) -> bool {
+    let w = rgba.width as i64;
+    spot_heal_offset(rgba, coverage, opacity, mode, seed, 0, 0, w)
+}
+
+/// The kernel's grain keys hash `(iy * w + ix)` in the sub image's own
+/// coordinates. A caller that crops a smaller work region out of a larger
+/// heal region (BrushStroke.heal) can keep the keys — and therefore the
+/// generated grain — identical to the full-region call by passing the
+/// original region's coordinates: `iy + key_dy` and `ix + key_dx` must equal
+/// the pixel's position in the full region, and `key_w` its width.
+pub(crate) fn spot_heal_offset(
+    rgba: &mut Bitmap,
+    coverage: &GrayMask,
+    opacity: f32,
+    mode: i32,
+    seed: u32,
+    key_dx: i64,
+    key_dy: i64,
+    key_w: i64,
 ) -> bool {
     let w = rgba.width as i64;
     let h = rgba.height as i64;
@@ -399,7 +420,11 @@ pub fn spot_heal(
             let amount = coverage.value(ix, iy) as f64 / 255.0 * opacity as f64;
             let mut grain = 0.0f64;
             if !have_source {
-                let key = heal_hash(seed ^ heal_hash((iy as i64 * w + ix as i64) as u32));
+                let key = heal_hash(
+                    seed ^ heal_hash(
+                        ((iy as i64 + key_dy) * key_w + ix as i64 + key_dx) as u32,
+                    ),
+                );
                 let u1 = heal_unit(key);
                 let u2 = heal_unit(key ^ 0x68e31da4);
                 grain = (-2.0 * (1.0 - u1).ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -423,6 +448,76 @@ pub fn spot_heal(
         }
     }
     true
+}
+
+/// The trimmed work region for a heal: the full `region` a BrushStroke.heal
+/// would copy is the painted bounds grown by `(max side + 32) * 3.2`, but the
+/// kernel only ever reads the work box plus patch sources within
+/// `2.8 × work box + 3` of it. `rect` (absolute canvas coordinates, integral,
+/// always within `region`) is the smallest crop that still contains every
+/// pixel the kernel can read while keeping patch validity — "the source box
+/// lies inside the sub image" — identical to the full region, and the
+/// `key_*` fields reproduce the full region's grain-key coordinates.
+pub(crate) struct TrimmedHeal {
+    pub rect: CGRect,
+    pub key_dx: i64,
+    pub key_dy: i64,
+    pub key_w: i64,
+}
+
+/// Computes the trimmed region, replicating `spot_heal`'s work-box derivation
+/// from the painted bounds. None when anything is degenerate (the caller then
+/// copies the full region).
+pub(crate) fn trim_heal_region(painted: CGRect, region: CGRect) -> Option<TrimmedHeal> {
+    let rw = region.width() as i64;
+    let rh = region.height() as i64;
+    if rw <= 0 || rh <= 0 {
+        return None;
+    }
+    // Painted bounds relative to the region, exactly as `spot_heal` derives
+    // them from the cropped coverage mask (max side is the exclusive bound).
+    let bx0 = painted.min_x() as i64 - region.min_x() as i64;
+    let by0 = painted.min_y() as i64 - region.min_y() as i64;
+    let bx1 = bx0 + painted.width() as i64;
+    let by1 = by0 + painted.height() as i64;
+    if bx1 <= bx0 || by1 <= by0 {
+        return None;
+    }
+    let ring = ((bx1 - bx0).max(by1 - by0) / 8).clamp(2, 16);
+    let wx0 = (bx0 - ring).max(0);
+    let wy0 = (by0 - ring).max(0);
+    let wx1 = (bx1 + ring).min(rw);
+    let wy1 = (by1 + ring).min(rh);
+    let ww = wx1 - wx0;
+    let wh = wy1 - wy0;
+    if ww <= 0 || wh <= 0 {
+        return None;
+    }
+    // Patch offsets: |dx| ≤ round(2.8·ww) + 3, |dy| ≤ round(2.8·wh) + 3; the
+    // padding covers that extent with slack. Grain/detail reads reach one
+    // pixel past the work box, well inside the padding.
+    let pad_x = (2.8f64 * ww as f64 + 4.0).ceil() as i64;
+    let pad_y = (2.8f64 * wh as f64 + 4.0).ceil() as i64;
+    let rx = region.min_x() as i64;
+    let ry = region.min_y() as i64;
+    let nx0 = (rx + wx0 - pad_x).max(rx);
+    let ny0 = (ry + wy0 - pad_y).max(ry);
+    let nx1 = (rx + wx1 + pad_x).min(rx + rw);
+    let ny1 = (ry + wy1 + pad_y).min(ry + rh);
+    if nx0 >= nx1 || ny0 >= ny1 {
+        return None;
+    }
+    Some(TrimmedHeal {
+        rect: CGRect::new(
+            nx0 as f64,
+            ny0 as f64,
+            (nx1 - nx0) as f64,
+            (ny1 - ny0) as f64,
+        ),
+        key_dx: nx0 - rx,
+        key_dy: ny0 - ry,
+        key_w: rw,
+    })
 }
 
 #[cfg(test)]
