@@ -19,7 +19,7 @@ use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, Navigatio
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::raster::Bitmap;
 use compositor_core::selection::LassoKind;
-use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
+use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::tools::brush::{GradientShape, RasterEdit};
 
@@ -721,6 +721,26 @@ impl AppState {
         let Some(layer) = document.layer(id) else {
             return;
         };
+        // canPaint (EditorSession+Brush.swift:5-12) splits into the surface
+        // rules and the state guards, both ahead of everything else —
+        // Swift's guard runs before the clone-source handling too.
+        let Some(target) = paint_target(&self.tab().session, &document, layer) else {
+            return;
+        };
+        if !can_paint(&self.tab().session, &document) {
+            return;
+        }
+        let mask_target = target.is_mask;
+        // Spot Healing and Clone Stamp rework image pixels; they have
+        // nothing to do on a mask (EditorSession+Brush.swift:31).
+        if mask_target
+            && matches!(
+                self.tab().session.tool,
+                NavigationTool::SpotHealing | NavigationTool::CloneStamp
+            )
+        {
+            return;
+        }
         // Clone Stamp: option-click sets the source; strokes copy from it.
         if self.tab().session.tool == NavigationTool::CloneStamp {
             if alt {
@@ -744,64 +764,18 @@ impl AppState {
         } else {
             settings.smoothing = 0.0;
         }
-        // canPaint: a mask stroke needs an enabled mask and paints its grid;
-        // layer strokes skip adjustment layers; an empty selection blocks.
-        let mask_target = self.tab().session.is_mask_selected
-            && layer
-                .mask
-                .as_ref()
-                .map(|m| m.is_enabled)
-                .unwrap_or(false);
-        // Spot Healing and Clone Stamp rework image pixels; they have
-        // nothing to do on a mask (EditorSession+Brush.swift:31).
-        if mask_target
-            && matches!(
-                self.tab().session.tool,
-                NavigationTool::SpotHealing | NavigationTool::CloneStamp
-            )
-        {
-            return;
-        }
-        // Groups have no pixels of their own; only their mask is paintable
-        // (canPaint, EditorSession+Brush.swift:7).
-        if layer.is_group && !mask_target {
-            return;
-        }
-        if !mask_target && layer.adjustment.is_some() {
-            return;
-        }
-        if document
-            .selection
-            .as_ref()
-            .map(|s| s.path.is_empty())
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let (source, base_transform, mask) = if mask_target {
-            let m = layer.mask.as_ref().unwrap();
-            // A mask stroke paints white (reveal) or black (hide).
+        // A mask stroke paints white (reveal) or black (hide).
+        if mask_target {
             let v = if self.tab().session.mask_paint_white { 1.0 } else { 0.0 };
             settings.red = v;
             settings.green = v;
             settings.blue = v;
-            (
-                Some(m.asset.image.as_ref().clone()),
-                layer.mask_transform(),
-                true,
-            )
-        } else {
-            (
-                layer.asset.as_ref().map(|a| a.image.as_ref().clone()),
-                layer.transform,
-                false,
-            )
-        };
+        }
         let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
         let mut edit = RasterEdit::new(
-            source,
-            base_transform,
-            mask,
+            target.source,
+            target.base_transform,
+            mask_target,
             settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
@@ -862,6 +836,71 @@ impl AppState {
             document.height,
         ))
     }
+}
+
+/// The paint-surface half of `canPaint` (EditorSession+Brush.swift:5-12),
+/// shared by brush strokes and gradients: a selected, enabled mask is the
+/// surface; groups have no pixels of their own and an adjustment layer's
+/// pixels are not paintable.
+struct PaintTarget {
+    source: Option<Bitmap>,
+    base_transform: compositor_core::transform::LayerTransform,
+    is_mask: bool,
+}
+
+fn paint_target(
+    session: &EditorSession,
+    document: &CanvasDocument,
+    layer: &ImageLayer,
+) -> Option<PaintTarget> {
+    // A selected mask is the ONLY surface, and it must be enabled (:11) —
+    // a disabled or missing mask under a selected mask paints nothing at
+    // all, it does not fall through to the layer's pixels.
+    if session.is_mask_selected {
+        let m = layer.mask.as_ref()?;
+        if !m.is_enabled {
+            return None;
+        }
+        return Some(PaintTarget {
+            source: Some(m.asset.image.as_ref().clone()),
+            base_transform: layer.mask_transform(),
+            is_mask: true,
+        });
+    }
+    // Groups have no pixels of their own; only their mask is paintable (:7).
+    if layer.is_group {
+        return None;
+    }
+    // An adjustment layer's pixels are not paintable (:12).
+    if layer.adjustment.is_some() {
+        return None;
+    }
+    Some(PaintTarget {
+        source: layer.asset.as_ref().map(|a| a.image.as_ref().clone()),
+        base_transform: layer.transform,
+        is_mask: false,
+    })
+}
+
+/// The rest of `canPaint` (:5-12) beyond the surface rules: exactly one
+/// layer selected, the active layer still effectively visible, and an
+/// explicitly empty selection leaves nothing paintable. (`canEditLayers`'s
+/// UI-idle conjuncts stay enforced by the canvas drag gates.)
+fn can_paint(session: &EditorSession, document: &CanvasDocument) -> bool {
+    if session.selected_layer_ids.len() != 1 {
+        return false;
+    }
+    let Some(id) = session.active_layer_id else {
+        return false;
+    };
+    if !document.effective_visible_ids().contains(&id) {
+        return false;
+    }
+    !(document
+        .selection
+        .as_ref()
+        .map(|s| s.path.is_empty())
+        .unwrap_or(false))
 }
 
 /// The Clone Stamp's layer sample (`cloneSample`'s active-layer half,
@@ -1168,41 +1207,20 @@ impl AppState {
         let Some(layer) = document.layer(id) else {
             return;
         };
-        // Same target rules as a brush stroke: a selected enabled mask is
-        // the surface ("Gradient Mask", Gradient.swift:95-99), groups have
-        // no pixels of their own (EditorSession+Brush.swift:7), and an
-        // adjustment layer's pixels are not paintable.
-        let mask_target = self.tab().session.is_mask_selected
-            && layer
-                .mask
-                .as_ref()
-                .map(|m| m.is_enabled)
-                .unwrap_or(false);
-        if layer.is_group && !mask_target {
+        // Gradients land on the same surface under the same canPaint gate
+        // as a brush stroke (Gradient.swift:36-38, EditorSession+Brush.swift:
+        // 5-12) — a drag that would refuse to paint never opens a draft.
+        let Some(target) = paint_target(&self.tab().session, &document, layer) else {
             return;
-        }
-        if !mask_target && layer.adjustment.is_some() {
-            return;
-        }
-        let (source, base_transform, is_mask) = if mask_target {
-            let m = layer.mask.as_ref().unwrap();
-            (
-                Some(m.asset.image.as_ref().clone()),
-                layer.mask_transform(),
-                true,
-            )
-        } else {
-            (
-                layer.asset.as_ref().map(|a| a.image.as_ref().clone()),
-                layer.transform,
-                false,
-            )
         };
+        if !can_paint(&self.tab().session, &document) {
+            return;
+        }
         let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
         let edit = RasterEdit::new(
-            source,
-            base_transform,
-            is_mask,
+            target.source,
+            target.base_transform,
+            target.is_mask,
             self.tab().session.brush_settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
@@ -2006,15 +2024,18 @@ fn ruler_label(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, clone_layer_sample,
-        guide_axis_position, guide_release_deletes, handle_at, nice_tick, ruler_axis_at,
-        ruler_label, shape_drag_rect, transform_press_layer,
+        blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, can_paint,
+        clone_layer_sample, guide_axis_position, guide_release_deletes, handle_at, nice_tick,
+        paint_target, ruler_axis_at, ruler_label, shape_drag_rect, transform_press_layer,
     };
     use crate::state::RULER_SIZE;
     use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, LayerMask, ShapeKind};
     use compositor_core::geometry::{CGPoint, CGRect, CGSize};
     use compositor_core::raster::{Bitmap, ImportedImage};
+    use compositor_core::selection::{DocumentSelection, SelectionPath};
+    use compositor_core::session::EditorSession;
     use compositor_core::transform::LayerTransform;
+    use uuid::Uuid;
 
     fn opaque_layer(width: usize, height: usize, rgba: [u8; 4], origin: CGPoint) -> ImageLayer {
         let mut image = Bitmap::new(width, height);
@@ -2030,6 +2051,75 @@ mod tests {
         assert_eq!(blur_sigma(5.0), 1.5);
         assert_eq!(blur_sigma(200.0), 20.0);
         assert_eq!(blur_sigma(2000.0), 30.0);
+    }
+
+    /// `canPaint` (EditorSession+Brush.swift:5-12) split across
+    /// [`paint_target`] (the surface) and [`can_paint`] (the state guards):
+    /// single selection, effective visibility, explicit-empty selection,
+    /// enabled mask, group/adjustment pixel rules.
+    #[test]
+    fn paint_target_and_can_paint_match_swift_canpaint() {
+        let mut session = EditorSession::new();
+        session.create_document(40, 40, false);
+        session.add_blank_layer();
+        let document = session.document.clone().unwrap();
+        let id = session.active_layer_id.unwrap();
+        let layer = document.layer(id).unwrap().clone();
+
+        // A plain visible layer under a single selection: its own pixels.
+        let target = paint_target(&session, &document, &layer).expect("paintable");
+        assert!(!target.is_mask);
+        assert!(can_paint(&session, &document));
+
+        // A second selected layer breaks canPaint (:6).
+        session.selected_layer_ids.push(Uuid::new_v4());
+        assert!(!can_paint(&session, &document));
+        session.selected_layer_ids.truncate(1);
+
+        // An invisible layer loses effective visibility (:10).
+        session.document.as_mut().unwrap().layer_mut(id).unwrap().is_visible = false;
+        let document = session.document.clone().unwrap();
+        assert!(!can_paint(&session, &document));
+        session.document.as_mut().unwrap().layer_mut(id).unwrap().is_visible = true;
+
+        // An explicitly empty selection paints nothing; a absent selection
+        // paints everywhere (:6).
+        session.document.as_mut().unwrap().selection = Some(DocumentSelection {
+            path: SelectionPath::default(),
+            antialiased: true,
+            feather: 0.0,
+        });
+        let document = session.document.clone().unwrap();
+        assert!(!can_paint(&session, &document));
+        session.document.as_mut().unwrap().selection = None;
+
+        // A group has no pixels of its own: only a mask is a surface (:7).
+        let mut group = opaque_layer(10, 10, [255, 0, 0, 255], CGPoint::ZERO);
+        group.is_group = true;
+        assert!(paint_target(&session, &document, &group).is_none());
+
+        // An enabled, selected mask IS a surface; a disabled one is not
+        // (:11), and with the mask deselected the layer's pixels are.
+        let mut masked = opaque_layer(40, 40, [255, 0, 0, 255], CGPoint::ZERO);
+        let mut mask_image = Bitmap::new(40, 40);
+        for px in mask_image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        masked.mask = Some(LayerMask {
+            asset: ImportedImage::new(mask_image, "mask"),
+            is_enabled: true,
+            placement: None,
+            is_linked: true,
+        });
+        session.is_mask_selected = true;
+        let target = paint_target(&session, &document, &masked).expect("mask paintable");
+        assert!(target.is_mask);
+        masked.mask.as_mut().unwrap().is_enabled = false;
+        assert!(paint_target(&session, &document, &masked).is_none());
+        session.is_mask_selected = false;
+        assert!(!paint_target(&session, &document, &masked)
+            .expect("layer pixels paintable again")
+            .is_mask);
     }
 
     #[test]
