@@ -4,13 +4,13 @@
 //! form whose Create canvas button builds the tab's document, with the
 //! File > Open and File > Import Images flows beside it.
 
-use gpui_kit::{
-    div, px, rgb, Context, DragMoveEvent, ExternalPaths, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Styled,
-};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::{
+    Context, DragMoveEvent, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Styled, div, px, rgb,
+};
 
 use crate::project::Step;
 use crate::sheets_ui::sheet_row;
@@ -30,7 +30,8 @@ pub(crate) const OPEN_PROJECT_LABEL: &str = "Open project";
 pub(crate) const IMPORT_IMAGE_LABEL: &str = "Import image";
 pub(crate) const CREATE_CANVAS_LABEL: &str = "Create canvas";
 
-/// One welcome form field: a whole number from 1 to 30,000.
+/// A Width/Height value the welcome form accepts: a whole number from
+/// 1 to 30,000 (`CanvasDocument.validDimension`).
 pub(crate) fn valid_dimension(value: usize) -> bool {
     (1..=MAX_DIMENSION).contains(&value)
 }
@@ -151,12 +152,12 @@ impl AppState {
                     .label(OPEN_PROJECT_LABEL)
                     .small()
                     .disabled(disabled)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        match this.workspace.open(None) {
+                    .on_click(
+                        cx.listener(|this, _, window, cx| match this.workspace.open(None) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(_) => {}
-                        }
-                    })),
+                        }),
+                    ),
             )
             // File > Import Images' entry point: the same shared flow the
             // menu action runs (workspace.rs `prompt_import_images`), so the
@@ -201,12 +202,10 @@ impl AppState {
                     this.drop_point_doc = Some(this.screen_to_doc(local.0, local.1));
                 },
             ))
-            .on_drop::<ExternalPaths>(cx.listener(
-                |this, dropped: &ExternalPaths, _window, cx| {
-                    let paths = dropped.paths().to_vec();
-                    this.receive_dropped_files(paths, cx);
-                },
-            ))
+            .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
+                let paths = dropped.paths().to_vec();
+                this.receive_dropped_files(paths, cx);
+            }))
             .child(
                 div()
                     .absolute()
@@ -231,18 +230,16 @@ impl AppState {
                             // the panel sees the bare Return and submits. The
                             // validity and busy gates live in `welcome_submit`,
                             // matching the disabled button this mirrors.
-                            .on_key_down(cx.listener(
-                                |this, event: &KeyDownEvent, _, cx| {
-                                    if event.keystroke.key != "enter" {
-                                        return;
-                                    }
-                                    let m = &event.keystroke.modifiers;
-                                    if m.control || m.alt || m.platform || m.shift {
-                                        return;
-                                    }
-                                    this.welcome_submit(cx);
-                                },
-                            ))
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                if event.keystroke.key != "enter" {
+                                    return;
+                                }
+                                let m = &event.keystroke.modifiers;
+                                if m.control || m.alt || m.platform || m.shift {
+                                    return;
+                                }
+                                this.welcome_submit(cx);
+                            }))
                             .child(header)
                             .child(body)
                             .child(footer),
@@ -255,11 +252,11 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        welcome_can_create, welcome_disabled, CREATE_CANVAS_LABEL, IMPORT_IMAGE_LABEL,
-        OPEN_PROJECT_LABEL, WELCOME_SUBTITLE, WELCOME_TITLE,
+        CREATE_CANVAS_LABEL, IMPORT_IMAGE_LABEL, OPEN_PROJECT_LABEL, WELCOME_SUBTITLE,
+        WELCOME_TITLE, welcome_can_create, welcome_disabled,
     };
-    use crate::tabs::ProjectBusy;
     use super::{valid_dimension, welcome_dimension};
+    use crate::tabs::ProjectBusy;
 
     #[test]
     fn welcome_dimension_takes_whole_sizes_from_one_to_thirty_thousand() {

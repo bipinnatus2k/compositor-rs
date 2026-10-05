@@ -1,7 +1,9 @@
 //! The workspace: window layout, the action dispatch for every menu item and
 //! keyboard shortcut, and the status bar.
 
-use gpui_kit::{div, px, rgb, Context, IntoElement, InteractiveElement, ParentElement, Render, Styled, Window};
+use gpui_kit::{
+    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
+};
 
 use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::document::NavigationTool;
@@ -10,8 +12,8 @@ use compositor_core::session::SelectionAmountOperation;
 
 use crate::keys;
 use crate::project::{Pending, Step};
-use crate::state::{AppState, SaveAfter, SheetKind};
-use crate::ui::{text_label, FG_DIM};
+use crate::state::{AppState, FitDims, SaveAfter, SheetKind};
+use crate::ui::{FG_DIM, text_label};
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -224,19 +226,19 @@ fn filter_settings_from_adjustment(
 ) -> compositor_core::filters::FilterSettings {
     let mut settings = compositor_core::filters::FilterSettings::default();
     if let Some(value) = &adjustment.exposure_settings {
-        settings.exposure = value.clone();
+        settings.exposure = *value;
     }
     if let Some(value) = &adjustment.gradient_map_settings {
-        settings.gradient_map = value.clone();
+        settings.gradient_map = *value;
     }
     if let Some(value) = &adjustment.grain_settings {
-        settings.grain = value.clone();
+        settings.grain = *value;
     }
     if let Some(value) = &adjustment.black_white_settings {
-        settings.black_white = value.clone();
+        settings.black_white = *value;
     }
     if let Some(value) = &adjustment.color_balance_settings {
-        settings.color_balance = value.clone();
+        settings.color_balance = *value;
     }
     if let Some(value) = adjustment.blur_radius {
         settings.radius = value;
@@ -318,11 +320,11 @@ impl AppState {
     /// slot. Clicking selects (`workspace.select`, refitting the viewport);
     /// tabs and close buttons disable while `canSwitch` is false.
     pub fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        use gpui_kit::ExternalPaths;
         use gpui_kit::SharedString;
         use gpui_kit::component::button::{Button, ButtonVariants};
         use gpui_kit::component::tab::{Tab, TabBar};
         use gpui_kit::component::{Disableable, Selectable};
-        use gpui_kit::{DragMoveEvent, ExternalPaths};
 
         let can_switch = self.workspace.can_switch();
         let selected = self.workspace.selected_id();
@@ -357,15 +359,15 @@ impl AppState {
                     .ghost()
                     .compact()
                     .disabled(!can_switch)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match this.workspace.close(id) {
+                    .on_click(cx.listener(
+                        move |this, _, window, cx| match this.workspace.close(id) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(()) => {
                                 this.request_refit();
                                 this.touch(cx);
                             }
-                        }
-                    })),
+                        },
+                    )),
             );
             bar = bar.child(tab);
         }
@@ -399,20 +401,16 @@ impl AppState {
             .border_color(gpui_kit::black().opacity(0.4))
             // Dropping files on the strip opens them (into=nil: images get
             // their own tabs, packages load) — `ProjectTabs`' strip target.
-            .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.bg(gpui_kit::rgb(0x33383f))
-            })
-            .on_drop::<ExternalPaths>(cx.listener(
-                |this, dropped: &ExternalPaths, _window, cx| {
-                    let paths = dropped.paths().to_vec();
-                    let failures = this.workspace.receive(&paths, None, None);
-                    if !failures.is_empty() {
-                        this.set_status(failures.join("; "), cx);
-                    }
-                    this.fit_for = (0, 0);
-                    this.touch(cx);
-                },
-            ))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(gpui_kit::rgb(0x33383f)))
+            .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
+                let paths = dropped.paths().to_vec();
+                let failures = this.workspace.receive(&paths, None, None);
+                if !failures.is_empty() {
+                    this.set_status(failures.join("; "), cx);
+                }
+                this.fit_for = FitDims::REFIT;
+                this.touch(cx);
+            }))
             .child(bar)
             .into_any_element()
     }
@@ -469,10 +467,14 @@ impl AppState {
         self.hotkey(w, cx, |t, _w, cx| t.set_tool_eraser(cx));
     }
     fn on_tool_healing(&mut self, _: &keys::ToolHealing, w: &mut Window, cx: &mut Context<Self>) {
-        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::SpotHealing, cx));
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.set_tool(NavigationTool::SpotHealing, cx)
+        });
     }
     fn on_tool_clone(&mut self, _: &keys::ToolClone, w: &mut Window, cx: &mut Context<Self>) {
-        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::CloneStamp, cx));
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.set_tool(NavigationTool::CloneStamp, cx)
+        });
     }
     fn on_tool_smear(&mut self, _: &keys::ToolSmear, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Blur, cx));
@@ -486,8 +488,15 @@ impl AppState {
     fn on_tool_type(&mut self, _: &keys::ToolType, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Type, cx));
     }
-    fn on_tool_eyedropper(&mut self, _: &keys::ToolEyedropper, w: &mut Window, cx: &mut Context<Self>) {
-        self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Eyedropper, cx));
+    fn on_tool_eyedropper(
+        &mut self,
+        _: &keys::ToolEyedropper,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hotkey(w, cx, |t, _w, cx| {
+            t.set_tool(NavigationTool::Eyedropper, cx)
+        });
     }
     fn on_tool_hand(&mut self, _: &keys::ToolHand, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| t.set_tool(NavigationTool::Hand, cx));
@@ -502,13 +511,23 @@ impl AppState {
             t.touch(cx);
         });
     }
-    fn on_default_colors(&mut self, _: &keys::DefaultColors, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_default_colors(
+        &mut self,
+        _: &keys::DefaultColors,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hotkey(w, cx, |t, _w, cx| {
             t.tab().session.reset_palette_colors();
             t.touch(cx);
         });
     }
-    fn on_cycle_tool_mode(&mut self, _: &keys::CycleToolMode, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_cycle_tool_mode(
+        &mut self,
+        _: &keys::CycleToolMode,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hotkey(w, cx, |t, _w, cx| t.cycle_tool_mode(cx));
     }
 
@@ -539,13 +558,11 @@ impl AppState {
     /// `save(asNew:)` (:25-29): a known destination writes straight to disk;
     /// otherwise the save panel's pending surfaces and the sheet finishes it.
     fn start_save(&mut self, as_new: bool, w: &mut Window, cx: &mut Context<Self>) {
-        let result = self.with_current_tab(|controller, session, busy| {
-            controller.save(session, busy, as_new)
-        });
+        let result = self
+            .with_current_tab(|controller, session, busy| controller.save(session, busy, as_new));
         match result {
             Step::Pending(Pending::SaveAs { default_name, .. }) => {
-                self.pending_save =
-                    Some((self.workspace.selected_id(), SaveAfter::Nothing));
+                self.pending_save = Some((self.workspace.selected_id(), SaveAfter::Nothing));
                 self.present_pending(
                     Pending::SaveAs {
                         as_new,
@@ -566,25 +583,35 @@ impl AppState {
         }
     }
     fn on_export(&mut self, _: &keys::ExportPng, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(|controller, session, busy| {
-            controller.export_png(session, busy)
-        }) {
+        match self
+            .with_current_tab(|controller, session, busy| controller.export_png(session, busy))
+        {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
     fn on_export_jpeg(&mut self, _: &keys::ExportJpeg, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(|controller, session, busy| {
-            controller.export_jpeg(session, busy)
-        }) {
+        match self
+            .with_current_tab(|controller, session, busy| controller.export_jpeg(session, busy))
+        {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
-    fn on_import_images(&mut self, _: &keys::ImportImages, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_import_images(
+        &mut self,
+        _: &keys::ImportImages,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.prompt_import_images(cx);
     }
-    fn on_close_document(&mut self, _: &keys::CloseDocument, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_close_document(
+        &mut self,
+        _: &keys::CloseDocument,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // `close(_:)` (:89-96): confirm unsaved changes, then remove the tab.
         match self.workspace.close(self.workspace.selected_id()) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
@@ -609,20 +636,35 @@ impl AppState {
     fn on_undo(&mut self, _: &keys::Undo, _w: &mut Window, cx: &mut Context<Self>) {
         // A restored document of a different size refits the viewport
         // (EditorSession.undo → viewport.fit).
-        let before = self.tab().session.document.as_ref().map(|d| (d.id, d.width, d.height));
+        let before = self
+            .tab()
+            .session
+            .document
+            .as_ref()
+            .map(|d| (d.id, d.width, d.height));
         self.tab().session.undo();
         self.refit_if_document_changed(before);
         self.touch(cx);
     }
     fn on_redo(&mut self, _: &keys::Redo, _w: &mut Window, cx: &mut Context<Self>) {
-        let before = self.tab().session.document.as_ref().map(|d| (d.id, d.width, d.height));
+        let before = self
+            .tab()
+            .session
+            .document
+            .as_ref()
+            .map(|d| (d.id, d.width, d.height));
         self.tab().session.redo();
         self.refit_if_document_changed(before);
         self.touch(cx);
     }
     /// Refits the viewport when undo/redo swapped in a different document.
     fn refit_if_document_changed(&mut self, before: Option<(uuid::Uuid, usize, usize)>) {
-        let after = self.tab().session.document.as_ref().map(|d| (d.id, d.width, d.height));
+        let after = self
+            .tab()
+            .session
+            .document
+            .as_ref()
+            .map(|d| (d.id, d.width, d.height));
         if before.is_some() && before != after {
             let vw = f32::from(self.viewport.size.width);
             let vh = f32::from(self.viewport.size.height);
@@ -631,15 +673,30 @@ impl AppState {
             }
         }
     }
-    fn on_fill_foreground(&mut self, _: &keys::FillForeground, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_fill_foreground(
+        &mut self,
+        _: &keys::FillForeground,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let color = color_bytes(self.tab().session.palette_color(false));
         self.fill_active(color, "Fill Foreground", cx);
     }
-    fn on_fill_background(&mut self, _: &keys::FillBackground, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_fill_background(
+        &mut self,
+        _: &keys::FillBackground,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let color = color_bytes(self.tab().session.palette_color(true));
         self.fill_active(color, "Fill Background", cx);
     }
-    fn on_free_transform(&mut self, _: &keys::FreeTransform, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_free_transform(
+        &mut self,
+        _: &keys::FreeTransform,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // transformCommand: the selection floats when there is one (FloatingSelection.swift:22).
         if self.tab().session.can_transform_selection() {
             self.tab().session.begin_selection_transform();
@@ -656,17 +713,17 @@ impl AppState {
 
     fn on_image_size(&mut self, _: &keys::ImageSize, w: &mut Window, cx: &mut Context<Self>) {
         // `imageSize()` (:76-87): guard + begin, then the Image Size sheet.
-        match self.with_current_tab(|controller, session, busy| {
-            controller.image_size(session, busy)
-        }) {
+        match self
+            .with_current_tab(|controller, session, busy| controller.image_size(session, busy))
+        {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
     fn on_canvas_size(&mut self, _: &keys::CanvasSize, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(|controller, session, busy| {
-            controller.canvas_size(session, busy)
-        }) {
+        match self
+            .with_current_tab(|controller, session, busy| controller.canvas_size(session, busy))
+        {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
@@ -677,19 +734,34 @@ impl AppState {
             Step::Done(()) => {}
         }
     }
-    fn on_crop_to_selection(&mut self, _: &keys::CropToSelection, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selection) = self.tab().session.selection() {
-            if let Some(bounds) = selection.path.bounds() {
-                self.tab().session.crop_rect = Some(bounds);
-                self.set_status("Crop to selection: press Apply in the Crop header", cx);
-            }
+    fn on_crop_to_selection(
+        &mut self,
+        _: &keys::CropToSelection,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(selection) = self.tab().session.selection()
+            && let Some(bounds) = selection.path.bounds()
+        {
+            self.tab().session.crop_rect = Some(bounds);
+            self.set_status("Crop to selection: press Apply in the Crop header", cx);
         }
     }
-    fn on_flip_canvas_h(&mut self, _: &keys::FlipCanvasHorizontal, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_flip_canvas_h(
+        &mut self,
+        _: &keys::FlipCanvasHorizontal,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.flip_canvas(true);
         self.touch(cx);
     }
-    fn on_flip_canvas_v(&mut self, _: &keys::FlipCanvasVertical, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_flip_canvas_v(
+        &mut self,
+        _: &keys::FlipCanvasVertical,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.flip_canvas(false);
         self.touch(cx);
     }
@@ -697,22 +769,47 @@ impl AppState {
     fn on_levels(&mut self, _: &keys::LevelsSheet, _w: &mut Window, cx: &mut Context<Self>) {
         self.open_levels_panel(cx);
     }
-    fn on_hue_saturation(&mut self, _: &keys::HueSaturationSheet, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_hue_saturation(
+        &mut self,
+        _: &keys::HueSaturationSheet,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_hue_saturation_panel(cx);
     }
     fn on_curves(&mut self, _: &keys::CurvesSheet, _w: &mut Window, cx: &mut Context<Self>) {
         self.open_filter_panel(FilterKind::Curves, cx);
     }
-    fn on_filter_black_white(&mut self, _: &keys::FilterBlackWhite, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_black_white(
+        &mut self,
+        _: &keys::FilterBlackWhite,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::BlackWhite, cx);
     }
-    fn on_filter_color_balance(&mut self, _: &keys::FilterColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_color_balance(
+        &mut self,
+        _: &keys::FilterColorBalance,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::ColorBalance, cx);
     }
-    fn on_filter_exposure(&mut self, _: &keys::FilterExposure, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_exposure(
+        &mut self,
+        _: &keys::FilterExposure,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::Exposure, cx);
     }
-    fn on_filter_gradient_map(&mut self, _: &keys::FilterGradientMap, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_gradient_map(
+        &mut self,
+        _: &keys::FilterGradientMap,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::GradientMap, cx);
     }
     fn on_filter_grain(&mut self, _: &keys::FilterGrain, _w: &mut Window, cx: &mut Context<Self>) {
@@ -725,7 +822,12 @@ impl AppState {
         self.tab().session.add_blank_layer();
         self.touch(cx);
     }
-    fn on_duplicate_layer(&mut self, _: &keys::DuplicateLayer, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_duplicate_layer(
+        &mut self,
+        _: &keys::DuplicateLayer,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // layerViaCopy duplicates when nothing is selected (SelectionClipboard.swift:138).
         self.tab().session.layer_via_copy();
         self.touch(cx);
@@ -749,19 +851,39 @@ impl AppState {
         self.tab().session.add_layer_mask(true);
         self.touch(cx);
     }
-    fn on_flip_layer_h(&mut self, _: &keys::FlipLayerHorizontal, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_flip_layer_h(
+        &mut self,
+        _: &keys::FlipLayerHorizontal,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.flip_layers(true);
         self.touch(cx);
     }
-    fn on_flip_layer_v(&mut self, _: &keys::FlipLayerVertical, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_flip_layer_v(
+        &mut self,
+        _: &keys::FlipLayerVertical,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.flip_layers(false);
         self.touch(cx);
     }
-    fn on_group_selected_layers(&mut self, _: &keys::GroupSelectedLayers, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_group_selected_layers(
+        &mut self,
+        _: &keys::GroupSelectedLayers,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.group_selected_layers();
         self.touch(cx);
     }
-    fn on_move_out_of_folder(&mut self, _: &keys::MoveOutOfFolder, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_move_out_of_folder(
+        &mut self,
+        _: &keys::MoveOutOfFolder,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.move_active_layer_out_of_group();
         self.touch(cx);
     }
@@ -770,7 +892,12 @@ impl AppState {
             self.begin_rename(id, w, cx);
         }
     }
-    fn on_toggle_layer_visibility(&mut self, _: &keys::ToggleLayerVisibility, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_layer_visibility(
+        &mut self,
+        _: &keys::ToggleLayerVisibility,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = self.tab().session.active_layer_id {
             self.tab().session.toggle_layer_visibility(id);
             self.touch(cx);
@@ -780,43 +907,108 @@ impl AppState {
         self.tab().session.add_adjustment(kind);
         self.touch(cx);
     }
-    fn on_add_adjustment_hsv(&mut self, _: &keys::AddAdjustmentHsv, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_hsv(
+        &mut self,
+        _: &keys::AddAdjustmentHsv,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Hsv, cx);
     }
-    fn on_add_adjustment_levels(&mut self, _: &keys::AddAdjustmentLevels, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_levels(
+        &mut self,
+        _: &keys::AddAdjustmentLevels,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Levels, cx);
     }
-    fn on_add_adjustment_curves(&mut self, _: &keys::AddAdjustmentCurves, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_curves(
+        &mut self,
+        _: &keys::AddAdjustmentCurves,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Curves, cx);
     }
-    fn on_add_adjustment_exposure(&mut self, _: &keys::AddAdjustmentExposure, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_exposure(
+        &mut self,
+        _: &keys::AddAdjustmentExposure,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Exposure, cx);
     }
-    fn on_add_adjustment_gradient_map(&mut self, _: &keys::AddAdjustmentGradientMap, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_gradient_map(
+        &mut self,
+        _: &keys::AddAdjustmentGradientMap,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::GradientMap, cx);
     }
-    fn on_add_adjustment_grain(&mut self, _: &keys::AddAdjustmentGrain, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_grain(
+        &mut self,
+        _: &keys::AddAdjustmentGrain,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Grain, cx);
     }
-    fn on_add_adjustment_add_noise(&mut self, _: &keys::AddAdjustmentAddNoise, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_add_noise(
+        &mut self,
+        _: &keys::AddAdjustmentAddNoise,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::AddNoise, cx);
     }
-    fn on_add_adjustment_gaussian_blur(&mut self, _: &keys::AddAdjustmentGaussianBlur, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_gaussian_blur(
+        &mut self,
+        _: &keys::AddAdjustmentGaussianBlur,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::GaussianBlur, cx);
     }
-    fn on_add_adjustment_motion_blur(&mut self, _: &keys::AddAdjustmentMotionBlur, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_motion_blur(
+        &mut self,
+        _: &keys::AddAdjustmentMotionBlur,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::MotionBlur, cx);
     }
-    fn on_add_adjustment_invert(&mut self, _: &keys::AddAdjustmentInvert, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_invert(
+        &mut self,
+        _: &keys::AddAdjustmentInvert,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::Invert, cx);
     }
-    fn on_add_adjustment_black_white(&mut self, _: &keys::AddAdjustmentBlackWhite, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_black_white(
+        &mut self,
+        _: &keys::AddAdjustmentBlackWhite,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::BlackWhite, cx);
     }
-    fn on_add_adjustment_color_balance(&mut self, _: &keys::AddAdjustmentColorBalance, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_add_adjustment_color_balance(
+        &mut self,
+        _: &keys::AddAdjustmentColorBalance,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_adjustment(AdjustmentKind::ColorBalance, cx);
     }
-    fn on_edit_adjustment(&mut self, _: &keys::EditAdjustment, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_edit_adjustment(
+        &mut self,
+        _: &keys::EditAdjustment,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
@@ -826,13 +1018,10 @@ impl AppState {
     /// Edit Adjustment… for the layer `id`: refuses Invert (no settings to
     /// edit) and busy states, prefills the editor from the layer's current
     /// settings and opens the matching panel. False when nothing opened.
-    pub(crate) fn edit_layer_adjustment(
-        &mut self,
-        id: uuid::Uuid,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub(crate) fn edit_layer_adjustment(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) -> bool {
         let Some(adjustment) = self
-            .tab().session
+            .tab()
+            .session
             .document
             .as_ref()
             .and_then(|document| document.layer(id))
@@ -848,7 +1037,7 @@ impl AppState {
         // Prefill the editor from the layer's current settings.
         match adjustment.kind {
             AdjustmentKind::Levels => {
-                self.tab().session.levels = Some(adjustment.levels.clone());
+                self.tab().session.levels = Some(adjustment.levels);
                 self.open_levels_panel(cx);
             }
             AdjustmentKind::Hsv => {
@@ -865,7 +1054,8 @@ impl AppState {
             }
             other => {
                 if let Some(filter) = other.filter_kind() {
-                    self.tab().session.filter_edit = Some(filter_settings_from_adjustment(&adjustment));
+                    self.tab().session.filter_edit =
+                        Some(filter_settings_from_adjustment(&adjustment));
                     self.open_filter_panel(filter, cx);
                 }
             }
@@ -875,7 +1065,12 @@ impl AppState {
 
     // MARK: Select
 
-    fn on_select_all(&mut self, _: &keys::SelectAllAction, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_select_all(
+        &mut self,
+        _: &keys::SelectAllAction,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.select_all();
         self.touch(cx);
     }
@@ -883,7 +1078,12 @@ impl AppState {
         self.tab().session.deselect();
         self.touch(cx);
     }
-    fn on_invert_selection(&mut self, _: &keys::InvertSelection, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_invert_selection(
+        &mut self,
+        _: &keys::InvertSelection,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.invert_selection();
         self.touch(cx);
     }
@@ -899,25 +1099,55 @@ impl AppState {
 
     // MARK: Filter
 
-    fn on_filter_blur(&mut self, _: &keys::FilterGaussianBlur, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_blur(
+        &mut self,
+        _: &keys::FilterGaussianBlur,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::GaussianBlur, cx);
     }
-    fn on_filter_motion(&mut self, _: &keys::FilterMotionBlur, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_motion(
+        &mut self,
+        _: &keys::FilterMotionBlur,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::MotionBlur, cx);
     }
-    fn on_filter_noise(&mut self, _: &keys::FilterAddNoise, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_noise(
+        &mut self,
+        _: &keys::FilterAddNoise,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::AddNoise, cx);
     }
-    fn on_filter_lens(&mut self, _: &keys::FilterLensCorrection, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_lens(
+        &mut self,
+        _: &keys::FilterLensCorrection,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::LensCorrection, cx);
     }
-    fn on_filter_camera_raw(&mut self, _: &keys::FilterCameraRaw, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_filter_camera_raw(
+        &mut self,
+        _: &keys::FilterCameraRaw,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_filter_panel(FilterKind::CameraRaw, cx);
     }
 
     // MARK: View
 
-    fn on_toggle_rulers(&mut self, _: &keys::ToggleRulers, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_rulers(
+        &mut self,
+        _: &keys::ToggleRulers,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.shows_rulers = !self.tab().session.shows_rulers;
         self.persist_tool_defaults();
         self.touch(cx);
@@ -927,12 +1157,22 @@ impl AppState {
         self.persist_tool_defaults();
         self.touch(cx);
     }
-    fn on_toggle_guides(&mut self, _: &keys::ToggleGuides, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_guides(
+        &mut self,
+        _: &keys::ToggleGuides,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.shows_guides = !self.tab().session.shows_guides;
         self.persist_tool_defaults();
         self.touch(cx);
     }
-    fn on_toggle_pixel_grid(&mut self, _: &keys::TogglePixelGrid, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_pixel_grid(
+        &mut self,
+        _: &keys::TogglePixelGrid,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.shows_pixel_grid = !self.tab().session.shows_pixel_grid;
         self.persist_tool_defaults();
         self.touch(cx);
@@ -1008,42 +1248,97 @@ impl AppState {
     fn on_nudge_down(&mut self, _: &keys::NudgeDown, w: &mut Window, cx: &mut Context<Self>) {
         self.nudge(0.0, 1.0, false, w, cx);
     }
-    fn on_nudge_left_more(&mut self, _: &keys::NudgeLeftMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_left_more(
+        &mut self,
+        _: &keys::NudgeLeftMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge(-10.0, 0.0, true, w, cx);
     }
-    fn on_nudge_right_more(&mut self, _: &keys::NudgeRightMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_right_more(
+        &mut self,
+        _: &keys::NudgeRightMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge(10.0, 0.0, true, w, cx);
     }
     fn on_nudge_up_more(&mut self, _: &keys::NudgeUpMore, w: &mut Window, cx: &mut Context<Self>) {
         self.nudge(0.0, -10.0, true, w, cx);
     }
-    fn on_nudge_down_more(&mut self, _: &keys::NudgeDownMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_down_more(
+        &mut self,
+        _: &keys::NudgeDownMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge(0.0, 10.0, true, w, cx);
     }
     // Cmd-arrow: the selected pixels move, not the outline or the layer
     // (SelectionEdits.swift:141).
-    fn on_nudge_pixels_left(&mut self, _: &keys::NudgePixelsLeft, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_left(
+        &mut self,
+        _: &keys::NudgePixelsLeft,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(-1.0, 0.0, w, cx);
     }
-    fn on_nudge_pixels_right(&mut self, _: &keys::NudgePixelsRight, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_right(
+        &mut self,
+        _: &keys::NudgePixelsRight,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(1.0, 0.0, w, cx);
     }
-    fn on_nudge_pixels_up(&mut self, _: &keys::NudgePixelsUp, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_up(
+        &mut self,
+        _: &keys::NudgePixelsUp,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(0.0, -1.0, w, cx);
     }
-    fn on_nudge_pixels_down(&mut self, _: &keys::NudgePixelsDown, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_down(
+        &mut self,
+        _: &keys::NudgePixelsDown,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(0.0, 1.0, w, cx);
     }
-    fn on_nudge_pixels_left_more(&mut self, _: &keys::NudgePixelsLeftMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_left_more(
+        &mut self,
+        _: &keys::NudgePixelsLeftMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(-10.0, 0.0, w, cx);
     }
-    fn on_nudge_pixels_right_more(&mut self, _: &keys::NudgePixelsRightMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_right_more(
+        &mut self,
+        _: &keys::NudgePixelsRightMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(10.0, 0.0, w, cx);
     }
-    fn on_nudge_pixels_up_more(&mut self, _: &keys::NudgePixelsUpMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_up_more(
+        &mut self,
+        _: &keys::NudgePixelsUpMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(0.0, -10.0, w, cx);
     }
-    fn on_nudge_pixels_down_more(&mut self, _: &keys::NudgePixelsDownMore, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_nudge_pixels_down_more(
+        &mut self,
+        _: &keys::NudgePixelsDownMore,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.nudge_pixels(0.0, 10.0, w, cx);
     }
     fn nudge_pixels(&mut self, dx: f64, dy: f64, w: &mut Window, cx: &mut Context<Self>) {
@@ -1064,34 +1359,69 @@ impl AppState {
     fn on_brush_harder(&mut self, _: &keys::BrushHarder, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, w, cx| t.change_brush_hardness(true, w, cx));
     }
-    fn on_blend_mode_previous(&mut self, _: &keys::BlendModePrevious, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_blend_mode_previous(
+        &mut self,
+        _: &keys::BlendModePrevious,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.cycle_blend_mode(false);
         cx.notify();
     }
-    fn on_blend_mode_next(&mut self, _: &keys::BlendModeNext, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_blend_mode_next(
+        &mut self,
+        _: &keys::BlendModeNext,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.cycle_blend_mode(true);
         cx.notify();
     }
-    fn on_cycle_shape_kind(&mut self, _: &keys::CycleShapeKind, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_cycle_shape_kind(
+        &mut self,
+        _: &keys::CycleShapeKind,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.toggle_shape_kind();
         cx.notify();
     }
-    fn on_show_transform_controls(&mut self, _: &keys::ShowTransformControls, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_show_transform_controls(
+        &mut self,
+        _: &keys::ShowTransformControls,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.shows_transform_controls = !self.tab().session.shows_transform_controls;
         self.persist_tool_defaults();
         self.touch(cx);
     }
-    fn on_invert_pixels(&mut self, _: &keys::InvertPixels, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_invert_pixels(
+        &mut self,
+        _: &keys::InvertPixels,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.invert_pixels();
         self.touch(cx);
     }
-    fn on_toggle_clipping_mask(&mut self, _: &keys::ToggleClippingMask, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_clipping_mask(
+        &mut self,
+        _: &keys::ToggleClippingMask,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = self.tab().session.active_layer_id {
             self.tab().session.toggle_clipping_mask(id);
         }
         self.touch(cx);
     }
-    fn on_move_layer_down(&mut self, _: &keys::MoveLayerDown, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_move_layer_down(
+        &mut self,
+        _: &keys::MoveLayerDown,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.move_active_layer(-1);
         self.touch(cx);
     }
@@ -1123,25 +1453,47 @@ impl AppState {
             t.touch(cx);
         });
     }
-    fn on_content_aware_fill(&mut self, _: &keys::ContentAwareFill, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_content_aware_fill(
+        &mut self,
+        _: &keys::ContentAwareFill,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hotkey(w, cx, |t, _w, cx| t.run_content_aware_fill(cx));
     }
-    fn on_clear_selection_pixels(&mut self, _: &keys::ClearSelectionPixels, w: &mut Window, cx: &mut Context<Self>) {
+    fn on_clear_selection_pixels(
+        &mut self,
+        _: &keys::ClearSelectionPixels,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hotkey(w, cx, |t, _w, cx| {
             t.tab().session.clear_selected_pixels();
             t.touch(cx);
         });
     }
-    fn on_load_layer_selection(&mut self, _: &keys::LoadLayerSelection, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_load_layer_selection(
+        &mut self,
+        _: &keys::LoadLayerSelection,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = self.tab().session.active_layer_id {
-            self.tab().session
+            self.tab()
+                .session
                 .load_layer_selection(id, compositor_core::selection::SelectionMode::Replace);
             self.touch(cx);
         }
     }
-    fn on_load_mask_selection(&mut self, _: &keys::LoadMaskSelection, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_load_mask_selection(
+        &mut self,
+        _: &keys::LoadMaskSelection,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = self.tab().session.active_layer_id {
-            self.tab().session
+            self.tab()
+                .session
                 .load_mask_selection(id, compositor_core::selection::SelectionMode::Replace);
             self.touch(cx);
         }
@@ -1150,7 +1502,12 @@ impl AppState {
         self.tab().session.clear_guides();
         self.touch(cx);
     }
-    fn on_toggle_levels_preview(&mut self, _: &keys::ToggleLevelsPreview, _w: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_levels_preview(
+        &mut self,
+        _: &keys::ToggleLevelsPreview,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.toggle_levels_preview(cx);
     }
     fn on_finish_lasso(&mut self, _: &keys::FinishLasso, _w: &mut Window, cx: &mut Context<Self>) {
@@ -1209,7 +1566,7 @@ impl AppState {
                 } else {
                     this.set_status(failures.join("; "), cx);
                 }
-                this.fit_for = (0, 0);
+                this.fit_for = FitDims::REFIT;
                 this.touch(cx);
             })
             .ok();
@@ -1274,9 +1631,10 @@ impl AppState {
             "Redo: \u{2014}".to_string()
         };
         let import_error = self.workspace.current_mut().import_error.take();
-        let message = import_error.or_else(|| self.status.clone()).or_else(|| {
-            self.current_tab().session.brush_error.clone()
-        }).unwrap_or_default();
+        let message = import_error
+            .or_else(|| self.status.clone())
+            .or_else(|| self.current_tab().session.brush_error.clone())
+            .unwrap_or_default();
 
         div()
             .id("status-bar")
@@ -1296,10 +1654,7 @@ impl AppState {
                     .flex_row()
                     .gap_3()
                     .child(text_label(
-                        format!(
-                            "{} \u{d7} {} px",
-                            width as usize, height as usize
-                        ),
+                        format!("{} \u{d7} {} px", width as usize, height as usize),
                         false,
                     ))
                     .child(text_label(zoom, false))

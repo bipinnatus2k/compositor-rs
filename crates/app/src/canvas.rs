@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{
-    canvas, div, px, point, rgb, rgba, size, Bounds, Context, Corners, DispatchPhase,
-    IntoElement, InteractiveElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, RenderImage,
-    ScrollWheelEvent, ScrollDelta, Window,
-};
 use gpui_kit::Styled;
+use gpui_kit::{
+    Bounds, Context, Corners, DispatchPhase, InteractiveElement, IntoElement, KeyDownEvent,
+    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PathBuilder, Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, Window, canvas, div,
+    point, px, rgb, rgba, size,
+};
 use gpui_kit::{DragMoveEvent, ExternalPaths};
 
 use compositor_core::canvas::CropDragMode;
@@ -20,14 +20,14 @@ use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::raster::Bitmap;
 use compositor_core::selection::LassoKind;
 use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
-use compositor_core::tools::warp::WarpStroke;
 use compositor_core::tools::brush::{GradientShape, RasterEdit};
+use compositor_core::tools::warp::WarpStroke;
 
 use crate::inline_text::{
     inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_overflows,
     inline_text_resize,
 };
-use crate::state::{AppState, CanvasDrag, RULER_SIZE};
+use crate::state::{AppState, CanvasDrag, FitDims, RULER_SIZE};
 
 /// `guideHitDistance` (Guides.swift): how close a Move press must land to a
 /// guide to take it, in screen points.
@@ -70,7 +70,9 @@ impl AppState {
             return self.render_welcome(cx);
         }
         let composite = self.composite();
-        let image = composite.as_ref().map(|composite| self.frame_image(composite));
+        let image = composite
+            .as_ref()
+            .map(|composite| self.frame_image(composite));
         let scene = self.build_scene(image);
         // The inline text editor rides on the canvas while a draft is open
         // (InlineTextEditor.synchronize runs on every display sync in Swift;
@@ -95,25 +97,25 @@ impl AppState {
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {
                     // Remember the hover point in document coordinates: the
                     // drop lands its imports there (ImageFileDrop's point).
-                    let local =
-                        this.local_position(event.event.position);
+                    let local = this.local_position(event.event.position);
                     this.drop_point_doc = Some(this.screen_to_doc(local.0, local.1));
                 },
             ))
-            .on_drop::<ExternalPaths>(cx.listener(
-                |this, dropped: &ExternalPaths, _window, cx| {
-                    let paths = dropped.paths().to_vec();
-                    this.receive_dropped_files(paths, cx);
-                },
-            ))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                this.canvas_mouse_down(event, window, cx);
+            .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
+                let paths = dropped.paths().to_vec();
+                this.receive_dropped_files(paths, cx);
             }))
-            .on_scroll_wheel(cx.listener(
-                move |this, event: &ScrollWheelEvent, window, cx| {
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.canvas_mouse_down(event, window, cx);
+                }),
+            )
+            .on_scroll_wheel(
+                cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
                     this.canvas_scroll(event, window, cx);
-                },
-            ))
+                }),
+            )
             .child(
                 canvas(
                     move |bounds, _window, cx| {
@@ -124,15 +126,17 @@ impl AppState {
                                 let vh = f32::from(bounds.size.height);
                                 let dims = {
                                     let (w, h) = state.doc_size();
-                                    (w as usize, h as usize)
+                                    FitDims {
+                                        width: w as usize,
+                                        height: h as usize,
+                                    }
                                 };
                                 // Swift rebuilds the view per tab
                                 // (`.id(tab.id)`), so a tab switch refits
                                 // just like a document size change.
-                                let tab_changed =
-                                    state.fit_tab != state.workspace.selected_id();
+                                let tab_changed = state.fit_tab != state.workspace.selected_id();
                                 if (dims != state.fit_for || tab_changed)
-                                    && dims.0 > 0
+                                    && dims.width > 0
                                     && vw > 10.0
                                     && vh > 10.0
                                 {
@@ -177,7 +181,8 @@ impl AppState {
                     Some(drag) if drag.id == guide.id => (drag.axis, drag.position),
                     _ => (guide.axis, guide.position),
                 };
-                drag_drawn |= self.current_tab().session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
+                drag_drawn |=
+                    self.current_tab().session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
                 let vertical = axis == GuideAxis::Vertical;
                 let position = if vertical {
                     self.doc_to_screen(position, 0.0).0
@@ -186,16 +191,16 @@ impl AppState {
                 };
                 guides.push((vertical, position));
             }
-            if let Some(drag) = &self.current_tab().session.guide_drag {
-                if drag.is_new || !drag_drawn {
-                    let vertical = drag.axis == GuideAxis::Vertical;
-                    let position = if vertical {
-                        self.doc_to_screen(drag.position, 0.0).0
-                    } else {
-                        self.doc_to_screen(0.0, drag.position).1
-                    };
-                    guides.push((vertical, position));
-                }
+            if let Some(drag) = &self.current_tab().session.guide_drag
+                && (drag.is_new || !drag_drawn)
+            {
+                let vertical = drag.axis == GuideAxis::Vertical;
+                let position = if vertical {
+                    self.doc_to_screen(drag.position, 0.0).0
+                } else {
+                    self.doc_to_screen(0.0, drag.position).1
+                };
+                guides.push((vertical, position));
             }
             if self.current_tab().session.shows_grid {
                 for x in LayoutGrid::lines(document.width as f64) {
@@ -208,32 +213,26 @@ impl AppState {
             // The ants follow a pixel move or outline drag (`displayedSelection`).
             if let Some(selection_state) = self.current_tab().session.displayed_selection() {
                 for ring in &selection_state.path.rings {
-                    selection.push(
-                        ring.iter()
-                            .map(|p| self.doc_to_screen(p.x, p.y))
-                            .collect(),
-                    );
+                    selection.push(ring.iter().map(|p| self.doc_to_screen(p.x, p.y)).collect());
                 }
             } else if let Some(selection_state) = &document.selection {
                 for ring in &selection_state.path.rings {
-                    selection.push(
-                        ring.iter()
-                            .map(|p| self.doc_to_screen(p.x, p.y))
-                            .collect(),
-                    );
+                    selection.push(ring.iter().map(|p| self.doc_to_screen(p.x, p.y)).collect());
                 }
             }
             if let Some(draft) = &self.current_tab().session.lasso_draft {
-                let mut rings = vec![draft
-                    .points
-                    .iter()
-                    .map(|p| self.doc_to_screen(p.x, p.y))
-                    .collect::<Vec<(f32, f32)>>()];
-                if let Some(cursor) = draft.cursor {
-                    if !rings[0].is_empty() {
-                        let (x, y) = self.doc_to_screen(cursor.x, cursor.y);
-                        rings[0].push((x, y));
-                    }
+                let mut rings = vec![
+                    draft
+                        .points
+                        .iter()
+                        .map(|p| self.doc_to_screen(p.x, p.y))
+                        .collect::<Vec<(f32, f32)>>(),
+                ];
+                if let Some(cursor) = draft.cursor
+                    && !rings[0].is_empty()
+                {
+                    let (x, y) = self.doc_to_screen(cursor.x, cursor.y);
+                    rings[0].push((x, y));
                 }
                 lasso = Some(rings);
             }
@@ -341,11 +340,11 @@ impl AppState {
         // The inline text editor's resize handles take a press before any
         // tool (`InlineTextEditor.hitTest`/`mouseDown`); the editor itself
         // swallows presses inside the overlay, so only these reach us.
-        if self.tab().session.text_draft.is_some() {
-            if let Some(handle) = self.inline_text_handle_hit(doc) {
-                self.begin_inline_text_resize(doc, handle, cx);
-                return;
-            }
+        if self.tab().session.text_draft.is_some()
+            && let Some(handle) = self.inline_text_handle_hit(doc)
+        {
+            self.begin_inline_text_resize(doc, handle, cx);
+            return;
         }
 
         // A press on a ruler strip starts a guide at the pointer's document
@@ -353,14 +352,15 @@ impl AppState {
         // corner square is inert. On the canvas itself, only a Move press that
         // lands on a guide takes it — before any layer drag
         // (EditorCanvas.mouseDown's `beginGuideDrag`).
-        if self.tab().session.shows_rulers {
-            if let Some(axis) = ruler_axis_at(local) {
-                self.tab().session
-                    .begin_guide_creation(axis, guide_axis_position(axis, doc));
-                self.set_drag(Some(CanvasDrag::Guide));
-                self.touch(cx);
-                return;
-            }
+        if self.tab().session.shows_rulers
+            && let Some(axis) = ruler_axis_at(local)
+        {
+            self.tab()
+                .session
+                .begin_guide_creation(axis, guide_axis_position(axis, doc));
+            self.set_drag(Some(CanvasDrag::Guide));
+            self.touch(cx);
+            return;
         }
         if self.tab().session.tool == NavigationTool::Move {
             // `guideHitDistance` is 5 screen points; the core measures in
@@ -404,7 +404,8 @@ impl AppState {
                 // (EditorCanvas.lassoMouseDown).
                 let ctrl = event.modifiers.control;
                 let inside = self
-                    .tab().session
+                    .tab()
+                    .session
                     .selection()
                     .map(|s| s.path.contains(doc))
                     .unwrap_or(false);
@@ -455,15 +456,14 @@ impl AppState {
                 self.begin_crop(doc, cx);
             }
             NavigationTool::Eyedropper => {
-                if let Some(document) = self.tab().session.document.as_ref() {
-                    if let Some(color) =
+                if let Some(document) = self.tab().session.document.as_ref()
+                    && let Some(color) =
                         compositor_core::render::sample_composite_color(document, doc)
-                    {
-                        self.tab().session.brush_settings.red = color.red;
-                        self.tab().session.brush_settings.green = color.green;
-                        self.tab().session.brush_settings.blue = color.blue;
-                        self.set_status(format!("Foreground #{}", color.hex()), cx);
-                    }
+                {
+                    self.tab().session.brush_settings.red = color.red;
+                    self.tab().session.brush_settings.green = color.green;
+                    self.tab().session.brush_settings.blue = color.blue;
+                    self.set_status(format!("Foreground #{}", color.hex()), cx);
                 }
             }
             NavigationTool::Type => {
@@ -505,7 +505,13 @@ impl AppState {
                 stroke.append(doc);
             }
             Some(CanvasDrag::Shape { start }) => {
-                let rect = shape_drag_rect(self.workspace.current_mut().session.shape_kind, *start, doc, shift, alt);
+                let rect = shape_drag_rect(
+                    self.workspace.current_mut().session.shape_kind,
+                    *start,
+                    doc,
+                    shift,
+                    alt,
+                );
                 let shape = self.build_shape_for_drag(rect);
                 self.shape_rect = Some(rect);
                 self.shape_shape = Some(shape);
@@ -514,9 +520,18 @@ impl AppState {
                 self.gradient_cursor = Some(doc);
             }
             Some(CanvasDrag::MarqueeLasso) => {
-                let kind = self.workspace.current_mut().session.lasso_draft.as_ref().map(|d| d.kind);
+                let kind = self
+                    .workspace
+                    .current_mut()
+                    .session
+                    .lasso_draft
+                    .as_ref()
+                    .map(|d| d.kind);
                 if matches!(kind, Some(LassoKind::Rectangle) | Some(LassoKind::Ellipse)) {
-                    self.workspace.current_mut().session.drag_marquee(doc, shift, false);
+                    self.workspace
+                        .current_mut()
+                        .session
+                        .drag_marquee(doc, shift, false);
                 } else {
                     self.workspace.current_mut().session.extend_lasso(doc);
                 }
@@ -526,7 +541,13 @@ impl AppState {
                 let rect = compositor_core::selection::drag_box_rect(*start, doc, false, false);
                 self.text_box_rect = Some(rect);
             }
-            Some(CanvasDrag::TextResize { handle, start, old, source, draft }) => {
+            Some(CanvasDrag::TextResize {
+                handle,
+                start,
+                old,
+                source,
+                draft,
+            }) => {
                 // The handle drag resizes the draft's box live
                 // (`InlineTextEditor.mouseDragged`).
                 let (handle, start) = (*handle, *start);
@@ -539,7 +560,10 @@ impl AppState {
                     self.workspace.current_mut().session.text_draft = Some(draft);
                 }
             }
-            Some(CanvasDrag::MoveLayer { start_origin, start }) => {
+            Some(CanvasDrag::MoveLayer {
+                start_origin,
+                start,
+            }) => {
                 let delta = CGPoint::new(doc.x - start.x, doc.y - start.y);
                 let mut value = *start_origin;
                 value.origin.x += delta.x;
@@ -548,7 +572,10 @@ impl AppState {
                 // and rotating are left alone (EditorCanvas.dragTransform).
                 let moving: Vec<uuid::Uuid> = {
                     let session = self.workspace.current_mut();
-                    session.session.transform_edit.as_ref()
+                    session
+                        .session
+                        .transform_edit
+                        .as_ref()
                         .map(|edit| match &edit.group {
                             Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
                             None => vec![edit.layer_id],
@@ -563,22 +590,33 @@ impl AppState {
                 self.sync_transform_inputs(window, cx);
             }
             Some(CanvasDrag::PixelMove { start }) => {
-                self.workspace.current_mut().session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
+                self.workspace
+                    .current_mut()
+                    .session
+                    .drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y));
             }
             Some(CanvasDrag::SelectionMove { start }) => {
-                self.workspace.current_mut().session
+                self.workspace
+                    .current_mut()
+                    .session
                     .move_selection_outline(CGSize::new(doc.x - start.x, doc.y - start.y));
             }
             Some(CanvasDrag::Crop) => {
                 let ratio = self.workspace.current_mut().session.crop_ratio();
-                self.workspace.current_mut().session.drag_crop(doc, ratio, false);
+                self.workspace
+                    .current_mut()
+                    .session
+                    .drag_crop(doc, ratio, false);
             }
             Some(CanvasDrag::Guide) => {
                 // The guide follows the pointer's document coordinate on its
                 // own axis (EditorCanvas.mouseDragged's guideDragging branch).
                 if let Some(drag) = self.workspace.current_mut().session.guide_drag.as_ref() {
                     let axis = drag.axis;
-                    self.workspace.current_mut().session.move_guide_drag(guide_axis_position(axis, doc));
+                    self.workspace
+                        .current_mut()
+                        .session
+                        .move_guide_drag(guide_axis_position(axis, doc));
                 }
             }
             None => return,
@@ -606,10 +644,12 @@ impl AppState {
                     let result = self.gradient_result(&edit, start);
                     self.commit_pixels(
                         compositor_core::raster::ImportedImage::new(result, String::new()),
-                        id,
+                        EditTarget {
+                            layer_id: id,
+                            is_mask: edit.is_mask,
+                        },
                         edit.paint_transform,
                         "Gradient",
-                        edit.is_mask,
                         cx,
                     );
                 }
@@ -678,7 +718,7 @@ impl AppState {
         }
         let dy = match event.delta {
             ScrollDelta::Pixels(pt) => f32::from(pt.y),
-            ScrollDelta::Lines(pt) => f32::from(pt.y) * 40.0,
+            ScrollDelta::Lines(pt) => pt.y * 40.0,
         };
         if dy != 0.0 {
             let factor = (-dy / 400.0).exp();
@@ -745,7 +785,10 @@ impl AppState {
         if self.tab().session.tool == NavigationTool::CloneStamp {
             if alt {
                 self.tab().session.clone_source = Some(doc);
-                self.set_status(format!("Clone source set at {:.0}, {:.0}", doc.x, doc.y), cx);
+                self.set_status(
+                    format!("Clone source set at {:.0}, {:.0}", doc.x, doc.y),
+                    cx,
+                );
                 return;
             }
             if self.tab().session.clone_source.is_none() {
@@ -766,7 +809,11 @@ impl AppState {
         }
         // A mask stroke paints white (reveal) or black (hide).
         if mask_target {
-            let v = if self.tab().session.mask_paint_white { 1.0 } else { 0.0 };
+            let v = if self.tab().session.mask_paint_white {
+                1.0
+            } else {
+                0.0
+            };
             settings.red = v;
             settings.green = v;
             settings.blue = v;
@@ -785,17 +832,16 @@ impl AppState {
         // — `cloneStrokeOffset` plus the `cloneOffset = offset` fixup done only
         // once the sample succeeded). This used to recompute source-minus-brush
         // every stroke, which made aligned stamping drift.
-        if self.tab().session.tool == NavigationTool::CloneStamp {
-            if let Some(offset) = self.tab().session.clone_stroke_offset(doc) {
-                if let Some(sample) = self.sample_for_clone() {
-                    if self.tab().session.clone_settings.aligned
-                        && self.tab().session.clone_offset.is_none()
-                    {
-                        self.tab().session.clone_offset = Some(offset);
-                    }
-                    edit.clone = Some((sample, offset));
-                }
+        if self.tab().session.tool == NavigationTool::CloneStamp
+            && let Some(offset) = self.tab().session.clone_stroke_offset(doc)
+            && let Some(sample) = self.sample_for_clone()
+        {
+            if self.tab().session.clone_settings.aligned
+                && self.tab().session.clone_offset.is_none()
+            {
+                self.tab().session.clone_offset = Some(offset);
             }
+            edit.clone = Some((sample, offset));
         }
         // The Blur brush: the stroke's own target sampled at its start — the
         // layer as displayed, or the mask's own coverage when the mask is the
@@ -806,7 +852,8 @@ impl AppState {
         if self.tab().session.tool == NavigationTool::Blur {
             let displayed = self.tab().session.displayed_transform(layer);
             if let Some(sample) = blur_sample(&document, layer, &displayed, mask_target) {
-                let blurred = blur_sample_softened(&sample, self.tab().session.brush_settings.diameter);
+                let blurred =
+                    blur_sample_softened(&sample, self.tab().session.brush_settings.diameter);
                 edit.clone = Some((blurred, CGSize::ZERO));
             }
         }
@@ -838,6 +885,13 @@ impl AppState {
     }
 }
 
+/// Which surface a raster commit lands on: the layer captured when the
+/// edit began — never whatever is active at mouse-up — or its mask.
+pub(crate) struct EditTarget {
+    pub layer_id: uuid::Uuid,
+    pub is_mask: bool,
+}
+
 /// The paint-surface half of `canPaint` (EditorSession+Brush.swift:5-12),
 /// shared by brush strokes and gradients: a selected, enabled mask is the
 /// surface; groups have no pixels of their own and an adjustment layer's
@@ -850,7 +904,7 @@ struct PaintTarget {
 
 fn paint_target(
     session: &EditorSession,
-    document: &CanvasDocument,
+    _document: &CanvasDocument,
     layer: &ImageLayer,
 ) -> Option<PaintTarget> {
     // A selected mask is the ONLY surface, and it must be enabled (:11) —
@@ -973,7 +1027,12 @@ pub(crate) fn blur_mask_sample(document: &CanvasDocument, layer: &ImageLayer) ->
 }
 
 impl AppState {
-    fn commit_stroke(&mut self, mut edit: RasterEdit, layer_id: uuid::Uuid, cx: &mut Context<Self>) {
+    fn commit_stroke(
+        &mut self,
+        mut edit: RasterEdit,
+        layer_id: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) {
         if !edit.has_paint() {
             return;
         }
@@ -992,8 +1051,11 @@ impl AppState {
                 .unwrap_or(0x6d2b79f5);
             edit.heal(mode, seed);
             let (snapshot, transform, _) = edit.paint_snapshot();
-            let mask = edit.is_mask;
-            self.commit_pixels(snapshot, layer_id, transform, "Spot Healing", mask, cx);
+            let target = EditTarget {
+                layer_id,
+                is_mask: edit.is_mask,
+            };
+            self.commit_pixels(snapshot, target, transform, "Spot Healing", cx);
             return;
         }
         let erasing = edit.settings.erasing;
@@ -1010,8 +1072,11 @@ impl AppState {
         } else {
             "Brush Stroke"
         };
-        let mask = edit.is_mask;
-        self.commit_pixels(snapshot, layer_id, transform, name, mask, cx);
+        let target = EditTarget {
+            layer_id,
+            is_mask: edit.is_mask,
+        };
+        self.commit_pixels(snapshot, target, transform, name, cx);
     }
 
     // MARK: Smudge / Liquify
@@ -1033,8 +1098,11 @@ impl AppState {
         };
         let mut surface = Bitmap::new(document.width.max(1), document.height.max(1));
         compositor_core::render::draw_layer_pixels(&image, &layer.transform, &mut surface);
-        let mut stroke =
-            WarpStroke::new(surface, self.tab().session.blur_mode, &self.tab().session.brush_settings);
+        let mut stroke = WarpStroke::new(
+            surface,
+            self.tab().session.blur_mode,
+            &self.tab().session.brush_settings,
+        );
         stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
         stroke.layer_transform = layer.transform;
         stroke.append(doc);
@@ -1066,10 +1134,7 @@ impl AppState {
             return;
         }
         let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
-        let selection_clip = document
-            .selection
-            .as_ref()
-            .map(|s| s.clip(document.size()));
+        let selection_clip = document.selection.as_ref().map(|s| s.clip(document.size()));
         let diameter = stroke.diameter;
         let points = stroke.points.clone();
         let result = stroke.into_image();
@@ -1084,14 +1149,23 @@ impl AppState {
             selection_clip,
         ) {
             // The warp always targets the layer it started on.
-            self.commit_pixels(snapshot, id, transform, name, false, cx);
+            self.commit_pixels(
+                snapshot,
+                EditTarget {
+                    layer_id: id,
+                    is_mask: false,
+                },
+                transform,
+                name,
+                cx,
+            );
         }
     }
 
     // MARK: Shape
 
     /// The shape the current drag places, from the tool's settings.
-    fn build_shape_for_drag(&self, rect: CGRect) -> compositor_core::document::LayerShape {
+    fn build_shape_for_drag(&self, _rect: CGRect) -> compositor_core::document::LayerShape {
         let kind = self.current_tab().session.shape_kind;
         let color = self.current_tab().session.palette_color(false);
         compositor_core::document::LayerShape {
@@ -1147,10 +1221,9 @@ impl AppState {
     pub(crate) fn commit_pixels(
         &mut self,
         image: compositor_core::raster::ImportedImage,
-        layer_id: uuid::Uuid,
+        target: EditTarget,
         transform: compositor_core::transform::LayerTransform,
         name: &str,
-        mask: bool,
         cx: &mut Context<Self>,
     ) {
         self.history_edit(name, move |session| {
@@ -1158,9 +1231,9 @@ impl AppState {
                 // The edit lands on the layer captured when it began —
                 // never on whatever happens to be active at mouse-up
                 // (EditorSession+Brush.swift:130-133).
-                if let Some(layer) = doc.layer_mut(layer_id) {
+                if let Some(layer) = doc.layer_mut(target.layer_id) {
                     let mut image = image;
-                    if mask {
+                    if target.is_mask {
                         if let Some(m) = layer.mask.as_mut() {
                             image.name = m.asset.name.clone();
                             m.asset = image;
@@ -1187,10 +1260,12 @@ impl AppState {
     ) {
         self.commit_pixels(
             compositor_core::raster::ImportedImage::new(bitmap, String::new()),
-            layer_id,
+            EditTarget {
+                layer_id,
+                is_mask: false,
+            },
             transform,
             name,
-            false,
             cx,
         );
     }
@@ -1236,19 +1311,12 @@ impl AppState {
         if self.tab().session.transform_edit.is_none() {
             let active_id = self.tab().session.active_layer_id;
             let auto_select = self.transform_auto_select;
-            if let Some(document) = self.tab().session.document.as_ref() {
-                if let Some((id, picked)) = transform_press_layer(
-                    document,
-                    active_id,
-                    auto_select,
-                    command,
-                    true,
-                    doc,
-                ) {
-                    if picked {
-                        self.tab().session.select_layer(Some(id));
-                    }
-                }
+            if let Some(document) = self.tab().session.document.as_ref()
+                && let Some((id, picked)) =
+                    transform_press_layer(document, active_id, auto_select, command, true, doc)
+                && picked
+            {
+                self.tab().session.select_layer(Some(id));
             }
         }
         if self.tab().session.transform_edit.is_none() {
@@ -1311,12 +1379,9 @@ impl AppState {
         self.sync_inline_text(window, cx);
         let document = self.tab().session.document.clone().unwrap();
         let visible = document.effective_visible_ids();
-        if let Some(layer) = document
-            .layers
-            .iter()
-            .rev()
-            .find(|l| visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(doc))
-        {
+        if let Some(layer) = document.layers.iter().rev().find(|l| {
+            visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(doc)
+        }) {
             let id = layer.id;
             self.tab().session.select_layer(Some(id));
             self.tab().session.edit_active_text();
@@ -1372,10 +1437,11 @@ impl AppState {
                 };
             }
             NavigationTool::Gradient => {
-                self.tab().session.gradient_settings.shape = match self.tab().session.gradient_settings.shape {
-                    GradientShape::Linear => GradientShape::Radial,
-                    GradientShape::Radial => GradientShape::Linear,
-                };
+                self.tab().session.gradient_settings.shape =
+                    match self.tab().session.gradient_settings.shape {
+                        GradientShape::Linear => GradientShape::Radial,
+                        GradientShape::Radial => GradientShape::Linear,
+                    };
             }
             _ => {}
         }
@@ -1505,42 +1571,42 @@ fn transform_press_layer(
         .and_then(|id| order.iter().find(|l| l.id == id))
         .copied();
     // Cmd picks the layer under the pointer on its own.
-    if command && can_pick {
-        if let Some(id) = under {
-            return Some((id, true));
-        }
+    if command
+        && can_pick
+        && let Some(id) = under
+    {
+        return Some((id, true));
     }
-    if let Some(active) = active {
-        if active.transform.contains(pixel) {
-            // `render_layers` is bottom to top, so a later index paints
-            // above. Prefer that layer when auto-select is on; a
-            // full-canvas background contains every press, and keeping it
-            // would hide a foreground layer stacked on top of it.
-            if can_pick && auto_select {
-                if let (Some(under), Some(active)) = (under, active_id) {
-                    if under != active {
-                        let top = order.iter().position(|l| l.id == under);
-                        let current = order.iter().position(|l| l.id == active);
-                        if let ((Some(top)), (Some(current))) = (top, current) {
-                            if top > current {
-                                return Some((under, true));
-                            }
-                        }
-                    }
-                }
+    if let Some(active) = active
+        && active.transform.contains(pixel)
+    {
+        // `render_layers` is bottom to top, so a later index paints
+        // above. Prefer that layer when auto-select is on; a
+        // full-canvas background contains every press, and keeping it
+        // would hide a foreground layer stacked on top of it.
+        if can_pick
+            && auto_select
+            && let (Some(under), Some(active)) = (under, active_id)
+            && under != active
+        {
+            let top = order.iter().position(|l| l.id == under);
+            let current = order.iter().position(|l| l.id == active);
+            if let (Some(top), Some(current)) = (top, current)
+                && top > current
+            {
+                return Some((under, true));
             }
-            return Some((active.id, false));
         }
+        return Some((active.id, false));
     }
-    if can_pick && (auto_select || command) {
-        if let Some(id) = under {
-            return Some((id, true));
-        }
+    if can_pick
+        && (auto_select || command)
+        && let Some(id) = under
+    {
+        return Some((id, true));
     }
     active.map(|l| (l.id, false))
 }
-
-
 
 fn shape_drag_rect(
     kind: compositor_core::document::ShapeKind,
@@ -1555,8 +1621,8 @@ fn shape_drag_rect(
         // Shift on a line snaps its angle to eighths of a turn.
         let dx = end.x - anchor.x;
         let dy = end.y - anchor.y;
-        let angle = ((dy.atan2(dx)) / std::f64::consts::FRAC_PI_4).round()
-            * std::f64::consts::FRAC_PI_4;
+        let angle =
+            ((dy.atan2(dx)) / std::f64::consts::FRAC_PI_4).round() * std::f64::consts::FRAC_PI_4;
         let length = dx.hypot(dy);
         end = CGPoint::new(
             anchor.x + angle.cos() * length,
@@ -1582,7 +1648,8 @@ fn shape_drag_rect(
 }
 
 /// Which of the crop rect's 8 handles is under `doc`, if any.
-fn handle_at(rect: CGRect, doc: CGPoint) -> Option<usize> {    const HANDLE: f64 = 8.0;
+fn handle_at(rect: CGRect, doc: CGPoint) -> Option<usize> {
+    const HANDLE: f64 = 8.0;
     let corners = [
         (rect.min_x(), rect.min_y()),
         (rect.mid_x(), rect.min_y()),
@@ -1608,10 +1675,7 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
     window.paint_quad(gpui_kit::fill(bounds, rgb(0x232326)));
 
     // The scene is viewport-local; painting happens in window coordinates.
-    let scene = scene.translated(
-        f32::from(bounds.origin.x),
-        f32::from(bounds.origin.y),
-    );
+    let scene = scene.translated(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
 
     let image_bounds = scene.image_rect;
 
@@ -1622,7 +1686,14 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
 
     // The composite itself.
     if let Some(image) = &scene.image {
-        let _ = window.paint_image(bounds, image_bounds, Corners::default(), image.clone(), 0, false);
+        let _ = window.paint_image(
+            bounds,
+            image_bounds,
+            Corners::default(),
+            image.clone(),
+            0,
+            false,
+        );
         paint_rect_outline(window, image_bounds, rgba(0x00000066));
     }
 
@@ -1661,12 +1732,12 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
     }
 
     // Transform outline with corner handles.
-    if let Some(corners) = &scene.transform {
-        if corners.len() >= 3 {
-            paint_polygon(window, corners, rgba(0x4da6ffdd), false);
-            for corner in corners {
-                paint_handle(window, point(px(corner.0), px(corner.1)));
-            }
+    if let Some(corners) = &scene.transform
+        && corners.len() >= 3
+    {
+        paint_polygon(window, corners, rgba(0x4da6ffdd), false);
+        for corner in corners {
+            paint_handle(window, point(px(corner.0), px(corner.1)));
         }
     }
 
@@ -1681,8 +1752,20 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         let w = f32::from(rect.size.width);
         let h = f32::from(rect.size.height);
         for fraction in [1.0 / 3.0, 2.0 / 3.0] {
-            paint_line(window, bounds, f32::from(rect.origin.x) + w * fraction, true, rgba(0xffffff44));
-            paint_line(window, bounds, f32::from(rect.origin.y) + h * fraction, false, rgba(0xffffff44));
+            paint_line(
+                window,
+                bounds,
+                f32::from(rect.origin.x) + w * fraction,
+                true,
+                rgba(0xffffff44),
+            );
+            paint_line(
+                window,
+                bounds,
+                f32::from(rect.origin.y) + h * fraction,
+                false,
+                rgba(0xffffff44),
+            );
         }
         for corner in [
             (x0, y0),
@@ -1746,14 +1829,21 @@ impl CanvasScene {
         };
         let mut out = self.clone();
         let r = &mut out.image_rect;
-        r.origin = point(px(f32::from(r.origin.x) + ox), px(f32::from(r.origin.y) + oy));
+        r.origin = point(
+            px(f32::from(r.origin.x) + ox),
+            px(f32::from(r.origin.y) + oy),
+        );
         out.guides = out
             .guides
             .iter()
             .map(|(vertical, position)| {
                 (
                     *vertical,
-                    if *vertical { position + ox } else { position + oy },
+                    if *vertical {
+                        position + ox
+                    } else {
+                        position + oy
+                    },
                 )
             })
             .collect();
@@ -1762,34 +1852,33 @@ impl CanvasScene {
             .iter()
             .map(|(position, major, vertical)| {
                 (
-                    if *vertical { position + ox } else { position + oy },
+                    if *vertical {
+                        position + ox
+                    } else {
+                        position + oy
+                    },
                     *major,
                     *vertical,
                 )
             })
             .collect();
         out.selection = shift_rings(&self.selection);
-        out.lasso = self.lasso.as_ref().map(|rings| shift_rings(rings));
+        out.lasso = self.lasso.as_ref().map(shift_rings);
         out.crop = self
             .crop
             .map(|((x0, y0), (x1, y1))| ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)));
-        out.transform = self
-            .transform
-            .as_ref()
-            .map(|corners| shift(corners));
+        out.transform = self.transform.as_ref().map(|corners| shift(corners));
         out.text_box = self
             .text_box
             .map(|((x0, y0), (x1, y1))| ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)));
-        out.inline_text_frame = self
-            .inline_text_frame
-            .map(|corners| -> [(f32, f32); 4] {
-                let mut shifted = corners;
-                for (x, y) in &mut shifted {
-                    *x += ox;
-                    *y += oy;
-                }
-                shifted
-            });
+        out.inline_text_frame = self.inline_text_frame.map(|corners| -> [(f32, f32); 4] {
+            let mut shifted = corners;
+            for (x, y) in &mut shifted {
+                *x += ox;
+                *y += oy;
+            }
+            shifted
+        });
         out
     }
 }
@@ -1800,7 +1889,8 @@ fn paint_checkerboard(window: &mut Window, viewport: Bounds<Pixels>, image: Boun
     let dark = rgb(0xcccccc);
     let x0 = f32::from(image.origin.x).max(f32::from(viewport.origin.x));
     let y0 = f32::from(image.origin.y).max(f32::from(viewport.origin.y));
-    let x1 = (f32::from(image.origin.x) + f32::from(image.size.width)).min(f32::from(viewport.origin.x) + f32::from(viewport.size.width));
+    let x1 = (f32::from(image.origin.x) + f32::from(image.size.width))
+        .min(f32::from(viewport.origin.x) + f32::from(viewport.size.width));
     let y1 = (f32::from(image.origin.y) + f32::from(image.size.height))
         .min(f32::from(viewport.origin.y) + f32::from(viewport.size.height));
     if x1 <= x0 || y1 <= y0 {
@@ -1844,13 +1934,19 @@ fn paint_line(
             size(px(f32::from(viewport.size.width)), px(1.0)),
         )
     };
-    window.paint_quad(gpui_kit::fill(Bounds::<Pixels>::new(origin, line_size), color));
+    window.paint_quad(gpui_kit::fill(
+        Bounds::<Pixels>::new(origin, line_size),
+        color,
+    ));
 }
 
 fn paint_rect_outline(window: &mut Window, rect: Bounds<Pixels>, color: gpui_kit::Rgba) {
     let thickness = 1.0;
     let edges = [
-        Bounds::new(rect.origin, size(px(f32::from(rect.size.width)), px(thickness))),
+        Bounds::new(
+            rect.origin,
+            size(px(f32::from(rect.size.width)), px(thickness)),
+        ),
         Bounds::new(
             point(
                 px(f32::from(rect.origin.x)),
@@ -1858,7 +1954,10 @@ fn paint_rect_outline(window: &mut Window, rect: Bounds<Pixels>, color: gpui_kit
             ),
             size(px(f32::from(rect.size.width)), px(thickness)),
         ),
-        Bounds::new(rect.origin, size(px(thickness), px(f32::from(rect.size.height)))),
+        Bounds::new(
+            rect.origin,
+            size(px(thickness), px(f32::from(rect.size.height))),
+        ),
         Bounds::new(
             point(
                 px(f32::from(rect.origin.x) + f32::from(rect.size.width) - thickness),
@@ -1887,7 +1986,10 @@ fn paint_polygon(window: &mut Window, points: &[(f32, f32)], color: gpui_kit::Rg
 fn paint_handle(window: &mut Window, at: Point<Pixels>) {
     const SIZE: f32 = 8.0;
     let rect = Bounds::<Pixels>::new(
-        point(px(f32::from(at.x) - SIZE / 2.0), px(f32::from(at.y) - SIZE / 2.0)),
+        point(
+            px(f32::from(at.x) - SIZE / 2.0),
+            px(f32::from(at.y) - SIZE / 2.0),
+        ),
         size(px(SIZE), px(SIZE)),
     );
     window.paint_quad(gpui_kit::fill(rect, rgb(0xffffff)));
@@ -1922,23 +2024,41 @@ fn paint_darken_outside(window: &mut Window, viewport: Bounds<Pixels>, rect: Bou
     let strips = [
         Bounds::new(
             point(px(vw), px(vh)),
-            size(px(f32::from(viewport.size.width)), px((f32::from(rect.origin.y) - vh).max(0.0))),
-        ),
-        Bounds::new(
-            point(px(vw), px(f32::from(rect.origin.y) + f32::from(rect.size.height))),
             size(
                 px(f32::from(viewport.size.width)),
-                px((vh + f32::from(viewport.size.height) - f32::from(rect.origin.y) - f32::from(rect.size.height)).max(0.0)),
+                px((f32::from(rect.origin.y) - vh).max(0.0)),
+            ),
+        ),
+        Bounds::new(
+            point(
+                px(vw),
+                px(f32::from(rect.origin.y) + f32::from(rect.size.height)),
+            ),
+            size(
+                px(f32::from(viewport.size.width)),
+                px((vh + f32::from(viewport.size.height)
+                    - f32::from(rect.origin.y)
+                    - f32::from(rect.size.height))
+                .max(0.0)),
             ),
         ),
         Bounds::new(
             point(px(vw), px(f32::from(rect.origin.y))),
-            size(px((f32::from(rect.origin.x) - vw).max(0.0)), px(f32::from(rect.size.height))),
+            size(
+                px((f32::from(rect.origin.x) - vw).max(0.0)),
+                px(f32::from(rect.size.height)),
+            ),
         ),
         Bounds::new(
-            point(px(f32::from(rect.origin.x) + f32::from(rect.size.width)), px(f32::from(rect.origin.y))),
+            point(
+                px(f32::from(rect.origin.x) + f32::from(rect.size.width)),
+                px(f32::from(rect.origin.y)),
+            ),
             size(
-                px((vw + f32::from(viewport.size.width) - f32::from(rect.origin.x) - f32::from(rect.size.width)).max(0.0)),
+                px((vw + f32::from(viewport.size.width)
+                    - f32::from(rect.origin.x)
+                    - f32::from(rect.size.width))
+                .max(0.0)),
                 px(f32::from(rect.size.height)),
             ),
         ),
@@ -1952,8 +2072,14 @@ fn paint_darken_outside(window: &mut Window, viewport: Bounds<Pixels>, rect: Bou
 
 fn paint_rulers(window: &mut Window, bounds: Bounds<Pixels>, scene: &CanvasScene) {
     let thickness = RULER_SIZE;
-    let top = Bounds::new(bounds.origin, size(px(f32::from(bounds.size.width)), px(thickness)));
-    let left = Bounds::new(bounds.origin, size(px(thickness), px(f32::from(bounds.size.height))));
+    let top = Bounds::new(
+        bounds.origin,
+        size(px(f32::from(bounds.size.width)), px(thickness)),
+    );
+    let left = Bounds::new(
+        bounds.origin,
+        size(px(thickness), px(f32::from(bounds.size.height))),
+    );
     let background = rgb(0x2b2b2b);
     window.paint_quad(gpui_kit::fill(top, background));
     window.paint_quad(gpui_kit::fill(left, background));
@@ -2077,10 +2203,22 @@ mod tests {
         session.selected_layer_ids.truncate(1);
 
         // An invisible layer loses effective visibility (:10).
-        session.document.as_mut().unwrap().layer_mut(id).unwrap().is_visible = false;
+        session
+            .document
+            .as_mut()
+            .unwrap()
+            .layer_mut(id)
+            .unwrap()
+            .is_visible = false;
         let document = session.document.clone().unwrap();
         assert!(!can_paint(&session, &document));
-        session.document.as_mut().unwrap().layer_mut(id).unwrap().is_visible = true;
+        session
+            .document
+            .as_mut()
+            .unwrap()
+            .layer_mut(id)
+            .unwrap()
+            .is_visible = true;
 
         // An explicitly empty selection paints nothing; a absent selection
         // paints everywhere (:6).
@@ -2117,9 +2255,11 @@ mod tests {
         masked.mask.as_mut().unwrap().is_enabled = false;
         assert!(paint_target(&session, &document, &masked).is_none());
         session.is_mask_selected = false;
-        assert!(!paint_target(&session, &document, &masked)
-            .expect("layer pixels paintable again")
-            .is_mask);
+        assert!(
+            !paint_target(&session, &document, &masked)
+                .expect("layer pixels paintable again")
+                .is_mask
+        );
     }
 
     #[test]
@@ -2292,9 +2432,16 @@ mod tests {
         assert_eq!(ruler_axis_at((80.0, 10.0)), Some(GuideAxis::Horizontal));
         assert_eq!(ruler_axis_at((10.0, 80.0)), Some(GuideAxis::Vertical));
         assert_eq!(ruler_axis_at((10.0, 10.0)), None, "the corner is inert");
-        assert_eq!(ruler_axis_at((80.0, 80.0)), None, "the canvas body is no ruler");
+        assert_eq!(
+            ruler_axis_at((80.0, 80.0)),
+            None,
+            "the canvas body is no ruler"
+        );
         // The strip edges themselves belong to the rulers.
-        assert_eq!(ruler_axis_at((RULER_SIZE + 1.0, RULER_SIZE - 1.0)), Some(GuideAxis::Horizontal));
+        assert_eq!(
+            ruler_axis_at((RULER_SIZE + 1.0, RULER_SIZE - 1.0)),
+            Some(GuideAxis::Horizontal)
+        );
     }
 
     #[test]
@@ -2356,7 +2503,11 @@ mod tests {
             (0.0, 30.0, 7),
         ];
         for (x, y, index) in expected {
-            assert_eq!(handle_at(rect, CGPoint::new(x, y)), Some(index), "at {x},{y}");
+            assert_eq!(
+                handle_at(rect, CGPoint::new(x, y)),
+                Some(index),
+                "at {x},{y}"
+            );
         }
     }
 
@@ -2364,16 +2515,40 @@ mod tests {
     fn shape_drag_rect_squares_and_centers() {
         let anchor = CGPoint::new(10.0, 10.0);
         // No modifiers: the plain anchor→point box.
-        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), false, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Rectangle,
+            anchor,
+            CGPoint::new(23.0, 27.0),
+            false,
+            false,
+        );
         assert_eq!(rect, CGRect::new(10.0, 10.0, 13.0, 17.0));
         // Shift squares it to the longer side, keeping the drag direction.
-        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), true, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Rectangle,
+            anchor,
+            CGPoint::new(23.0, 27.0),
+            true,
+            false,
+        );
         assert_eq!(rect, CGRect::new(10.0, 10.0, 17.0, 17.0));
         // Option grows a symmetric shape around the anchor.
-        let rect = shape_drag_rect(ShapeKind::Rectangle, anchor, CGPoint::new(23.0, 27.0), false, true);
+        let rect = shape_drag_rect(
+            ShapeKind::Rectangle,
+            anchor,
+            CGPoint::new(23.0, 27.0),
+            false,
+            true,
+        );
         assert_eq!(rect, CGRect::new(-3.0, -7.0, 26.0, 34.0));
         // Backwards drags normalize to positive sizes.
-        let rect = shape_drag_rect(ShapeKind::Ellipse, anchor, CGPoint::new(-5.0, 4.0), false, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Ellipse,
+            anchor,
+            CGPoint::new(-5.0, 4.0),
+            false,
+            false,
+        );
         assert_eq!(rect, CGRect::new(-5.0, 4.0, 15.0, 6.0));
     }
 
@@ -2381,19 +2556,43 @@ mod tests {
     fn shape_drag_line_snaps_to_eighths_and_ignores_modifiers() {
         let anchor = CGPoint::new(0.0, 0.0);
         // Shift snaps a shallow drag to exactly horizontal.
-        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(100.0, 7.0), true, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Line,
+            anchor,
+            CGPoint::new(100.0, 7.0),
+            true,
+            false,
+        );
         assert_eq!(rect, CGRect::new(0.0, 0.0, 100.0, 0.0));
         // A 3-4-5-ish drag snaps to the 45° diagonal, keeping its length
         // (drag_box_rect rounds the snapped end to whole pixels).
-        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), true, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Line,
+            anchor,
+            CGPoint::new(10.0, 8.0),
+            true,
+            false,
+        );
         let snapped = (164.0f64.sqrt() * std::f64::consts::FRAC_1_SQRT_2).round();
         assert_eq!(rect.size.width, snapped);
         assert_eq!(rect.size.height, snapped);
         // Without shift, no snap.
-        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), false, false);
+        let rect = shape_drag_rect(
+            ShapeKind::Line,
+            anchor,
+            CGPoint::new(10.0, 8.0),
+            false,
+            false,
+        );
         assert_eq!(rect, CGRect::new(0.0, 0.0, 10.0, 8.0));
         // A line ignores Option centering: it stays the plain box.
-        let rect = shape_drag_rect(ShapeKind::Line, anchor, CGPoint::new(10.0, 8.0), false, true);
+        let rect = shape_drag_rect(
+            ShapeKind::Line,
+            anchor,
+            CGPoint::new(10.0, 8.0),
+            false,
+            true,
+        );
         assert_eq!(rect, CGRect::new(0.0, 0.0, 10.0, 8.0));
     }
 }

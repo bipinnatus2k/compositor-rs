@@ -4,21 +4,19 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use gpui_kit::{
-    canvas, px, point, prelude::FluentBuilder as _, rgba, size, Bounds, Context, Entity,
-    InteractiveElement, IntoElement, Keystroke, KeystrokeEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::{
+    Bounds, Context, Entity, InteractiveElement, IntoElement, Keystroke, KeystrokeEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, canvas,
+    point, prelude::FluentBuilder as _, px, rgba, size,
+};
 
-use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
 use compositor_core::adjust::{CurvePoint, CurvesSettings, LevelsChannel};
-
-
+use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
 
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::Bitmap;
@@ -27,8 +25,8 @@ use compositor_core::tools::brush::RasterEdit;
 
 use crate::project::UnsavedChoice;
 
-use crate::state::{AppState, SheetKind};
-use crate::ui::{dropdown, labeled_checkbox, text_label, MenuEntry};
+use crate::state::{AppState, FitDims, SheetKind};
+use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
 
 /// Starting a drag on the curve canvas (`CurvesControls.swift`'s
 /// `dragging == nil` branch).
@@ -38,7 +36,10 @@ pub enum CurveDragBegin {
     Grab(usize),
     /// The click landed on empty canvas; a point was inserted (kept sorted
     /// by x) and the drag moves it.
-    Added { points: Vec<CurvePoint>, index: usize },
+    Added {
+        points: Vec<CurvePoint>,
+        index: usize,
+    },
     /// Nothing to drag: the 32-point cap, the x range, or a blocked x.
     None,
 }
@@ -124,7 +125,9 @@ impl AppState {
             && self
                 .sheet
                 .as_ref()
-                .map(|sheet| sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset)))
+                .map(|sheet| {
+                    sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset))
+                })
                 .unwrap_or(false);
         let footer = if kind == SheetKind::Confirm && self.delete_ask_ids.is_some() {
             // The live-mask delete ask (deleteWithLiveMaskChoice's NSAlert,
@@ -232,9 +235,7 @@ impl AppState {
                     Button::new("sheet-cancel")
                         .label("Cancel")
                         .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.cancel_sheet(window, cx)
-                        })),
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_sheet(window, cx))),
                 )
                 .child(
                     Button::new("sheet-ok")
@@ -318,7 +319,11 @@ impl AppState {
                             .flex_row()
                             .items_center()
                             .gap_2()
-                            .child(Input::new(&sheet.resolution).id("size-resolution").w(px(80.0)))
+                            .child(
+                                Input::new(&sheet.resolution)
+                                    .id("size-resolution")
+                                    .w(px(80.0)),
+                            )
                             .child(text_label("Pixels/Inch", true)),
                     ))
                     .child(sheet_row(
@@ -398,7 +403,10 @@ impl AppState {
                 let preview = sheet.jpeg_preview.clone();
                 let ready = sheet.jpeg_ready == Some((quality as f64, matte));
                 let status = if ready {
-                    format!("{} · encoded preview, fitted to window", sheet.jpeg_size_label)
+                    format!(
+                        "{} · encoded preview, fitted to window",
+                        sheet.jpeg_size_label
+                    )
                 } else {
                     "Updating preview…".to_string()
                 };
@@ -422,7 +430,10 @@ impl AppState {
                             }),
                     )
                     .child(sheet_row("", text_label(status, true)))
-                    .child(sheet_row("Quality", labeled_slider(&sliders, 0, &quality_text)))
+                    .child(sheet_row(
+                        "Quality",
+                        labeled_slider(&sliders, 0, &quality_text),
+                    ))
                     .child(sheet_row(
                         "Matte",
                         dropdown(
@@ -541,7 +552,9 @@ impl AppState {
                     ))
                     .child(sheet_row(
                         "Tolerance",
-                        Input::new(&sheet.tolerance).id("trim-tolerance").w(px(80.0)),
+                        Input::new(&sheet.tolerance)
+                            .id("trim-tolerance")
+                            .w(px(80.0)),
                     ));
             }
             SheetKind::About => {
@@ -558,7 +571,11 @@ impl AppState {
                 );
             }
             SheetKind::Confirm | SheetKind::Alert => {
-                let message = self.sheet.as_ref().map(|s| s.message.clone()).unwrap_or_default();
+                let message = self
+                    .sheet
+                    .as_ref()
+                    .map(|s| s.message.clone())
+                    .unwrap_or_default();
                 for line in message.lines() {
                     body = body.child(text_label(line.to_string(), false));
                 }
@@ -808,21 +825,26 @@ impl AppState {
                     let sheet = self.sheet.as_ref().unwrap();
                     (
                         sheet.path.read(cx_app).value().to_string(),
-                        sheet.sliders.first().map(|s| s.read(cx_app).value().end()).unwrap_or(0.85) as f64,
+                        sheet
+                            .sliders
+                            .first()
+                            .map(|s| s.read(cx_app).value().end())
+                            .unwrap_or(0.85) as f64,
                         sheet.preset,
                     )
                 };
                 // The quality of this export starts the next one
                 // (JPEGExportSheet's UserDefaults write at Export press).
-                crate::settings::lock_global()
-                    .set_number(quality, "jpegExportQuality");
+                crate::settings::lock_global().set_number(quality, "jpegExportQuality");
                 crate::settings::lock_global().save().ok();
                 // Export writes the ready preview's own bytes
                 // (`finish(result?.data)`); a stale preview encodes fresh.
                 let data = {
                     let sheet = self.sheet.as_ref().unwrap();
                     match (&sheet.jpeg_data, sheet.jpeg_ready) {
-                        (Some(data), Some(ready)) if ready == (quality, matte) => Some(data.clone()),
+                        (Some(data), Some(ready)) if ready == (quality, matte) => {
+                            Some(data.clone())
+                        }
                         _ => None,
                     }
                 };
@@ -854,7 +876,10 @@ impl AppState {
                         ) {
                             Some(encoded) => encoded,
                             None => {
-                                self.set_status("Export failed: the image could not be encoded.", cx);
+                                self.set_status(
+                                    "Export failed: the image could not be encoded.",
+                                    cx,
+                                );
                                 return;
                             }
                         }
@@ -874,7 +899,9 @@ impl AppState {
                     (
                         sheet.based_on,
                         sheet.sides,
-                        parse_input_usize(&sheet.tolerance, cx_app).unwrap_or(0).min(255) as u8,
+                        parse_input_usize(&sheet.tolerance, cx_app)
+                            .unwrap_or(0)
+                            .min(255) as u8,
                     )
                 };
                 let options = TrimOptions {
@@ -910,9 +937,15 @@ impl AppState {
 
     /// Fills the active layer with one color, honoring the selection.
     pub fn fill_active(&mut self, color: [u8; 4], name: &str, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.document.clone() else { return };
-        let Some(id) = self.tab().session.active_layer_id else { return };
-        let Some(layer) = document.layer(id) else { return };
+        let Some(document) = self.tab().session.document.clone() else {
+            return;
+        };
+        let Some(id) = self.tab().session.active_layer_id else {
+            return;
+        };
+        let Some(layer) = document.layer(id) else {
+            return;
+        };
         if layer.is_group {
             return;
         }
@@ -938,18 +971,18 @@ impl AppState {
             match compositor_core::project::load(&dir) {
                 Ok(data) => match compositor_core::project::document_from_project(&data) {
                     Ok((document, active)) => {
-                        self.tab().session.active_layer_id = active.or_else(|| {
-                            document.layers.last().map(|layer| layer.id)
-                        });
+                        self.tab().session.active_layer_id =
+                            active.or_else(|| document.layers.last().map(|layer| layer.id));
                         self.tab().session.selected_layer_ids = self
-                            .tab().session
+                            .tab()
+                            .session
                             .active_layer_id
                             .map(|id| vec![id])
                             .unwrap_or_default();
                         self.tab().session.document = Some(document);
                         self.tab().session.history.reset();
                         self.tab().session.mark_saved();
-                        self.fit_for = (0, 0);
+                        self.fit_for = FitDims::REFIT;
                         self.set_status(format!("Opened {}", dir.display()), cx);
                     }
                     Err(error) => self.set_status(format!("Open failed: {}", error), cx),
@@ -975,7 +1008,7 @@ impl AppState {
                 .unwrap_or_else(|| "Photoshop".to_string());
             match self.tab().session.import_photoshop_data(&name, &data) {
                 Ok(notes) => {
-                    self.fit_for = (0, 0);
+                    self.fit_for = FitDims::REFIT;
                     self.set_status(
                         if notes > 0 {
                             format!(
@@ -1025,7 +1058,7 @@ impl AppState {
                     }
                     session.select_layer(Some(id));
                 });
-                self.fit_for = (0, 0);
+                self.fit_for = FitDims::REFIT;
                 self.set_status(format!("Opened {}", path), cx);
             }
             Err(error) => self.set_status(format!("Open failed: {}", error), cx),
@@ -1076,7 +1109,10 @@ pub enum RecorderCapture {
 pub fn recorder_capture(chord_text: &str) -> RecorderCapture {
     // gpui synthesizes keystrokes keyed by the bare modifier's name when a
     // modifier is pressed alone; those never finish a recording.
-    if matches!(chord_text, "control" | "alt" | "shift" | "platform" | "function") {
+    if matches!(
+        chord_text,
+        "control" | "alt" | "shift" | "platform" | "function"
+    ) {
         return RecorderCapture::Ignore;
     }
     // Exactly one chord, no `key->char` test syntax — the same shape
@@ -1144,9 +1180,8 @@ impl AppState {
 
     /// The id of the row currently recording, if any.
     pub(crate) fn shortcuts_recording_id() -> Option<String> {
-        SHORTCUTS_SHEET.with_borrow(|slot| {
-            slot.as_ref().and_then(|editor| editor.recording.clone())
-        })
+        SHORTCUTS_SHEET
+            .with_borrow(|slot| slot.as_ref().and_then(|editor| editor.recording.clone()))
     }
 
     /// Discards the draft: the registry returns to its state when the sheet
@@ -1245,9 +1280,8 @@ impl AppState {
             ))
             .child(list);
         if let Some(problem) = problem {
-            column = column.child(
-                text_label(problem.to_string(), false).text_color(gpui_kit::rgb(0xe0a24a)),
-            );
+            column = column
+                .child(text_label(problem.to_string(), false).text_color(gpui_kit::rgb(0xe0a24a)));
         }
         column.into_any_element()
     }
@@ -1319,11 +1353,7 @@ fn shortcuts_handle_keystroke(
         let Some(editor) = slot.as_mut() else {
             return None;
         };
-        if editor.recording.is_none() {
-            // The sheet is open but nothing records: the keystroke is
-            // nobody's business.
-            return None;
-        }
+        editor.recording.as_ref()?;
         // Recording: swallow the keystroke either way.
         cx.stop_propagation();
         match recorder_capture(&chord_text) {
@@ -1359,10 +1389,7 @@ pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
 
 /// Window pixels inside the curve canvas → curve units 0…255 with the y
 /// axis flipped (CurvesControls' `position(_:)` inverse).
-pub fn curve_point_from_event(
-    position: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-) -> (f64, f64) {
+pub fn curve_point_from_event(position: Point<Pixels>, bounds: Bounds<Pixels>) -> (f64, f64) {
     let width = f32::from(bounds.size.width).max(1.0) as f64;
     let height = f32::from(bounds.size.height).max(1.0) as f64;
     let x = (f32::from(position.x) - f32::from(bounds.origin.x)) as f64;
@@ -1388,7 +1415,7 @@ pub fn curve_hit_point(points: &[CurvePoint], x: f64, y: f64) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (index, point) in points.iter().enumerate() {
         let distance = ((point.x - x).powi(2) + (point.y - y).powi(2)).sqrt();
-        if distance < 14.0 && best.map_or(true, |(_, best)| distance < best) {
+        if distance < 14.0 && best.is_none_or(|(_, best)| distance < best) {
             best = Some((index, distance));
         }
     }
@@ -1526,10 +1553,7 @@ fn paint_curve_canvas(
     }
     for (index, value) in points.iter().enumerate() {
         let (x, y) = curve_value_to_screen(value.x, value.y, bounds);
-        let rect = Bounds::<Pixels>::new(
-            point(px(x - 4.0), px(y - 4.0)),
-            size(px(8.0), px(8.0)),
-        );
+        let rect = Bounds::<Pixels>::new(point(px(x - 4.0), px(y - 4.0)), size(px(8.0), px(8.0)));
         window.paint_quad(gpui_kit::fill(
             rect,
             if selected == Some(index) {
@@ -1661,15 +1685,18 @@ pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        curve_drag_begin, curve_drag_move, curve_hit_point, curve_point_from_event,
-        curve_value_to_screen, display_chord, recorder_capture, restore_overrides,
-        levels_channel_label, CurveDragBegin, RecorderCapture,
+        CurveDragBegin, RecorderCapture, curve_drag_begin, curve_drag_move, curve_hit_point,
+        curve_point_from_event, curve_value_to_screen, display_chord, levels_channel_label,
+        recorder_capture, restore_overrides,
     };
     use compositor_core::adjust::{CurvePoint, LevelsChannel};
-    use gpui_kit::{point, px, size, Bounds, Pixels};
+    use gpui_kit::{Bounds, Pixels, point, px, size};
 
     fn diagonal() -> Vec<CurvePoint> {
-        vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 255.0, y: 255.0 }]
+        vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 255.0, y: 255.0 },
+        ]
     }
 
     fn canvas_bounds() -> Bounds<Pixels> {
@@ -1680,12 +1707,24 @@ mod tests {
     fn event_position_maps_to_curve_units() {
         let bounds = canvas_bounds();
         // The canvas origin is curve (0, 255); the bottom right is (255, 0).
-        assert_eq!(curve_point_from_event(point(px(10.0), px(20.0)), bounds), (0.0, 255.0));
-        assert_eq!(curve_point_from_event(point(px(265.0), px(275.0)), bounds), (255.0, 0.0));
+        assert_eq!(
+            curve_point_from_event(point(px(10.0), px(20.0)), bounds),
+            (0.0, 255.0)
+        );
+        assert_eq!(
+            curve_point_from_event(point(px(265.0), px(275.0)), bounds),
+            (255.0, 0.0)
+        );
         // The center is the diagonal's midpoint, and clamping keeps drags
         // outside the canvas in range.
-        assert_eq!(curve_point_from_event(point(px(135.0), px(145.0)), bounds), (125.0, 130.0));
-        assert_eq!(curve_point_from_event(point(px(-50.0), px(-50.0)), bounds), (0.0, 255.0));
+        assert_eq!(
+            curve_point_from_event(point(px(135.0), px(145.0)), bounds),
+            (125.0, 130.0)
+        );
+        assert_eq!(
+            curve_point_from_event(point(px(-50.0), px(-50.0)), bounds),
+            (0.0, 255.0)
+        );
     }
 
     #[test]
@@ -1840,10 +1879,7 @@ mod tests {
         }
         // Multi-key sequences and the test-only `key->char` syntax never
         // finish a recording either.
-        assert_eq!(
-            recorder_capture("ctrl-x ctrl-c"),
-            RecorderCapture::Ignore
-        );
+        assert_eq!(recorder_capture("ctrl-x ctrl-c"), RecorderCapture::Ignore);
         assert_eq!(recorder_capture("a->b"), RecorderCapture::Ignore);
         assert_eq!(recorder_capture(""), RecorderCapture::Ignore);
     }
@@ -1879,7 +1915,11 @@ mod tests {
             let registry = crate::shortcuts::lock_global();
             assert_eq!(registry.chord("edit.undo"), "ctrl-alt-z");
             assert_eq!(registry.chord("tool.brush"), "b", "drift is discarded");
-            assert_eq!(registry.chord("edit.redo"), "ctrl-shift-z", "drift is discarded");
+            assert_eq!(
+                registry.chord("edit.redo"),
+                "ctrl-shift-z",
+                "drift is discarded"
+            );
             assert!(registry.validate().is_ok());
         });
         restore_overrides(original);

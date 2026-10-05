@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::curves::{CurvePoint, CurvesSettings};
-use super::levels::{levels_histogram, LevelsHistogramDisplay};
+use super::levels::{LevelsHistogramDisplay, levels_histogram};
 use crate::geometry::CGRect;
-use crate::raster::{bilinear_sample, draw_over, Bitmap, LayerSampling};
+use crate::raster::{Bitmap, LayerSampling, bilinear_sample, draw_over};
 
 /// White balance on an already-rendered layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -33,7 +33,7 @@ pub enum CameraRawGlowStyle {
 }
 
 impl CameraRawGlowStyle {
-    pub fn kernel_value(&self) -> i32 {
+    pub fn shader_index(&self) -> i32 {
         match self {
             CameraRawGlowStyle::Diffusion => 0,
             CameraRawGlowStyle::Bloom => 1,
@@ -55,7 +55,7 @@ pub enum CameraRawVignetteStyle {
 }
 
 impl CameraRawVignetteStyle {
-    pub fn kernel_value(&self) -> i32 {
+    pub fn shader_index(&self) -> i32 {
         match self {
             CameraRawVignetteStyle::HighlightPriority => 0,
             CameraRawVignetteStyle::ColorPriority => 1,
@@ -177,7 +177,7 @@ pub enum CameraRawProcessVersion {
 }
 
 impl CameraRawProcessVersion {
-    pub fn kernel_value(&self) -> i32 {
+    pub fn shader_index(&self) -> i32 {
         match self {
             CameraRawProcessVersion::Version1 => 1,
             CameraRawProcessVersion::Version2 => 2,
@@ -346,6 +346,8 @@ impl CameraRawCurveSettings {
     }
 
     /// Lifts or lowers the region a tone belongs to. Dividers are fractions of the tonal range.
+    // `.min().max()` keeps the Swift original's order; clamp() differs on NaN.
+    #[allow(clippy::manual_clamp)]
     pub fn parametric(&self, tone: f64) -> f64 {
         let shadow = self.shadow_split / 100.0;
         let dark = self.dark_split / 100.0;
@@ -361,7 +363,9 @@ impl CameraRawCurveSettings {
         };
         let span = (hi - lo).max(0.02);
         let weight = 1.0 - (tone - (lo + hi) / 2.0).abs() / (span / 2.0);
-        (tone + (amount / 100.0) * weight.max(0.0) * 0.22).min(1.0).max(0.0)
+        (tone + (amount / 100.0) * weight.max(0.0) * 0.22)
+            .min(1.0)
+            .max(0.0)
     }
 
     /// The region name a tone belongs to, as an index: 0 shadows, 1 darks,
@@ -385,7 +389,10 @@ impl CameraRawCurveSettings {
         let mut curve = CurvesSettings::default();
         curve.channels[0] = points
             .iter()
-            .map(|p| CurvePoint { x: p.x * 255.0, y: p.y * 255.0 })
+            .map(|p| CurvePoint {
+                x: p.x * 255.0,
+                y: p.y * 255.0,
+            })
             .collect();
         curve.value(x * 255.0, 0) / 255.0
     }
@@ -407,6 +414,8 @@ impl CameraRawCurveSettings {
     }
 
     /// Moves the nearest point of one channel vertically (`nudged(near:by:)`).
+    // `.min().max()` keeps the Swift original's order; clamp() differs on NaN.
+    #[allow(clippy::manual_clamp)]
     pub fn nudged(&self, channel: CameraRawPointChannel, near_tone: f64, delta: f64) -> Self {
         let mut result = self.clone();
         let source = match channel {
@@ -455,6 +464,8 @@ impl CameraRawCurveSettings {
         result
     }
 
+    // `.min().max()` keeps the Swift original's order; clamp() differs on NaN.
+    #[allow(clippy::manual_clamp)]
     fn repair(points: &[CurvePoint]) -> Vec<CurvePoint> {
         let mut sorted: Vec<CurvePoint> = points
             .iter()
@@ -476,7 +487,10 @@ impl CameraRawCurveSettings {
             if x <= kept[kept.len() - 1].x + 0.01 {
                 continue;
             }
-            kept.push(CurvePoint { x, y: point.y.min(1.0).max(0.0) });
+            kept.push(CurvePoint {
+                x,
+                y: point.y.min(1.0).max(0.0),
+            });
         }
         kept.push(sorted[last]);
         kept
@@ -681,7 +695,9 @@ impl CameraRawGradingSettings {
     }
 
     pub fn adjusts(&self) -> bool {
-        self.wheels().iter().any(|w| w.saturation != 0.0 || w.luminance != 0.0)
+        self.wheels()
+            .iter()
+            .any(|w| w.saturation != 0.0 || w.luminance != 0.0)
     }
 
     /// The 12 floats `adjust_camera_raw_curve_color` reads as `grade`.
@@ -783,7 +799,8 @@ impl CameraRawDetailSettings {
         result.sharpen_masking = clamp_slider(self.sharpen_masking, 0.0, 100.0, 0.0);
         result.noise_luminance = clamp_slider(self.noise_luminance, 0.0, 100.0, 0.0);
         result.noise_luminance_detail = clamp_slider(self.noise_luminance_detail, 0.0, 100.0, 50.0);
-        result.noise_luminance_contrast = clamp_slider(self.noise_luminance_contrast, 0.0, 100.0, 0.0);
+        result.noise_luminance_contrast =
+            clamp_slider(self.noise_luminance_contrast, 0.0, 100.0, 0.0);
         result.noise_color = clamp_slider(self.noise_color, 0.0, 100.0, 0.0);
         result.noise_color_detail = clamp_slider(self.noise_color_detail, 0.0, 100.0, 50.0);
         result.noise_color_smoothness = clamp_slider(self.noise_color_smoothness, 0.0, 100.0, 50.0);
@@ -982,7 +999,8 @@ impl CameraRawGeometrySettings {
     pub fn normalized(&self) -> Self {
         let mut result = self.clone();
         result.vertical = clamp_slider(self.vertical, Self::TONE_RANGE.0, Self::TONE_RANGE.1, 0.0);
-        result.horizontal = clamp_slider(self.horizontal, Self::TONE_RANGE.0, Self::TONE_RANGE.1, 0.0);
+        result.horizontal =
+            clamp_slider(self.horizontal, Self::TONE_RANGE.0, Self::TONE_RANGE.1, 0.0);
         result.rotate = clamp_slider(self.rotate, Self::ROTATE_RANGE.0, Self::ROTATE_RANGE.1, 0.0);
         result.aspect = clamp_slider(self.aspect, Self::TONE_RANGE.0, Self::TONE_RANGE.1, 0.0);
         result.scale = clamp_slider(self.scale, Self::TONE_RANGE.0, Self::TONE_RANGE.1, 0.0);
@@ -1089,8 +1107,16 @@ impl CameraRawGeometrySettings {
             let sl = sx.hypot(sy);
             if sl > 1e-4 {
                 let a2 = sy.atan2(sx) * 180.0 / std::f64::consts::PI;
-                vertical = if a2.abs() > 45.0 { if a2 > 0.0 { 25.0 } else { -25.0 } } else { 0.0 };
-                horizontal = if a2.abs() <= 45.0 { if a2 > 0.0 { 25.0 } else { -25.0 } } else { 0.0 };
+                vertical = if a2.abs() > 45.0 {
+                    if a2 > 0.0 { 25.0 } else { -25.0 }
+                } else {
+                    0.0
+                };
+                horizontal = if a2.abs() <= 45.0 {
+                    if a2 > 0.0 { 25.0 } else { -25.0 }
+                } else {
+                    0.0
+                };
             }
         }
         (vertical, horizontal, rotate)
@@ -1108,7 +1134,11 @@ impl CameraRawGeometrySettings {
     ) -> [(f64, f64); 4] {
         let w = width as f64;
         let h = height as f64;
-        let strength = if self.projection == CameraRawProjection::Perspective { 1.0 } else { 0.55 };
+        let strength = if self.projection == CameraRawProjection::Perspective {
+            1.0
+        } else {
+            0.55
+        };
         let v = vertical / 100.0 * w * 0.18 * strength;
         let hz = horizontal / 100.0 * h * 0.18 * strength;
         let aspect_scale = 1.0 + self.aspect / 200.0;
@@ -1382,7 +1412,10 @@ impl CameraRawSettings {
     }
 
     pub fn adjusts_color(&self) -> bool {
-        self.temperature != 0.0 || self.tint != 0.0 || self.vibrance != 0.0 || self.saturation != 0.0
+        self.temperature != 0.0
+            || self.tint != 0.0
+            || self.vibrance != 0.0
+            || self.saturation != 0.0
     }
 
     pub fn adjusts_effects(&self) -> bool {
@@ -1601,7 +1634,11 @@ impl CameraRawSettings {
             return image.clone();
         }
         let settings = self.normalized();
-        if settings.is_identity() && clipping.is_none() && visualize_point_color < 0 && !sharpen_mask {
+        if settings.is_identity()
+            && clipping.is_none()
+            && visualize_point_color < 0
+            && !sharpen_mask
+        {
             return image.clone();
         }
         let (red_gain, green_gain, blue_gain) = settings.gains();
@@ -1618,8 +1655,8 @@ impl CameraRawSettings {
                 || settings.adjusts_grading()
                 || visualize_point_color >= 0);
         let paint_effects = clipping.is_none() && !sharpen_mask && settings.adjusts_effects();
-        let paint_detail_optics =
-            clipping.is_none() && (settings.adjusts_detail() || settings.adjusts_optics() || sharpen_mask);
+        let paint_detail_optics = clipping.is_none()
+            && (settings.adjusts_detail() || settings.adjusts_optics() || sharpen_mask);
         let mut result = if clipping.is_none()
             && !sharpen_mask
             && visualize_point_color < 0
@@ -1665,7 +1702,7 @@ impl CameraRawSettings {
                     settings.clarity,
                     settings.dehaze,
                     settings.glow,
-                    settings.glow_style.kernel_value(),
+                    settings.glow_style.shader_index(),
                     settings.glow_range,
                     settings.glow_spread,
                     settings.glow_warmth,
@@ -1674,7 +1711,7 @@ impl CameraRawSettings {
                     settings.vignette_roundness,
                     settings.vignette_feather,
                     settings.vignette_highlights,
-                    settings.vignette_style.kernel_value(),
+                    settings.vignette_style.shader_index(),
                     pixel_scale,
                 );
             }
@@ -1759,7 +1796,11 @@ impl CameraRawSettings {
         if optics.adjusts() {
             adjust_camera_raw_optics(
                 bitmap,
-                if optics.remove_chromatic_aberration { 1 } else { 0 },
+                if optics.remove_chromatic_aberration {
+                    1
+                } else {
+                    0
+                },
                 if optics.enable_lens_profile { 1 } else { 0 },
                 optics.profile_distortion,
                 optics.profile_vignetting,
@@ -1809,7 +1850,7 @@ impl CameraRawSettings {
             calibration.green_saturation,
             calibration.blue_hue,
             calibration.blue_saturation,
-            calibration.process.kernel_value(),
+            calibration.process.shader_index(),
         );
     }
 
@@ -1839,7 +1880,11 @@ impl CameraRawSettings {
 
     /// `neutralize(straightRed:green:blue:)`.
     pub fn neutralize_straight(red: f64, green: f64, blue: f64) -> Option<(f64, f64)> {
-        Self::neutralize_linear(decode_linear(red), decode_linear(green), decode_linear(blue))
+        Self::neutralize_linear(
+            decode_linear(red),
+            decode_linear(green),
+            decode_linear(blue),
+        )
     }
 
     /// Gray-world balance of the opaque pixels (`autoBalance(of:)`). Nil when
@@ -1940,7 +1985,6 @@ pub fn apply_auto_white_balance(settings: &mut CameraRawSettings, image: &Bitmap
     }
 }
 
-
 /// `ImageAdjustmentPixels`/`CameraRawSettings.decode`: encoded sRGB to linear light.
 pub fn decode_linear(encoded: f64) -> f64 {
     if encoded <= 0.04045 {
@@ -1972,7 +2016,10 @@ mod eyedropper_tests {
         apply_defringe_sample(&mut optics, 300.0);
         assert!((optics.purple_hue_low - 275.0).abs() < 1e-9, "{optics:?}");
         assert!((optics.purple_hue_high - 325.0).abs() < 1e-9);
-        assert!((optics.purple_amount - 50.0).abs() < 1e-9, "an untouched amount starts at 50");
+        assert!(
+            (optics.purple_amount - 50.0).abs() < 1e-9,
+            "an untouched amount starts at 50"
+        );
         assert_eq!(optics.green_amount, 0.0);
         // A green fringe (near 90) centers the green handles instead.
         let mut optics = CameraRawOpticsSettings::default();
@@ -1983,8 +2030,16 @@ mod eyedropper_tests {
         // Normalized handles stay on the color wheel even across 0/360.
         let mut optics = CameraRawOpticsSettings::default();
         apply_defringe_sample(&mut optics, 359.0);
-        assert!((0.0..=360.0).contains(&optics.purple_hue_low), "{}", optics.purple_hue_low);
-        assert!((0.0..=360.0).contains(&optics.purple_hue_high), "{}", optics.purple_hue_high);
+        assert!(
+            (0.0..=360.0).contains(&optics.purple_hue_low),
+            "{}",
+            optics.purple_hue_low
+        );
+        assert!(
+            (0.0..=360.0).contains(&optics.purple_hue_high),
+            "{}",
+            optics.purple_hue_high
+        );
     }
 
     #[test]
@@ -2011,8 +2066,6 @@ mod eyedropper_tests {
         assert!(!apply_auto_white_balance(&mut settings, &empty));
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Pixel kernels ported from Rendering/AdjustPixels.c.
@@ -2135,7 +2188,11 @@ fn vibrance_and_saturation(rgb: &mut [f64; 3], vibrance: f64, saturation: f64) {
     }
     let mut skin = 0.0;
     if (10.0..=50.0).contains(&hue) {
-        skin = if hue <= 30.0 { (hue - 10.0) / 20.0 } else { (50.0 - hue) / 20.0 };
+        skin = if hue <= 30.0 {
+            (hue - 10.0) / 20.0
+        } else {
+            (50.0 - hue) / 20.0
+        };
         skin *= camera_clamp((sat - 0.15) / 0.35);
     }
     let mut amount = vibrance * (1.0 - sat);
@@ -2389,12 +2446,15 @@ pub fn adjust_camera_raw_clip_overlay(bitmap: &mut Bitmap, shadows: i32, highlig
             continue;
         }
         let mut rgb = straight_at(p, alpha);
-        if shadows != 0 && (rgb[0] <= 0.5 / 255.0 || rgb[1] <= 0.5 / 255.0 || rgb[2] <= 0.5 / 255.0) {
+        if shadows != 0 && (rgb[0] <= 0.5 / 255.0 || rgb[1] <= 0.5 / 255.0 || rgb[2] <= 0.5 / 255.0)
+        {
             rgb[0] *= 0.35;
             rgb[1] *= 0.35;
             rgb[2] = rgb[2] * 0.35 + 0.65;
         }
-        if highlights != 0 && (rgb[0] >= 254.5 / 255.0 || rgb[1] >= 254.5 / 255.0 || rgb[2] >= 254.5 / 255.0) {
+        if highlights != 0
+            && (rgb[0] >= 254.5 / 255.0 || rgb[1] >= 254.5 / 255.0 || rgb[2] >= 254.5 / 255.0)
+        {
             rgb[0] = rgb[0] * 0.35 + 0.65;
             rgb[1] *= 0.35;
             rgb[2] *= 0.35;
@@ -2426,17 +2486,18 @@ pub fn adjust_camera_raw_effects(
     if width == 0 || height == 0 {
         return;
     }
-    if texture == 0.0 && clarity == 0.0 && dehaze == 0.0 && !(glow > 0.0) && vignette_amount == 0.0 {
+    if texture == 0.0 && clarity == 0.0 && dehaze == 0.0 && !(glow > 0.0) && vignette_amount == 0.0
+    {
         return;
     }
     let count = width * height;
     let mut fine: Option<Vec<f32>> = None;
     let mut coarse: Option<Vec<f32>> = None;
     let mut glow_plane: Option<Vec<f32>> = None;
-        if texture != 0.0 || clarity != 0.0 || glow > 0.0 {
-            // The C keeps this plane alive for the whole kernel; only the
-            // blurred derivatives are read back per pixel.
-            let mut plane = vec![0.0f32; count];
+    if texture != 0.0 || clarity != 0.0 || glow > 0.0 {
+        // The C keeps this plane alive for the whole kernel; only the
+        // blurred derivatives are read back per pixel.
+        let mut plane = vec![0.0f32; count];
         for y in 0..height {
             for x in 0..width {
                 let p = &bitmap.data[(y * width + x) * 4..(y * width + x) * 4 + 4];
@@ -2451,12 +2512,24 @@ pub fn adjust_camera_raw_effects(
         }
         if texture != 0.0 {
             let mut blurred = vec![0.0f32; count];
-            box_blur_plane(&plane, &mut blurred, width, height, effects_radius(1.0, scale));
+            box_blur_plane(
+                &plane,
+                &mut blurred,
+                width,
+                height,
+                effects_radius(1.0, scale),
+            );
             fine = Some(blurred);
         }
         if clarity != 0.0 {
             let mut blurred = vec![0.0f32; count];
-            box_blur_plane(&plane, &mut blurred, width, height, effects_radius(4.0, scale));
+            box_blur_plane(
+                &plane,
+                &mut blurred,
+                width,
+                height,
+                effects_radius(4.0, scale),
+            );
             coarse = Some(blurred);
         }
         if glow > 0.0 {
@@ -2525,13 +2598,13 @@ pub fn adjust_camera_raw_effects(
             if dehaze != 0.0 {
                 effects_dehaze(&mut rgb, dehaze);
             }
-            if glow > 0.0 {
-                if let Some(glow_plane) = &glow_plane {
-                    let add = glow_plane[index] as f64 * (glow / 100.0) * glow_gain;
-                    rgb[0] = camera_clamp(rgb[0] + add * glow_red);
-                    rgb[1] = camera_clamp(rgb[1] + add * glow_green);
-                    rgb[2] = camera_clamp(rgb[2] + add * glow_blue);
-                }
+            if glow > 0.0
+                && let Some(glow_plane) = &glow_plane
+            {
+                let add = glow_plane[index] as f64 * (glow / 100.0) * glow_gain;
+                rgb[0] = camera_clamp(rgb[0] + add * glow_red);
+                rgb[1] = camera_clamp(rgb[1] + add * glow_green);
+                rgb[2] = camera_clamp(rgb[2] + add * glow_blue);
             }
             effects_vignette(
                 &mut rgb,
@@ -2606,7 +2679,11 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [f64; 3] {
     if s <= 1e-6 {
         return [l; 3];
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     [
         hue_to_rgb(p, q, h + 1.0 / 3.0),
@@ -2617,11 +2694,7 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [f64; 3] {
 
 fn circular_distance(a: f64, b: f64) -> f64 {
     let d = (a - b).abs();
-    if d > 0.5 {
-        1.0 - d
-    } else {
-        d
-    }
+    if d > 0.5 { 1.0 - d } else { d }
 }
 
 const MIXER_CENTERS: [f64; 8] = [
@@ -2666,9 +2739,8 @@ pub fn adjust_camera_raw_curve_color(
     // The four grading wheels' colors depend only on the constant grade
     // values; computing them per pixel re-ran the trig-heavy hsl_to_rgb
     // up to 4x for every pixel of the image.
-    let wheel_colors: [[f64; 3]; 4] = std::array::from_fn(|wheel| {
-        hsl_to_rgb(grade[wheel * 3] as f64, 1.0, 0.5)
-    });
+    let wheel_colors: [[f64; 3]; 4] =
+        std::array::from_fn(|wheel| hsl_to_rgb(grade[wheel * 3] as f64, 1.0, 0.5));
     for p in bitmap.data.chunks_exact_mut(4) {
         let alpha = p[3] as f64;
         if alpha == 0.0 {
@@ -2756,7 +2828,7 @@ pub fn adjust_camera_raw_curve_color(
         }
         let weights = [shadow_w, mid_w, highlight_w, 1.0];
         for wheel in 0..4usize {
-            let wh = grade[wheel * 3] as f64;
+            let _wh = grade[wheel * 3] as f64;
             let ws = grade[wheel * 3 + 1] as f64;
             let wl = grade[wheel * 3 + 2] as f64;
             let w = weights[wheel];
@@ -2826,7 +2898,14 @@ fn hue_in_range(hue: f64, low: f64, high: f64) -> bool {
     }
 }
 
-fn sharpen_edge_at(luma: &[f32], width: usize, height: usize, x: usize, y: usize, radius: i32) -> f32 {
+fn sharpen_edge_at(
+    luma: &[f32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    radius: i32,
+) -> f32 {
     let radius = radius.max(1) as isize;
     let center = luma[y * width + x];
     let mut sum = 0.0f32;
@@ -2845,11 +2924,7 @@ fn sharpen_edge_at(luma: &[f32], width: usize, height: usize, x: usize, y: usize
             count += 1;
         }
     }
-    if count > 0 {
-        sum / count as f32
-    } else {
-        0.0
-    }
+    if count > 0 { sum / count as f32 } else { 0.0 }
 }
 
 pub fn adjust_camera_raw_sharpen_mask_overlay(
@@ -2890,7 +2965,9 @@ pub fn adjust_camera_raw_sharpen_mask_overlay(
                 continue;
             }
             let edge = sharpen_edge_at(&luma, width, height, x, y, radius);
-            let mask = camera_clamp((edge as f64 * detail_boost - threshold) / (0.35 - threshold * 0.5).max(0.04));
+            let mask = camera_clamp(
+                (edge as f64 * detail_boost - threshold) / (0.35 - threshold * 0.5).max(0.04),
+            );
             let gray = (mask * alpha).round() as i64 as u8;
             p[0] = gray;
             p[1] = gray;
@@ -2953,9 +3030,12 @@ pub fn adjust_camera_raw_detail(
                 let edge = sharpen_edge_at(&luma, width, height, x, y, 1);
                 let local = strength * (1.0 - preserve * (edge as f64 * 6.0).min(1.0));
                 let blurred = work[index];
-                let mut target = (luma[index] as f64 * (1.0 - local) + blurred as f64 * local) as f32;
+                let mut target =
+                    (luma[index] as f64 * (1.0 - local) + blurred as f64 * local) as f32;
                 if contrast != 0.0 {
-                    target = (target as f64 + contrast * 0.25 * (luma[index] as f64 - blurred as f64)) as f32;
+                    target = (target as f64
+                        + contrast * 0.25 * (luma[index] as f64 - blurred as f64))
+                        as f32;
                 }
                 luma[index] = target;
                 let mut rgb = straight_at(p, alpha);
@@ -3028,12 +3108,12 @@ pub fn adjust_camera_raw_detail(
                 }
                 let edge = sharpen_edge_at(&luma, width, height, x, y, radius);
                 let mask = camera_clamp(
-                    (edge as f64 * (0.5 + detail_mix) - threshold) / (0.35 - threshold * 0.5).max(0.04),
+                    (edge as f64 * (0.5 + detail_mix) - threshold)
+                        / (0.35 - threshold * 0.5).max(0.04),
                 );
                 let high = (luma[index] - work[index]) as f64;
-                let sharpened = camera_clamp(
-                    luma[index] as f64 + high * amount * mask * (0.5 + detail_mix),
-                );
+                let sharpened =
+                    camera_clamp(luma[index] as f64 + high * amount * mask * (0.5 + detail_mix));
                 let mut rgb = straight_at(p, alpha);
                 scale_luminance(&mut rgb, sharpened);
                 write_premultiplied(p, rgb, alpha);
@@ -3099,8 +3179,10 @@ fn optics_chromatic(bitmap: &mut Bitmap, strength: f64) {
             let shift = strength * radial * radial * 2.5;
             let rx = (x as f64 - shift).round() as isize;
             let bx = (x as f64 + shift).round() as isize;
-            let pr = &copy[(y * width + clamped_index(rx, width)) * 4..(y * width + clamped_index(rx, width)) * 4 + 4];
-            let pb = &copy[(y * width + clamped_index(bx, width)) * 4..(y * width + clamped_index(bx, width)) * 4 + 4];
+            let pr = &copy[(y * width + clamped_index(rx, width)) * 4
+                ..(y * width + clamped_index(rx, width)) * 4 + 4];
+            let pb = &copy[(y * width + clamped_index(bx, width)) * 4
+                ..(y * width + clamped_index(bx, width)) * 4 + 4];
             let g = (copy[(y * width + x) * 4 + 1] as f64 / alpha).min(1.0);
             let r = (pr[0] as f64 / (pr[3] as f64).max(1.0)).min(1.0);
             let b = (pb[2] as f64 / (pb[3] as f64).max(1.0)).min(1.0);
@@ -3164,7 +3246,11 @@ pub fn adjust_camera_raw_optics(
     }
     // `profile_distortion` and `scale` are part of the C signature but unused there too.
     let _ = (profile_distortion, scale);
-    let profile_vignette = if lens_profile != 0 { profile_vignetting / 100.0 } else { 0.0 };
+    let profile_vignette = if lens_profile != 0 {
+        profile_vignetting / 100.0
+    } else {
+        0.0
+    };
     let vignette = vignette_amount + profile_vignette * 35.0;
     if distortion_k != 0.0 {
         *bitmap = crate::filters::lens_distort(bitmap, distortion_k);
@@ -3310,11 +3396,7 @@ fn perspective_warp(image: &Bitmap, corners: &[(f64, f64); 4]) -> Bitmap {
     let e = p01.1 - p00.1 + hhom * p01.1;
     let f = p00.1;
     // Normalized (u,v) → quad; as a 3×3 on pixel coordinates.
-    let forward = [
-        [a / w, b / h, c],
-        [d / w, e / h, f],
-        [g / w, hhom / h, 1.0],
-    ];
+    let forward = [[a / w, b / h, c], [d / w, e / h, f], [g / w, hhom / h, 1.0]];
     let Some(inverse) = invert3(&forward) else {
         return image.clone();
     };
@@ -3568,7 +3650,10 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.exposure = 1.0;
         let brighter = straight_pixels(&settings.apply(&input, None, 1.0, 0, -1, false))[0];
-        assert!((brighter[0] as i32 - 176).abs() <= 2, "+1 stop: {brighter:?}");
+        assert!(
+            (brighter[0] as i32 - 176).abs() <= 2,
+            "+1 stop: {brighter:?}"
+        );
         assert_eq!(brighter[0], brighter[1]);
         assert_eq!(brighter[1], brighter[2]);
         let translucent = solid(4, 4, [128, 128, 128, 128]);
@@ -3581,7 +3666,10 @@ mod tests {
         settings = CameraRawSettings::default();
         settings.contrast = 100.0;
         let pushed = straight_pixels(&settings.apply(&pair, None, 1.0, 0, -1, false));
-        assert!(pushed[0][0] < 10 && pushed[1][0] > 250, "contrast +100: {pushed:?}");
+        assert!(
+            pushed[0][0] < 10 && pushed[1][0] > 250,
+            "contrast +100: {pushed:?}"
+        );
         settings.contrast = -100.0;
         let flat = straight_pixels(&settings.apply(&pair, None, 1.0, 0, -1, false));
         assert!((flat[0][0] as i32 - 128).abs() <= 2 && (flat[1][0] as i32 - 128).abs() <= 2);
@@ -3595,7 +3683,11 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.highlights = -100.0;
         let recovered = straight_pixels(&settings.apply(&bright_and_mid, None, 1.0, 0, -1, false));
-        assert!(recovered[0][0] < 200, "highlights −100 darkens: {:?}", recovered[0]);
+        assert!(
+            recovered[0][0] < 200,
+            "highlights −100 darkens: {:?}",
+            recovered[0]
+        );
         assert!((recovered[1][0] as i32 - 128).abs() <= 2);
 
         settings = CameraRawSettings::default();
@@ -3603,9 +3695,20 @@ mod tests {
         let clipped = straight_pixels(&settings.apply(&bright_and_mid, None, 1.0, 0, -1, false));
         assert_eq!(clipped[0][0], 255, "whites +100 clips");
         assert!((clipped[1][0] as i32 - 128).abs() <= 2);
-        let viz = straight_pixels(&settings.apply(&bright_and_mid, Some(CameraRawClipping::Highlights), 1.0, 0, -1, false));
+        let viz = straight_pixels(&settings.apply(
+            &bright_and_mid,
+            Some(CameraRawClipping::Highlights),
+            1.0,
+            0,
+            -1,
+            false,
+        ));
         assert_eq!(viz[0], [255, 255, 255, 255]);
-        assert_eq!(viz[1], [0, 0, 0, 255], "highlight clipping is not the grade");
+        assert_eq!(
+            viz[1],
+            [0, 0, 0, 255],
+            "highlight clipping is not the grade"
+        );
 
         let mut dark_and_mid = Bitmap::new(2, 1);
         dark_and_mid.set_pixel(0, 0, [20, 20, 20, 255]);
@@ -3621,7 +3724,14 @@ mod tests {
         let crushed = straight_pixels(&settings.apply(&dark_and_mid, None, 1.0, 0, -1, false));
         assert!(crushed[0][0] < 20, "blacks −100 crushes: {:?}", crushed[0]);
         assert!((crushed[1][0] as i32 - 128).abs() <= 2);
-        let shadow_viz = straight_pixels(&settings.apply(&dark_and_mid, Some(CameraRawClipping::Shadows), 1.0, 0, -1, false));
+        let shadow_viz = straight_pixels(&settings.apply(
+            &dark_and_mid,
+            Some(CameraRawClipping::Shadows),
+            1.0,
+            0,
+            -1,
+            false,
+        ));
         assert_eq!(shadow_viz[0], [0, 0, 0, 255]);
         assert_eq!(shadow_viz[1], [255, 255, 255, 255]);
     }
@@ -3632,7 +3742,10 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.temperature = 100.0;
         let warm = straight_pixels(&settings.apply(&input, None, 1.0, 0, -1, false))[0];
-        assert!(warm[0] > 128 && warm[2] < 128 && warm[0] > warm[2], "warm: {warm:?}");
+        assert!(
+            warm[0] > 128 && warm[2] < 128 && warm[0] > warm[2],
+            "warm: {warm:?}"
+        );
         settings = CameraRawSettings::default();
         settings.tint = 100.0;
         let magenta = straight_pixels(&settings.apply(&input, None, 1.0, 0, -1, false))[0];
@@ -3657,8 +3770,14 @@ mod tests {
         let saturated_delta = graded(&saturated_green) - saturated_before;
         let skin_delta = graded(&skin) - skin_before;
         assert_eq!(dull_before, skin_before);
-        assert!(dull_delta > saturated_delta + 10, "dull {dull_delta} vs saturated {saturated_delta}");
-        assert!(dull_delta > skin_delta + 10, "skin protected: {skin_delta} vs {dull_delta}");
+        assert!(
+            dull_delta > saturated_delta + 10,
+            "dull {dull_delta} vs saturated {saturated_delta}"
+        );
+        assert!(
+            dull_delta > skin_delta + 10,
+            "skin protected: {skin_delta} vs {dull_delta}"
+        );
 
         let red = solid(4, 4, [160, 120, 120, 255]);
         let blue = solid(4, 4, [100, 100, 140, 255]);
@@ -3666,8 +3785,10 @@ mod tests {
         settings.saturation = 100.0;
         let red_before = chroma(&straight_pixels(&red)[0]) as f64;
         let blue_before = chroma(&straight_pixels(&blue)[0]) as f64;
-        let red_after = chroma(&straight_pixels(&settings.apply(&red, None, 1.0, 0, -1, false))[0]) as f64;
-        let blue_after = chroma(&straight_pixels(&settings.apply(&blue, None, 1.0, 0, -1, false))[0]) as f64;
+        let red_after =
+            chroma(&straight_pixels(&settings.apply(&red, None, 1.0, 0, -1, false))[0]) as f64;
+        let blue_after =
+            chroma(&straight_pixels(&settings.apply(&blue, None, 1.0, 0, -1, false))[0]) as f64;
         let red_ratio = red_after / red_before;
         let blue_ratio = blue_after / blue_before;
         assert!((red_ratio - 2.0).abs() < 0.15 && (blue_ratio - 2.0).abs() < 0.15);
@@ -3677,12 +3798,9 @@ mod tests {
     fn eyedropper_neutralizes_a_warm_pixel() {
         let warm = solid(8, 8, [160, 140, 120, 255]);
         let before = straight_pixels(&warm)[0];
-        let solved = CameraRawSettings::neutralize_straight(
-            160.0 / 255.0,
-            140.0 / 255.0,
-            120.0 / 255.0,
-        )
-        .unwrap();
+        let solved =
+            CameraRawSettings::neutralize_straight(160.0 / 255.0, 140.0 / 255.0, 120.0 / 255.0)
+                .unwrap();
         let mut settings = CameraRawSettings::default();
         settings.temperature = solved.0;
         settings.tint = solved.1;
@@ -3699,7 +3817,10 @@ mod tests {
         settings.temperature = auto.0;
         settings.tint = auto.1;
         let averaged = straight_pixels(&settings.apply(&warm, None, 1.0, 0, -1, false))[0];
-        assert!(chroma(&averaged) < chroma(&before) / 2, "auto: {averaged:?}");
+        assert!(
+            chroma(&averaged) < chroma(&before) / 2,
+            "auto: {averaged:?}"
+        );
         assert!(CameraRawSettings::auto_balance(&Bitmap::new(4, 4)).is_none());
     }
 
@@ -3709,13 +3830,15 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.exposure = 1.0;
         settings.temperature = 40.0;
-        let hidden_light = settings.applying(false, true, true, true, true, true, true, true, true, true);
+        let hidden_light =
+            settings.applying(false, true, true, true, true, true, true, true, true, true);
         let source = straight_pixels(&input);
         let color_only = straight_pixels(&hidden_light.apply(&input, None, 1.0, 0, -1, false));
         assert_ne!(color_only, source);
         assert_eq!(hidden_light.exposure, 0.0);
         assert_eq!(hidden_light.temperature, 40.0);
-        let neither = settings.applying(false, false, true, true, true, true, true, true, true, true);
+        let neither =
+            settings.applying(false, false, true, true, true, true, true, true, true, true);
         assert!(neither.is_identity());
         let unchanged = straight_pixels(&neither.apply(&input, None, 1.0, 0, -1, false));
         assert_eq!(unchanged, source);
@@ -3836,7 +3959,10 @@ mod tests {
         }
         // Nudging moves the nearest point.
         let nudged = lifted.nudged(CameraRawPointChannel::Rgb, 0.5, 0.1);
-        assert!((nudged.rgb[1].y - 1.0).abs() < 1e-9, "the (1,1) handle clamps at 1");
+        assert!(
+            (nudged.rgb[1].y - 1.0).abs() < 1e-9,
+            "the (1,1) handle clamps at 1"
+        );
     }
 
     #[test]
@@ -3857,31 +3983,66 @@ mod tests {
         let light = solid(4, 4, [158, 158, 158, 255]);
         let mut settings = CameraRawSettings::default();
         settings.curve.shadows = 100.0;
-        let graded = |img: &Bitmap| straight_pixels(&settings.apply(img, None, 1.0, 0, -1, false))[0];
+        let graded =
+            |img: &Bitmap| straight_pixels(&settings.apply(img, None, 1.0, 0, -1, false))[0];
         let dark_gain = graded(&dark)[0] as i32 - 31;
         let light_gain = graded(&light)[0] as i32 - 158;
-        assert!(dark_gain > light_gain + 8, "parametric shadows: {dark_gain} vs {light_gain}");
+        assert!(
+            dark_gain > light_gain + 8,
+            "parametric shadows: {dark_gain} vs {light_gain}"
+        );
 
         settings = CameraRawSettings::default();
         settings.curve.rgb = CameraRawCurveSettings::strong_contrast();
-        let contrasted = straight_pixels(&settings.apply(&solid(4, 4, [64, 64, 64, 255]), None, 1.0, 0, -1, false))[0][0];
-        assert!(contrasted < 55, "strong contrast pulls a dark midtone down: {contrasted}");
+        let contrasted = straight_pixels(&settings.apply(
+            &solid(4, 4, [64, 64, 64, 255]),
+            None,
+            1.0,
+            0,
+            -1,
+            false,
+        ))[0][0];
+        assert!(
+            contrasted < 55,
+            "strong contrast pulls a dark midtone down: {contrasted}"
+        );
 
         settings = CameraRawSettings::default();
         settings.mixer.hue[0] = 100.0;
-        let shifted = straight_pixels(&settings.apply(&solid(4, 4, [255, 0, 0, 255]), None, 1.0, 0, -1, false))[0];
-        assert!(shifted[1] > shifted[2], "reds hue moves red toward orange: {shifted:?}");
+        let shifted = straight_pixels(&settings.apply(
+            &solid(4, 4, [255, 0, 0, 255]),
+            None,
+            1.0,
+            0,
+            -1,
+            false,
+        ))[0];
+        assert!(
+            shifted[1] > shifted[2],
+            "reds hue moves red toward orange: {shifted:?}"
+        );
 
         settings = CameraRawSettings::default();
         settings.grading.shadows.saturation = 100.0;
         let graded_dark = straight_pixels(&settings.apply(&dark, None, 1.0, 0, -1, false))[0];
-        let graded_light = straight_pixels(&settings.apply(&solid(4, 4, [255, 255, 255, 255]), None, 1.0, 0, -1, false))[0];
-        assert!(graded_dark[0] > graded_dark[1] + 5, "shadow grading tints dark: {graded_dark:?}");
+        let graded_light = straight_pixels(&settings.apply(
+            &solid(4, 4, [255, 255, 255, 255]),
+            None,
+            1.0,
+            0,
+            -1,
+            false,
+        ))[0];
+        assert!(
+            graded_dark[0] > graded_dark[1] + 5,
+            "shadow grading tints dark: {graded_dark:?}"
+        );
         assert!((graded_light[0] as i32 - graded_light[1] as i32).abs() <= 2);
         settings.grading.balance = 100.0;
         let balanced = straight_pixels(&settings.apply(&dark, None, 1.0, 0, -1, false))[0];
         assert!(
-            (balanced[0] as i32 - balanced[1] as i32) < (graded_dark[0] as i32 - graded_dark[1] as i32),
+            (balanced[0] as i32 - balanced[1] as i32)
+                < (graded_dark[0] as i32 - graded_dark[1] as i32),
             "balance toward highlights weakens the shadow tint"
         );
 
@@ -3899,7 +4060,11 @@ mod tests {
         settings.texture = 100.0;
         settings.clarity = 100.0;
         let flat_result = straight_pixels(&settings.apply(&flat, None, 1.0, 0, -1, false));
-        assert_eq!(flat_result, straight_pixels(&flat), "flat field has no local contrast");
+        assert_eq!(
+            flat_result,
+            straight_pixels(&flat),
+            "flat field has no local contrast"
+        );
 
         let edge = step_image();
         let original = straight_pixels(&edge);
@@ -3907,19 +4072,28 @@ mod tests {
         settings.texture = 100.0;
         let textured = straight_pixels(&settings.apply(&edge, None, 1.0, 0, -1, false));
         assert_eq!(textured[0][0], original[0][0], "far from the edge");
-        assert_eq!(textured[8][0], original[8][0], "texture's fine radius does not reach");
+        assert_eq!(
+            textured[8][0], original[8][0],
+            "texture's fine radius does not reach"
+        );
         assert_ne!(textured[11][0], original[11][0], "the edge itself moves");
 
         settings = CameraRawSettings::default();
         settings.clarity = 100.0;
         let clarified = straight_pixels(&settings.apply(&edge, None, 1.0, 0, -1, false));
         assert_eq!(clarified[0][0], original[0][0]);
-        assert_ne!(clarified[8][0], original[8][0], "clarity's wider radius reaches further");
+        assert_ne!(
+            clarified[8][0], original[8][0],
+            "clarity's wider radius reaches further"
+        );
         settings.clarity = -100.0;
         let softened = straight_pixels(&settings.apply(&edge, None, 1.0, 0, -1, false));
         let hard_gap = (original[12][0] as i32 - original[11][0] as i32).abs();
         let soft_gap = (softened[12][0] as i32 - softened[11][0] as i32).abs();
-        assert!(soft_gap < hard_gap, "negative clarity pulls the step together");
+        assert!(
+            soft_gap < hard_gap,
+            "negative clarity pulls the step together"
+        );
     }
 
     #[test]
@@ -3932,7 +4106,10 @@ mod tests {
         assert!(deepened[0] < 30, "positive dehaze darkens: {deepened:?}");
         let pale_before = straight_pixels(&pale)[0];
         let pale_after = straight_pixels(&settings.apply(&pale, None, 1.0, 0, -1, false))[0];
-        assert!(chroma(&pale_after) > chroma(&pale_before), "raises saturation");
+        assert!(
+            chroma(&pale_after) > chroma(&pale_before),
+            "raises saturation"
+        );
         settings.dehaze = -100.0;
         let lifted = straight_pixels(&settings.apply(&dark, None, 1.0, 0, -1, false))[0];
         assert!(lifted[0] > 30, "negative dehaze lifts: {lifted:?}");
@@ -3962,7 +4139,10 @@ mod tests {
         settings.glow_warmth = 100.0;
         settings.glow_range = 100.0;
         let idle = straight_pixels(&settings.apply(&spot, None, 1.0, 0, -1, false));
-        assert_eq!(idle, spot_pixels, "range and warmth do nothing until Glow is raised");
+        assert_eq!(
+            idle, spot_pixels,
+            "range and warmth do nothing until Glow is raised"
+        );
 
         settings.glow = 100.0;
         settings.glow_style = CameraRawGlowStyle::Diffusion;
@@ -3970,11 +4150,17 @@ mod tests {
         settings.glow_style = CameraRawGlowStyle::Halation;
         let halation = straight_pixels(&settings.apply(&spot, None, 1.0, 0, -1, false));
         let fringe = 10 * 21 + 15;
-        assert!(diffusion[fringe][0] > diffusion[0][0], "glow brightens the neighborhood");
+        assert!(
+            diffusion[fringe][0] > diffusion[0][0],
+            "glow brightens the neighborhood"
+        );
         assert_eq!(halation[0], [0, 0, 0, 255]);
         let diffusion_red = diffusion[fringe][0] as i32 - diffusion[fringe][1] as i32;
         let halation_red = halation[fringe][0] as i32 - halation[fringe][1] as i32;
-        assert!(halation_red > diffusion_red, "halation is redder at the same warmth");
+        assert!(
+            halation_red > diffusion_red,
+            "halation is redder at the same warmth"
+        );
     }
 
     #[test]
@@ -3985,7 +4171,10 @@ mod tests {
         let darkened = straight_pixels(&settings.apply(&gray_field, None, 1.0, 0, -1, false));
         let center = darkened[4 * 9 + 4][0];
         let corner = darkened[0][0];
-        assert!((center as i32 - 128).abs() <= 2, "the center stays: {center}");
+        assert!(
+            (center as i32 - 128).abs() <= 2,
+            "the center stays: {center}"
+        );
         assert!(corner < center - 40, "the corner darkens: {corner}");
 
         let white = solid(9, 9, [255, 255, 255, 255]);
@@ -4005,8 +4194,12 @@ mod tests {
         settings.vignette_highlights = 0.0;
         let plain = straight_pixels(&settings.apply(&gray_field, None, 1.0, 0, -1, false));
         settings.vignette_highlights = 100.0;
-        let with_highlights = straight_pixels(&settings.apply(&gray_field, None, 1.0, 0, -1, false));
-        assert_eq!(plain, with_highlights, "highlights is idle while lightening");
+        let with_highlights =
+            straight_pixels(&settings.apply(&gray_field, None, 1.0, 0, -1, false));
+        assert_eq!(
+            plain, with_highlights,
+            "highlights is idle while lightening"
+        );
     }
 
     #[test]
@@ -4017,14 +4210,23 @@ mod tests {
         settings.grain_size = 40.0;
         settings.grain_roughness = 80.0;
         let silent = straight_pixels(&settings.apply(&field, None, 1.0, 4, -1, false));
-        assert_eq!(silent, field_pixels, "size and roughness do nothing at amount zero");
+        assert_eq!(
+            silent, field_pixels,
+            "size and roughness do nothing at amount zero"
+        );
         settings.grain_amount = 70.0;
         let first = settings.apply(&field, None, 1.0, 4, -1, false);
         let second = settings.apply(&field, None, 1.0, 4, -1, false);
-        assert_eq!(first.data, second.data, "the same seed keeps the same grain");
+        assert_eq!(
+            first.data, second.data,
+            "the same seed keeps the same grain"
+        );
         assert_ne!(straight_pixels(&first), field_pixels);
         let px = straight_pixels(&first)[0];
-        assert!(px[0] == px[1] && px[1] == px[2], "grain moves brightness only");
+        assert!(
+            px[0] == px[1] && px[1] == px[2],
+            "grain moves brightness only"
+        );
 
         let edge = step_image();
         let edge_pixels = straight_pixels(&edge);
@@ -4056,9 +4258,15 @@ mod tests {
         let black = solid(4, 4, [0, 0, 0, 255]);
         let white = solid(4, 4, [255, 255, 255, 255]);
         let shadowed = clip_overlay(&black, true, false);
-        assert!(shadowed.pixel(0, 0)[2] > shadowed.pixel(0, 0)[0], "clipped shadows paint blue");
+        assert!(
+            shadowed.pixel(0, 0)[2] > shadowed.pixel(0, 0)[0],
+            "clipped shadows paint blue"
+        );
         let highlighted = clip_overlay(&white, false, true);
-        assert!(highlighted.pixel(0, 0)[0] > highlighted.pixel(0, 0)[2], "clipped highlights paint red");
+        assert!(
+            highlighted.pixel(0, 0)[0] > highlighted.pixel(0, 0)[2],
+            "clipped highlights paint red"
+        );
         let untouched = clip_overlay(&black, false, false);
         assert_eq!(untouched.data, black.data);
     }
@@ -4084,7 +4292,10 @@ mod tests {
         settings.detail.sharpen_amount = 150.0;
         settings.detail.sharpen_radius = 50.0;
         let sharpened = settings.apply(&edge, None, 1.0, 0, -1, false);
-        assert_ne!(sharpened.data, edge.data, "sharpening changes the step image");
+        assert_ne!(
+            sharpened.data, edge.data,
+            "sharpening changes the step image"
+        );
 
         // The sharpened edge overshoots: the bright side rises, the dark side falls.
         let before = straight_pixels(&edge);
@@ -4095,7 +4306,11 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.detail.noise_luminance = 80.0;
         let smoothed = settings.apply(&flat, None, 1.0, 0, -1, false);
-        assert_eq!(straight_pixels(&smoothed), straight_pixels(&flat), "luminance NR leaves a flat field");
+        assert_eq!(
+            straight_pixels(&smoothed),
+            straight_pixels(&flat),
+            "luminance NR leaves a flat field"
+        );
     }
 
     #[test]
@@ -4107,7 +4322,10 @@ mod tests {
         settings.optics.purple_hue_low = 250.0;
         settings.optics.purple_hue_high = 320.0;
         let defringed = straight_pixels(&settings.apply(&purple, None, 1.0, 0, -1, false))[0];
-        assert!(chroma(&defringed) < chroma(&before), "purple defringe lowers chroma");
+        assert!(
+            chroma(&defringed) < chroma(&before),
+            "purple defringe lowers chroma"
+        );
         // Out-of-range hues keep their chroma.
         settings.optics.purple_hue_low = 10.0;
         settings.optics.purple_hue_high = 20.0;
@@ -4149,7 +4367,10 @@ mod tests {
         let mut settings = CameraRawSettings::default();
         settings.geometry.upright = CameraRawUprightMode::Guided;
         assert!(!settings.adjusts_geometry());
-        assert_eq!(straight_pixels(&settings.apply(&grid, None, 1.0, 0, -1, false)), grid_pixels);
+        assert_eq!(
+            straight_pixels(&settings.apply(&grid, None, 1.0, 0, -1, false)),
+            grid_pixels
+        );
 
         settings.geometry.guides.push(CameraRawGeometryGuide {
             start_x: 0.1,
@@ -4159,7 +4380,11 @@ mod tests {
         });
         assert!(settings.adjusts_geometry());
         let guided = settings.geometry.apply(&grid);
-        assert_ne!(straight_pixels(&guided), grid_pixels, "the guide rotates the picture");
+        assert_ne!(
+            straight_pixels(&guided),
+            grid_pixels,
+            "the guide rotates the picture"
+        );
 
         let mut settings = CameraRawSettings::default();
         settings.geometry.vertical = 40.0;
@@ -4171,7 +4396,10 @@ mod tests {
         settings.geometry.constrain_crop = true;
         let fitted = settings.geometry.apply(&grid);
         assert_eq!(fitted.width, grid.width);
-        assert!(fitted.pixel(0, 0)[3] > 0 || fitted.pixel(11, 11)[3] > 0, "refit fills the frame");
+        assert!(
+            fitted.pixel(0, 0)[3] > 0 || fitted.pixel(11, 11)[3] > 0,
+            "refit fills the frame"
+        );
     }
 
     /// §7.1-7: like `CIPerspectiveTransform`, output whose inverse mapping
@@ -4216,8 +4444,12 @@ mod tests {
         let gray = solid(4, 4, [128, 128, 128, 255]);
         let mut settings = CameraRawSettings::default();
         settings.exposure = 1.0;
-        let shifted = CameraRawScope::make(&settings.apply(&gray, None, 1.0, 0, -1, false)).unwrap();
-        assert!(peak_index(&shifted.red) > 128, "exposure moves the midtones toward white");
+        let shifted =
+            CameraRawScope::make(&settings.apply(&gray, None, 1.0, 0, -1, false)).unwrap();
+        assert!(
+            peak_index(&shifted.red) > 128,
+            "exposure moves the midtones toward white"
+        );
 
         // One opaque red pixel: red bin full, green and blue at zero.
         let red = solid(1, 1, [255, 0, 0, 255]);
@@ -4226,7 +4458,10 @@ mod tests {
         assert!((scope.green[0] - 1.0).abs() < 1e-9);
         assert!((scope.blue[0] - 1.0).abs() < 1e-9);
         let hottest = peak_index(&scope.vectorscope);
-        assert!(hottest % CameraRawScope::SCOPE_SIDE > CameraRawScope::SCOPE_SIDE / 2, "red sits right");
+        assert!(
+            hottest % CameraRawScope::SCOPE_SIDE > CameraRawScope::SCOPE_SIDE / 2,
+            "red sits right"
+        );
         assert!(scope.peak() > 0.0);
 
         let empty = Bitmap::new(0, 0);

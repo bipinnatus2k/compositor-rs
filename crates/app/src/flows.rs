@@ -7,12 +7,12 @@
 
 use std::path::PathBuf;
 
-use gpui_kit::{px, rgb, Context, IntoElement, Styled, Window};
+use gpui_kit::{Context, IntoElement, Styled, Window, px, rgb};
 
 use crate::project::{ConfirmStep, Pending, Step, TabId, UnsavedChoice};
-use crate::state::{AppState, SaveAfter, SheetKind};
-use compositor_core::transform::LayerSampling;
+use crate::state::{AppState, FitDims, SaveAfter, SheetKind};
 use crate::tabs::ProjectTab;
+use compositor_core::transform::LayerSampling;
 
 /// The live-mask delete alert's informative text (LiveLayerMask.swift:117).
 pub(crate) const DELETE_LIVE_MASK_INFO: &str = "Bake keeps the current masked appearance in the dependent layers’ pixels. Remove Links reveals their pixels. You can undo either choice.";
@@ -32,22 +32,23 @@ impl AppState {
         }
         let at = self.drop_point_doc.take();
         let destination = self.workspace.selected_id();
-        let failures = self
-            .workspace
-            .receive(&paths, Some(destination), at);
+        let failures = self.workspace.receive(&paths, Some(destination), at);
         if !failures.is_empty() {
             self.set_status(failures.join("; "), cx);
         }
-        self.fit_for = (0, 0);
+        self.fit_for = FitDims::REFIT;
         self.touch(cx);
     }
-
 
     /// Runs a closure with the current tab's (controller, session, busy)
     /// triple — the shape every controller entry point takes.
     pub(crate) fn with_current_tab<R>(
         &mut self,
-        f: impl FnOnce(&mut crate::project::ProjectController, &mut compositor_core::session::EditorSession, &mut crate::tabs::ProjectBusy) -> R,
+        f: impl FnOnce(
+            &mut crate::project::ProjectController,
+            &mut compositor_core::session::EditorSession,
+            &mut crate::tabs::ProjectBusy,
+        ) -> R,
     ) -> R {
         let ProjectTab {
             session,
@@ -217,12 +218,7 @@ impl AppState {
         }
     }
 
-    fn follow_close_step(
-        &mut self,
-        step: Step<()>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn follow_close_step(&mut self, step: Step<()>, _window: &mut Window, cx: &mut Context<Self>) {
         match step {
             Step::Done(()) => {
                 self.request_refit();
@@ -232,12 +228,7 @@ impl AppState {
         }
     }
 
-    fn follow_quit_step(
-        &mut self,
-        step: Step<bool>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn follow_quit_step(&mut self, step: Step<bool>, window: &mut Window, cx: &mut Context<Self>) {
         match step {
             Step::Done(true) => {
                 // The quit (or window-close) flow finished: the window goes
@@ -267,10 +258,8 @@ impl AppState {
             controller.finish_export_png(busy, url.as_deref())
         };
         self.drain_controller_error(window, cx);
-        if ok {
-            if let Some(url) = url {
-                self.set_status(format!("Exported {}", url.display()), cx);
-            }
+        if ok && let Some(url) = url {
+            self.set_status(format!("Exported {}", url.display()), cx);
         }
     }
 
@@ -289,10 +278,8 @@ impl AppState {
             controller.finish_export_jpeg(busy, url.as_deref(), data)
         };
         self.drain_controller_error(window, cx);
-        if ok {
-            if let Some(url) = url {
-                self.set_status(format!("Exported {}", url.display()), cx);
-            }
+        if ok && let Some(url) = url {
+            self.set_status(format!("Exported {}", url.display()), cx);
         }
     }
 
@@ -362,6 +349,18 @@ impl AppState {
 
     // MARK: The unsaved-changes confirm
 
+    /// The confirm sheet's flow tag, taken as the sheet closes (defaults to
+    /// the quit flow when no sheet held one).
+    fn take_confirm_step(&mut self, cx: &mut Context<Self>) -> ConfirmStep {
+        let step = self
+            .sheet
+            .as_ref()
+            .and_then(|sheet| sheet.confirm_step)
+            .unwrap_or(ConfirmStep::Quit);
+        self.close_sheet(cx);
+        step
+    }
+
     /// One of the confirm's three buttons. The answer routes back into the
     /// flow the question belonged to (`Confirm.step`).
     pub fn resolve_confirm_choice(
@@ -370,12 +369,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let step = self
-            .sheet
-            .as_ref()
-            .and_then(|sheet| sheet.confirm_step)
-            .unwrap_or(ConfirmStep::Quit);
-        self.close_sheet(cx);
+        let step = self.take_confirm_step(cx);
         match step {
             ConfirmStep::Close => {
                 match self.workspace.resolve_close(choice) {
@@ -387,7 +381,9 @@ impl AppState {
                         // The Save button raised a save panel on the asked
                         // tab; resume the close flow after it completes.
                         self.pending_save = Some((
-                            self.workspace.close_pending_tab().unwrap_or_else(|| self.workspace.selected_id()),
+                            self.workspace
+                                .close_pending_tab()
+                                .unwrap_or_else(|| self.workspace.selected_id()),
                             SaveAfter::Close,
                         ));
                         self.present_pending_save_flow(window, cx);
@@ -433,24 +429,16 @@ impl AppState {
     /// through `finish_save`, which consumes the controller's pending
     /// itself (the plain `start_save` presentation leaves it in place too).
     fn present_pending_save_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pending = self.with_current_tab(|controller, _, _| controller.peek_pending());
-        match pending {
-            Some(pending @ Pending::SaveAs { .. }) => {
-                self.present_pending(pending, window, cx);
-            }
-            Some(pending) => self.present_pending(pending, window, cx),
-            None => {}
+        // SaveAs and every other pending present through the same path; a
+        // missing pending presents nothing.
+        if let Some(pending) = self.with_current_tab(|controller, _, _| controller.peek_pending()) {
+            self.present_pending(pending, window, cx);
         }
     }
 
     /// The confirm's Cancel: aborts the flow, closes nothing.
     pub fn resolve_confirm_cancel(&mut self, cx: &mut Context<Self>) {
-        let step = self
-            .sheet
-            .as_ref()
-            .and_then(|sheet| sheet.confirm_step)
-            .unwrap_or(ConfirmStep::Quit);
-        self.close_sheet(cx);
+        let step = self.take_confirm_step(cx);
         match step {
             ConfirmStep::Close => {
                 self.workspace.resolve_close(UnsavedChoice::Cancel);
@@ -472,11 +460,7 @@ impl AppState {
     /// Cancel on one of the controller-driven sheets: the second half runs
     /// with no answer, releasing the flow's `is_project_busy` / `is_managing`
     /// guard (Swift's panel Cancel runs the same completion with nil).
-    pub(crate) fn cancel_pending_sheet(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn cancel_pending_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
             Some(SheetKind::SaveComp) => {
                 let (tab_id, after) = self
@@ -518,7 +502,14 @@ impl AppState {
             }
             Some(SheetKind::ImageSize) => {
                 self.with_current_tab(|controller, session, busy| {
-                    controller.finish_image_size(session, busy, None, None, None, LayerSampling::High);
+                    controller.finish_image_size(
+                        session,
+                        busy,
+                        None,
+                        None,
+                        None,
+                        LayerSampling::High,
+                    );
                 });
             }
             Some(SheetKind::CanvasSize) => {

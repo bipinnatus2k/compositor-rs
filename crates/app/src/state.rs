@@ -5,26 +5,26 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui_kit::{
-    px, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
-    KeyUpEvent, Pixels, Point, RenderImage, Subscription, Window,
-};
-use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::WindowExt;
-use gpui_kit::component::slider::SliderState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::slider::SliderEvent;
+use gpui_kit::component::slider::SliderState;
+use gpui_kit::{
+    App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, KeyUpEvent,
+    Pixels, Point, RenderImage, Subscription, Window, px,
+};
 use image::Frame;
 
 use compositor_core::document::CanvasDocument;
 use compositor_core::document::ImageLayer;
 use compositor_core::filters::{FilterJob, FilterKind, FilterSettings};
 use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
-use compositor_core::tools::warp::WarpStroke;
-use compositor_core::raster::{ImportedImage, Bitmap};
+use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render;
 use compositor_core::session::EditorSession;
-use compositor_core::transform::LayerTransform;
 use compositor_core::tools::brush::RasterEdit;
+use compositor_core::tools::warp::WarpStroke;
+use compositor_core::transform::LayerTransform;
 
 use crate::inline_text::inline_text_key;
 
@@ -41,10 +41,7 @@ pub fn doc_to_screen_at(zoom: f64, pan: (f64, f64), x: f64, y: f64) -> (f32, f32
 /// Viewport pixels back to document coordinates; the inverse of
 /// `doc_to_screen_at`.
 pub fn screen_to_doc_at(zoom: f64, pan: (f64, f64), x: f32, y: f32) -> CGPoint {
-    CGPoint::new(
-        (x as f64 - pan.0) / zoom,
-        (y as f64 - pan.1) / zoom,
-    )
+    CGPoint::new((x as f64 - pan.0) / zoom, (y as f64 - pan.1) / zoom)
 }
 
 /// Clamps a zoom factor to the editor's supported range.
@@ -55,7 +52,10 @@ pub fn clamp_zoom(zoom: f64) -> f64 {
 /// What the pointer is currently doing on the canvas.
 pub enum CanvasDrag {
     /// Hand tool or middle-mouse panning.
-    Pan { start: Point<Pixels>, start_pan: (f64, f64) },
+    Pan {
+        start: Point<Pixels>,
+        start_pan: (f64, f64),
+    },
     /// A brush-family stroke in progress on the layer captured at
     /// `begin_stroke` (EditorSession+Brush.swift:130-133 commits to the
     /// captured layer, never to whatever is active at mouse-up).
@@ -281,7 +281,10 @@ pub fn normalize_rotation(degrees: f64) -> f64 {
 /// Parses a numeric field's text; non-finite or unparseable input is
 /// refused (Swift's `Double(text)` guard).
 pub fn parse_field(text: &str) -> Option<f64> {
-    text.trim().parse::<f64>().ok().filter(|value| value.is_finite())
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// What each inspector field shows for a transform (`TransformValueField`'s
@@ -337,7 +340,7 @@ pub struct AppState {
     /// Document dims the viewport was last fit for, and the tab it was fit
     /// for: Swift rebuilds the view per tab (`.id(tab.id)`), so a tab switch
     /// refits the viewport too.
-    pub fit_for: (usize, usize),
+    pub fit_for: FitDims,
     pub fit_tab: crate::project::TabId,
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
@@ -489,10 +492,27 @@ pub(crate) fn delete_ask_targets(
         .iter()
         .filter(|l| {
             !removed.contains(&l.id)
-                && l.mask_source_id.map(|s| removed.contains(&s)).unwrap_or(false)
+                && l.mask_source_id
+                    .map(|s| removed.contains(&s))
+                    .unwrap_or(false)
         })
         .map(|l| l.id)
         .collect()
+}
+
+/// Document pixel dimensions the viewport was last fit for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FitDims {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl FitDims {
+    /// The sentinel meaning "refit requested" — no real document is 0×0.
+    pub const REFIT: FitDims = FitDims {
+        width: 0,
+        height: 0,
+    };
 }
 
 impl AppState {
@@ -511,8 +531,11 @@ impl AppState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut workspace = crate::tabs::ProjectWorkspace::new();
         // The window opens on one 1280×800 document, as before.
-        workspace.current_mut().session.create_document(1280, 800, true);
-        let brush = workspace.current().session.brush_settings.clone();
+        workspace
+            .current_mut()
+            .session
+            .create_document(1280, 800, true);
+        let brush = workspace.current().session.brush_settings;
         let wand_tolerance = workspace.current().session.wand_settings.tolerance;
         let gradient_opacity = workspace.current().session.gradient_settings.opacity;
         let style = workspace.current().session.current_text_style();
@@ -521,18 +544,16 @@ impl AppState {
         };
         let type_size_input = number_input(style.font_size, window, cx);
         let type_tracking_input = number_input(style.tracking, window, cx);
-        let type_leading_input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(leading_to_text(style.leading))
-        });
+        let type_leading_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(leading_to_text(style.leading)));
         let transform_x_input = number_input(0.0, window, cx);
         let transform_y_input = number_input(0.0, window, cx);
         let transform_w_input = number_input(0.0, window, cx);
         let transform_h_input = number_input(0.0, window, cx);
         let transform_scale_input = number_input(100.0, window, cx);
         let transform_rotation_input = number_input(0.0, window, cx);
-        let inline_text_input = cx.new(|cx| {
-            gpui_kit::component::input::TextareaState::new(window, cx).default_value("")
-        });
+        let inline_text_input = cx
+            .new(|cx| gpui_kit::component::input::TextareaState::new(window, cx).default_value(""));
         // The welcome form's defaults: NewCanvasSheet's `@State width`/
         // `height` ("1920" / "1080").
         let welcome_width_input = number_input(1920.0, window, cx);
@@ -544,12 +565,9 @@ impl AppState {
             cx.new(|_| slider(1.0, 100.0, 1.0, (brush.opacity * 100.0) as f32)),
             cx.new(|_| slider(0.0, 100.0, 1.0, brush.smoothing as f32)),
         ];
-        let wand_slider = cx.new(|_| {
-            slider(0.0, 255.0, 1.0, wand_tolerance as f32)
-        });
-        let gradient_slider = cx.new(|_| {
-            slider(1.0, 100.0, 1.0, (gradient_opacity * 100.0) as f32)
-        });
+        let wand_slider = cx.new(|_| slider(0.0, 255.0, 1.0, wand_tolerance as f32));
+        let gradient_slider =
+            cx.new(|_| slider(1.0, 100.0, 1.0, (gradient_opacity * 100.0) as f32));
         let opacity_slider = cx.new(|_| slider(0.0, 100.0, 1.0, 100.0));
 
         let mut state = AppState {
@@ -570,7 +588,7 @@ impl AppState {
             rename: None,
             rename_input: None,
             thumbnails: HashMap::new(),
-            fit_for: (0, 0),
+            fit_for: FitDims::REFIT,
             fit_tab: crate::project::TabId::nil(),
             preview_base: None,
             camera_raw_samples_defringe: false,
@@ -669,7 +687,12 @@ impl AppState {
         // settings).
         use compositor_core::document::NavigationTool;
         let tool = self.tab().session.tool;
-        let active_opacity = self.tab().session.active_layer().map(|l| l.opacity).unwrap_or(1.0);
+        let active_opacity = self
+            .tab()
+            .session
+            .active_layer()
+            .map(|l| l.opacity)
+            .unwrap_or(1.0);
         let sync: Option<(Entity<SliderState>, f32)> = match tool {
             NavigationTool::Brush
             | NavigationTool::SpotHealing
@@ -682,10 +705,9 @@ impl AppState {
                 self.gradient_slider.clone(),
                 (self.tab().session.gradient_settings.opacity * 100.0) as f32,
             )),
-            NavigationTool::Move => Some((
-                self.opacity_slider.clone(),
-                (active_opacity * 100.0) as f32,
-            )),
+            NavigationTool::Move => {
+                Some((self.opacity_slider.clone(), (active_opacity * 100.0) as f32))
+            }
             _ => None,
         };
         if let Some((slider, value)) = sync {
@@ -705,7 +727,9 @@ impl AppState {
         if self.tab().session.text_draft.is_none() {
             return;
         }
-        self.tab().session.change_text_style(|style| style.tracking += delta);
+        self.tab()
+            .session
+            .change_text_style(|style| style.tracking += delta);
         self.touch(cx);
     }
 
@@ -817,13 +841,12 @@ impl AppState {
             }
         }
         // Number keys set opacity when the tool uses it (usesOpacityKeys).
-        if bare {
-            if let Ok(digit) = key.parse::<i32>() {
-                if (0..=9).contains(&digit) {
-                    self.opacity_digit(digit, window, cx);
-                    cx.stop_propagation();
-                }
-            }
+        if bare
+            && let Ok(digit) = key.parse::<i32>()
+            && (0..=9).contains(&digit)
+        {
+            self.opacity_digit(digit, window, cx);
+            cx.stop_propagation();
         }
     }
 
@@ -844,20 +867,21 @@ impl AppState {
         let brush_indices = [0usize, 1, 2, 3];
         for index in brush_indices {
             let slider = self.brush_sliders[index].clone();
-            let subscription = cx.subscribe(&slider, move |state, _slider, event: &SliderEvent, cx| {
-                let value = match event {
-                    SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-                };
-                let brush = &mut state.tab().session.brush_settings;
-                match index {
-                    0 => brush.diameter = value as f64,
-                    1 => brush.hardness = (value / 100.0) as f64,
-                    2 => brush.opacity = (value / 100.0) as f64,
-                    _ => brush.smoothing = value as f64,
-                }
-                state.revision += 1;
-                cx.notify();
-            });
+            let subscription =
+                cx.subscribe(&slider, move |state, _slider, event: &SliderEvent, cx| {
+                    let value = match event {
+                        SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+                    };
+                    let brush = &mut state.tab().session.brush_settings;
+                    match index {
+                        0 => brush.diameter = value as f64,
+                        1 => brush.hardness = (value / 100.0) as f64,
+                        2 => brush.opacity = (value / 100.0) as f64,
+                        _ => brush.smoothing = value as f64,
+                    }
+                    state.revision += 1;
+                    cx.notify();
+                });
             self.subscriptions.push(subscription);
         }
         let wand_slider = self.wand_slider.clone();
@@ -873,30 +897,42 @@ impl AppState {
         });
         self.subscriptions.push(subscription);
         let gradient_slider = self.gradient_slider.clone();
-        let subscription = cx.subscribe(&gradient_slider, |state, _slider, event: &SliderEvent, cx| {
-            let value = match event {
-                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-            };
-            state.tab().session.gradient_settings.opacity = (value / 100.0) as f64;
-            state.revision += 1;
-            cx.notify();
-        });
+        let subscription = cx.subscribe(
+            &gradient_slider,
+            |state, _slider, event: &SliderEvent, cx| {
+                let value = match event {
+                    SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+                };
+                state.tab().session.gradient_settings.opacity = (value / 100.0) as f64;
+                state.revision += 1;
+                cx.notify();
+            },
+        );
         self.subscriptions.push(subscription);
         let opacity_slider = self.opacity_slider.clone();
-        let subscription = cx.subscribe(&opacity_slider, |state, _slider, event: &SliderEvent, cx| {
-            match event {
-                SliderEvent::Change(value) => {
-                    state.tab().session.begin_opacity_edit();
-                    state.tab().session.set_layer_opacity((value.start() / 100.0) as f64);
+        let subscription = cx.subscribe(
+            &opacity_slider,
+            |state, _slider, event: &SliderEvent, cx| {
+                match event {
+                    SliderEvent::Change(value) => {
+                        state.tab().session.begin_opacity_edit();
+                        state
+                            .tab()
+                            .session
+                            .set_layer_opacity((value.start() / 100.0) as f64);
+                    }
+                    SliderEvent::Release(value) => {
+                        state
+                            .tab()
+                            .session
+                            .set_layer_opacity((value.start() / 100.0) as f64);
+                        state.tab().session.finish_opacity_edit();
+                    }
                 }
-                SliderEvent::Release(value) => {
-                    state.tab().session.set_layer_opacity((value.start() / 100.0) as f64);
-                    state.tab().session.finish_opacity_edit();
-                }
-            }
-            state.revision += 1;
-            cx.notify();
-        });
+                state.revision += 1;
+                cx.notify();
+            },
+        );
         self.subscriptions.push(subscription);
     }
 
@@ -916,7 +952,12 @@ impl AppState {
     }
 
     /// Shift-[ / Shift-]: hardness in Photoshop's 25% steps (0, 25, 50, 75, 100%).
-    pub fn change_brush_hardness(&mut self, increase: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn change_brush_hardness(
+        &mut self,
+        increase: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab().session.change_brush_hardness(increase);
         let next = self.tab().session.brush_settings.hardness;
         let slider = self.brush_sliders[1].clone();
@@ -934,7 +975,8 @@ impl AppState {
     /// pixels and commits it as one undo step, without opening a sheet.
     pub fn run_content_aware_fill(&mut self, cx: &mut Context<Self>) {
         let Some(base) = self
-            .tab().session
+            .tab()
+            .session
             .active_layer()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()))
         else {
@@ -962,10 +1004,10 @@ impl AppState {
         let result = compositor_core::filters::run_filter(&job);
         if let Some(id) = self.tab().session.active_layer_id {
             self.history_edit("Content-Aware Fill", move |session| {
-                if let Some(doc) = session.document.as_mut() {
-                    if let Some(layer) = doc.layer_mut(id) {
-                        layer.asset = Some(ImportedImage::new(result, layer.name.clone()));
-                    }
+                if let Some(doc) = session.document.as_mut()
+                    && let Some(layer) = doc.layer_mut(id)
+                {
+                    layer.asset = Some(ImportedImage::new(result, layer.name.clone()));
                 }
             });
         }
@@ -1009,17 +1051,23 @@ impl AppState {
             TextStyleField::Size => {
                 if let Some(value) = parse_field(text) {
                     let value = clamp_font_size(value);
-                    self.tab().session.change_text_style(move |style| style.font_size = value);
+                    self.tab()
+                        .session
+                        .change_text_style(move |style| style.font_size = value);
                 }
             }
             TextStyleField::Tracking => {
                 if let Some(value) = parse_field(text) {
-                    self.tab().session.change_text_style(move |style| style.tracking = value);
+                    self.tab()
+                        .session
+                        .change_text_style(move |style| style.tracking = value);
                 }
             }
             TextStyleField::Leading => {
                 let value = leading_from_text(text);
-                self.tab().session.change_text_style(move |style| style.leading = value);
+                self.tab()
+                    .session
+                    .change_text_style(move |style| style.leading = value);
             }
         }
         self.touch(cx);
@@ -1090,8 +1138,11 @@ impl AppState {
         });
         let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
         for (slider, apply) in [
-            (hue.clone(), (|hsb: &mut compositor_core::document::PickerHSB, v: f64| hsb.hue = v)
-                as fn(&mut compositor_core::document::PickerHSB, f64)),
+            (
+                hue.clone(),
+                (|hsb: &mut compositor_core::document::PickerHSB, v: f64| hsb.hue = v)
+                    as fn(&mut compositor_core::document::PickerHSB, f64),
+            ),
             (
                 saturation.clone(),
                 |hsb: &mut compositor_core::document::PickerHSB, v: f64| {
@@ -1117,7 +1168,10 @@ impl AppState {
                     apply(&mut picker.hsb, value as f64);
                     // An effect's color previews live on the layer
                     // (ColorPalette.swift:113-118).
-                    if matches!(picker.target, compositor_core::session::ColorPickerTarget::Effect { .. }) {
+                    if matches!(
+                        picker.target,
+                        compositor_core::session::ColorPickerTarget::Effect { .. }
+                    ) {
                         state.tab().session.preview_effect_color();
                     }
                     state.touch(cx);
@@ -1150,7 +1204,11 @@ impl AppState {
         }
         let layer = self.current_tab().session.active_layer()?;
         let mask_alone = self.current_tab().session.is_mask_selected
-            && layer.mask.as_ref().map(|mask| !mask.is_linked).unwrap_or(false);
+            && layer
+                .mask
+                .as_ref()
+                .map(|mask| !mask.is_linked)
+                .unwrap_or(false);
         Some(if mask_alone {
             layer.mask_transform()
         } else {
@@ -1161,10 +1219,10 @@ impl AppState {
     /// 100% scale: the layer's pixels, else the displayed size
     /// (`transformPixelSize ?? activeLayer?.size ?? value.size`).
     pub fn transform_pixel_size(&self) -> CGSize {
-        if let Some(layer) = self.current_tab().session.active_layer() {
-            if let Some(asset) = layer.asset.as_ref() {
-                return CGSize::new(asset.image.width as f64, asset.image.height as f64);
-            }
+        if let Some(layer) = self.current_tab().session.active_layer()
+            && let Some(asset) = layer.asset.as_ref()
+        {
+            return CGSize::new(asset.image.width as f64, asset.image.height as f64);
         }
         self.transform_displayed()
             .map(|value| value.size)
@@ -1217,13 +1275,11 @@ impl AppState {
                     return;
                 }
                 let pixel_size = self.transform_pixel_size();
-                self.transform_change(
-                    move |value| *value = value.scaled(number, pixel_size),
-                    cx,
-                );
+                self.transform_change(move |value| *value = value.scaled(number, pixel_size), cx);
             }
-            TransformField::Rotation => self
-                .transform_change(|value| value.rotation = normalize_rotation(number), cx),
+            TransformField::Rotation => {
+                self.transform_change(|value| value.rotation = normalize_rotation(number), cx)
+            }
         }
     }
 
@@ -1262,10 +1318,7 @@ impl AppState {
             let watched = input.clone();
             let subscription = cx.subscribe(
                 &input,
-                move |state: &mut Self,
-                      _input,
-                      event: &InputEvent,
-                      cx: &mut Context<Self>| {
+                move |state: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
                     if let InputEvent::Change = event {
                         let text = watched.read(cx).value().to_string();
                         state.text_style_field_changed(field, &text, cx);
@@ -1293,16 +1346,16 @@ impl AppState {
             (self.transform_w_input.clone(), TransformField::Width),
             (self.transform_h_input.clone(), TransformField::Height),
             (self.transform_scale_input.clone(), TransformField::Scale),
-            (self.transform_rotation_input.clone(), TransformField::Rotation),
+            (
+                self.transform_rotation_input.clone(),
+                TransformField::Rotation,
+            ),
         ];
         for (input, field) in transform_fields {
             let watched = input.clone();
             let subscription = cx.subscribe(
                 &input,
-                move |state: &mut Self,
-                      _input,
-                      event: &InputEvent,
-                      cx: &mut Context<Self>| {
+                move |state: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
                     if let InputEvent::Change = event {
                         let text = watched.read(cx).value().to_string();
                         state.transform_field_changed(field, &text, cx);
@@ -1385,7 +1438,8 @@ impl AppState {
     // MARK: View transform
 
     pub fn doc_size(&self) -> (f64, f64) {
-        self.current_tab().session
+        self.current_tab()
+            .session
             .document
             .as_ref()
             .map(|d| (d.width as f64, d.height as f64))
@@ -1434,7 +1488,10 @@ impl AppState {
             (viewport.0 as f64 - w * zoom) / 2.0,
             (viewport.1 as f64 - h * zoom) / 2.0,
         );
-        self.fit_for = (w as usize, h as usize);
+        self.fit_for = FitDims {
+            width: w as usize,
+            height: h as usize,
+        };
         self.fit_tab = self.workspace.selected_id();
         self.revision += 1;
     }
@@ -1442,7 +1499,7 @@ impl AppState {
     /// Requests a viewport refit on the next canvas layout pass (Swift's
     /// view rebuild on a tab switch or a document size change).
     pub fn request_refit(&mut self) {
-        self.fit_for = (0, 0);
+        self.fit_for = FitDims::REFIT;
         self.fit_tab = crate::project::TabId::nil();
     }
 
@@ -1481,13 +1538,14 @@ impl AppState {
             });
         let document = held.as_ref().unwrap_or(document);
         let active_id = self.current_tab().session.active_layer_id;
-        let override_pixels = |doc: &mut CanvasDocument, pixels: &Bitmap, transform: LayerTransform| {
-            if let Some(id) = active_id {
-                if let Some(layer) = doc.layer_mut(id) {
+        let override_pixels =
+            |doc: &mut CanvasDocument, pixels: &Bitmap, transform: LayerTransform| {
+                if let Some(id) = active_id
+                    && let Some(layer) = doc.layer_mut(id)
+                {
                     Self::set_preview_layer(layer, pixels, transform);
                 }
-            }
-        };
+            };
 
         // Preview pixels override the active layer while a sheet is open.
         if let (Some(preview), Some(base_transform)) = (&self.preview, &self.preview_base_transform)
@@ -1498,14 +1556,13 @@ impl AppState {
         }
         // A pixel move shows the lifted pixels rebuilt at the offset, placed
         // by the layer's own transform (the rebuilt grid is the layer's).
-        if let Some(move_state) = &self.current_tab().session.pixel_move {
-            if let Some(pixels) = move_state.moved_pixels() {
-                if let Some(layer) = self.current_tab().session.active_layer() {
-                    let mut doc = document.clone();
-                    override_pixels(&mut doc, &pixels, layer.transform);
-                    return Some(self.composite_bitmap(&doc));
-                }
-            }
+        if let Some(move_state) = &self.current_tab().session.pixel_move
+            && let Some(pixels) = move_state.moved_pixels()
+            && let Some(layer) = self.current_tab().session.active_layer()
+        {
+            let mut doc = document.clone();
+            override_pixels(&mut doc, &pixels, layer.transform);
+            return Some(self.composite_bitmap(&doc));
         }
         // A stroke in progress overrides the active layer too.
         if let Some(CanvasDrag::Stroke(edit, _)) = &self.drag {
@@ -1529,18 +1586,23 @@ impl AppState {
             return Some(self.composite_bitmap(&doc));
         }
         // The Shape tool previews its layer live while dragging.
-        if let Some(CanvasDrag::Shape { .. }) = &self.drag {
-            if let (Some(shape), Some(rect)) = (&self.shape_shape, &self.shape_rect) {
-                let mut doc = document.clone();
-                let raster = render::render_shape_image(shape, rect.width().round() as usize, rect.height().round() as usize);
-                let mut layer = ImageLayer::with_asset(
-                    compositor_core::raster::ImportedImage::new(raster, String::new()),
-                    rect.origin,
-                );
-                layer.transform = compositor_core::transform::LayerTransform::new(rect.origin, rect.size);
-                doc.layers.push(layer);
-                return Some(self.composite_bitmap(&doc));
-            }
+        if let Some(CanvasDrag::Shape { .. }) = &self.drag
+            && let (Some(shape), Some(rect)) = (&self.shape_shape, &self.shape_rect)
+        {
+            let mut doc = document.clone();
+            let raster = render::render_shape_image(
+                shape,
+                rect.width().round() as usize,
+                rect.height().round() as usize,
+            );
+            let mut layer = ImageLayer::with_asset(
+                compositor_core::raster::ImportedImage::new(raster, String::new()),
+                rect.origin,
+            );
+            layer.transform =
+                compositor_core::transform::LayerTransform::new(rect.origin, rect.size);
+            doc.layers.push(layer);
+            return Some(self.composite_bitmap(&doc));
         }
         // A gradient drag previews the fill.
         if let Some(CanvasDrag::Gradient(edit, start, _)) = &self.drag {
@@ -1595,24 +1657,18 @@ impl AppState {
         layer: &ImageLayer,
     ) -> Option<Arc<RenderImage>> {
         let mask_selected = self.tab().session.is_mask_selected && layer.mask.is_some();
-        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected)) {
-            if *rev == self.revision {
-                return Some(image.clone());
-            }
+        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected))
+            && *rev == self.revision
+        {
+            return Some(image.clone());
         }
         let document = self.tab().session.document.as_ref()?;
-        let canvas = compositor_core::geometry::CGSize::new(
-            document.width as f64,
-            document.height as f64,
-        );
+        let canvas =
+            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
         // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
         // frame, whatever the layer's own bounds.
         let thumbnail = if mask_selected {
-            render::mask_canvas_thumbnail(
-                layer.mask.as_ref()?,
-                &layer.mask_transform(),
-                canvas,
-            )?
+            render::mask_canvas_thumbnail(layer.mask.as_ref()?, &layer.mask_transform(), canvas)?
         } else {
             render::layer_canvas_thumbnail(layer, canvas)?
         };
@@ -1633,7 +1689,8 @@ impl AppState {
 
     pub fn begin_rename(&mut self, id: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
-            .tab().session
+            .tab()
+            .session
             .document
             .as_ref()
             .and_then(|d| d.layer(id))
@@ -1684,13 +1741,16 @@ impl AppState {
     pub(crate) fn history_edit(&mut self, name: &str, edit: impl FnOnce(&mut EditorSession)) {
         {
             let session = self.tab();
-            session.session
-                .history
-                .begin(name, &session.session.document, session.session.active_layer_id);
+            session.session.history.begin(
+                name,
+                &session.session.document,
+                session.session.active_layer_id,
+            );
         }
         edit(&mut self.tab().session);
         let session = self.tab();
-        session.session
+        session
+            .session
             .history
             .end(&session.session.document, session.session.active_layer_id);
     }
@@ -1716,16 +1776,15 @@ impl AppState {
         if let Some(preview) = self.preview.clone() {
             let transform = self.preview_base_transform.unwrap_or_default();
             self.history_edit(name, move |session| {
-                if let Some(id) = session.active_layer_id {
-                    if let Some(doc) = session.document.as_mut() {
-                        if let Some(layer) = doc.layer_mut(id) {
-                            layer.asset = Some(ImportedImage::new(
-                                preview.as_ref().clone(),
-                                layer.name.clone(),
-                            ));
-                            layer.transform = transform;
-                        }
-                    }
+                if let Some(id) = session.active_layer_id
+                    && let Some(doc) = session.document.as_mut()
+                    && let Some(layer) = doc.layer_mut(id)
+                {
+                    layer.asset = Some(ImportedImage::new(
+                        preview.as_ref().clone(),
+                        layer.name.clone(),
+                    ));
+                    layer.transform = transform;
                 }
             });
         }
@@ -1739,12 +1798,16 @@ impl AppState {
 
     /// The active selection clipped to the canvas (`selection?.clip(canvas:)`).
     pub(crate) fn selection_clip(&self) -> Option<compositor_core::selection::SelectionClip> {
-        self.current_tab().session.selection().and_then(|selection| {
-            self.current_tab().session
-                .document
-                .as_ref()
-                .map(|document| selection.clip(document.size()))
-        })
+        self.current_tab()
+            .session
+            .selection()
+            .and_then(|selection| {
+                self.current_tab()
+                    .session
+                    .document
+                    .as_ref()
+                    .map(|document| selection.clip(document.size()))
+            })
     }
 
     /// Whether deleting the current selection must ask first: the deleted
@@ -1788,7 +1851,9 @@ impl AppState {
             self.tab().session.preview_adjustment_editing(true);
             return;
         }
-        let Some(base) = self.preview_base.clone() else { return };
+        let Some(base) = self.preview_base.clone() else {
+            return;
+        };
         let selection = self.selection_clip();
         let job = FilterJob {
             kind,
@@ -1823,9 +1888,9 @@ impl AppState {
         if px < 0.0 || py < 0.0 || px >= base.width as f64 || py >= base.height as f64 {
             return;
         }
-        let Some(hue) =
-            compositor_core::adjust::camera_raw::straight_pixel_hue(base.pixel(px as usize, py as usize))
-        else {
+        let Some(hue) = compositor_core::adjust::camera_raw::straight_pixel_hue(
+            base.pixel(px as usize, py as usize),
+        ) else {
             return;
         };
         let mut settings = self.filter_settings_from_panel(cx);
@@ -1857,9 +1922,9 @@ impl AppState {
             return;
         }
         self.camera_raw_readout = Some([
-            ((pixel[0] as f64 / alpha * 255.0).round() as u8).min(255),
-            ((pixel[1] as f64 / alpha * 255.0).round() as u8).min(255),
-            ((pixel[2] as f64 / alpha * 255.0).round() as u8).min(255),
+            ((pixel[0] as f64 / alpha * 255.0).round() as u8),
+            ((pixel[1] as f64 / alpha * 255.0).round() as u8),
+            ((pixel[2] as f64 / alpha * 255.0).round() as u8),
         ]);
     }
 
@@ -1940,9 +2005,9 @@ pub fn byte_count_label(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_count_label, clamp_font_size, clamp_zoom, doc_to_screen_at, format_number,
-        leading_from_text, leading_to_text, normalize_rotation, parse_field, resize_transform,
-        screen_to_doc_at, transform_field_texts, TransformField, MAX_ZOOM, MIN_ZOOM,
+        MAX_ZOOM, MIN_ZOOM, TransformField, byte_count_label, clamp_font_size, clamp_zoom,
+        doc_to_screen_at, format_number, leading_from_text, leading_to_text, normalize_rotation,
+        parse_field, resize_transform, screen_to_doc_at, transform_field_texts,
     };
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::LayerTransform;
@@ -2107,10 +2172,7 @@ mod tests {
         use compositor_core::raster::{Bitmap, ImportedImage};
 
         fn empty_layer(name: &str) -> ImageLayer {
-            ImageLayer::with_asset(
-                ImportedImage::new(Bitmap::new(4, 4), name),
-                CGPoint::ZERO,
-            )
+            ImageLayer::with_asset(ImportedImage::new(Bitmap::new(4, 4), name), CGPoint::ZERO)
         }
 
         #[test]
@@ -2171,10 +2233,8 @@ mod tests {
         fn time_seed_varies_across_calls() {
             // Time-derived seeds (Filters.swift:223's UInt32.random): a run of
             // calls must not all collapse onto one value.
-            let seeds: std::collections::HashSet<u32> =
-                (0..64).map(|_| time_seed()).collect();
+            let seeds: std::collections::HashSet<u32> = (0..64).map(|_| time_seed()).collect();
             assert!(seeds.len() > 1, "seeds never varied: {seeds:?}");
         }
     }
 }
-
