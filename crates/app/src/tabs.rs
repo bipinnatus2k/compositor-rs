@@ -349,10 +349,9 @@ impl ProjectWorkspace {
             return Step::Done(());
         };
         self.is_managing = true;
-        // The asked tab comes on screen (the quit flow does the same,
-        // Swift :110): the app resolves the alert's answer through the
-        // tab that is currently selected.
-        self.selected_id = id;
+        // Swift asks about the target tab without bringing it on screen
+        // (:89-96): the confirm resolves through `pending_close`, never
+        // through the selection, so the user's tab stays put.
         let tab = &mut self.tabs[index];
         match tab.controller.confirm_close(&mut tab.session, &mut tab.busy) {
             Step::Done(true) => {
@@ -1116,6 +1115,46 @@ mod tests {
         assert!(workspace.tabs().iter().any(|tab| tab.id == first),
             "the tab survives a cancelled close");
         assert!(workspace.current().session.is_modified());
+    }
+
+    /// Swift `close(_:)` (:89-96) asks about the target tab WITHOUT bringing
+    /// it on screen — the selection stays where the user left it, through
+    /// the ask, a cancel, and a DontSave removal alike.
+    #[test]
+    fn close_asks_without_foregrounding_the_target_tab() {
+        let mut workspace = ProjectWorkspace::new();
+        let first = workspace.selected_id();
+        workspace.tab_mut(first).unwrap().session.create_document(10, 10, true);
+        let second = workspace.add_tab(true).id;
+        workspace.tab_mut(second).unwrap().session.create_document(20, 20, true);
+        workspace.tab_mut(second).unwrap().session.add_blank_layer();
+        assert!(workspace.select(first));
+        assert_eq!(workspace.selected_id(), first);
+
+        // The dirty second tab asks; the first stays on screen.
+        assert!(matches!(workspace.close(second), Step::Pending(_)));
+        assert_eq!(
+            workspace.selected_id(),
+            first,
+            "close must not foreground the asked tab (Swift :89-96)"
+        );
+
+        // A cancel answers nothing and still never moved the selection.
+        assert!(matches!(
+            workspace.resolve_close(UnsavedChoice::Cancel),
+            Step::Done(())
+        ));
+        assert!(workspace.tabs().iter().any(|tab| tab.id == second));
+        assert_eq!(workspace.selected_id(), first);
+
+        // DontSave removes the asked tab; the selection is untouched.
+        assert!(matches!(workspace.close(second), Step::Pending(_)));
+        assert!(matches!(
+            workspace.resolve_close(UnsavedChoice::DontSave),
+            Step::Done(())
+        ));
+        assert!(!workspace.tabs().iter().any(|tab| tab.id == second));
+        assert_eq!(workspace.selected_id(), first);
     }
 
     /// `closeWindow` (:115-119): after the last confirmation the tabs are

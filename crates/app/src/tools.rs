@@ -16,7 +16,7 @@ use gpui_kit::component::{Disableable, Selectable, Sizable};
 use compositor_core::document::NavigationTool;
 use compositor_core::geometry::CGRect;
 use compositor_core::selection::{LassoKind, WandMode};
-use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
+use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
 use compositor_core::tools::brush::GradientShape;
 use compositor_core::transform::LayerSampling;
 
@@ -75,8 +75,10 @@ fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{font_menu_names, tool_title};
+    use super::{crop_entry_preset, font_menu_names, tool_title};
     use compositor_core::document::NavigationTool;
+    use compositor_core::geometry::CGRect;
+    use compositor_core::session::EditorSession;
 
     #[test]
     fn tool_title_names_tools_and_eraser_variant() {
@@ -85,6 +87,28 @@ mod tests {
         // The brush has two modes depending on the eraser toggle.
         assert_eq!(tool_title(NavigationTool::Brush, false), "Brush");
         assert_eq!(tool_title(NavigationTool::Brush, true), "Eraser");
+    }
+
+    /// EditorSession.swift:347-351: entering Crop with no frame presets the
+    /// full-document frame AND resets the ratio choice to Free — a ratio
+    /// left over from an earlier crop must not reshape the preset.
+    #[test]
+    fn crop_entry_preset_resets_a_stale_ratio_choice() {
+        let mut session = EditorSession::new();
+        session.create_document(800, 600, false);
+        session.crop_ratio_choice = "4:3".to_string();
+
+        crop_entry_preset(&mut session, NavigationTool::Crop);
+        assert_eq!(session.crop_ratio_choice, "Free");
+        assert_eq!(session.crop_rect, Some(CGRect::new(0.0, 0.0, 800.0, 600.0)));
+
+        // An existing frame is never replaced, and its ratio choice stands.
+        let framed = CGRect::new(10.0, 10.0, 100.0, 100.0);
+        session.crop_rect = Some(framed);
+        session.crop_ratio_choice = "1:1".to_string();
+        crop_entry_preset(&mut session, NavigationTool::Crop);
+        assert_eq!(session.crop_rect, Some(framed));
+        assert_eq!(session.crop_ratio_choice, "1:1");
     }
 
     #[test]
@@ -117,6 +141,25 @@ mod tests {
         assert_eq!(names, vec!["ahab", "zed"]);
         assert_eq!(font_menu_names("only", &[], 1), vec!["only"]);
     }
+}
+
+/// EditorSession.swift:347-351: entering Crop with no frame presets the
+/// full-document frame and resets the ratio choice to Free, so a ratio
+/// left over from an earlier crop never reshapes the preset.
+fn crop_entry_preset(session: &mut EditorSession, tool: NavigationTool) {
+    if tool != NavigationTool::Crop || session.crop_rect.is_some() {
+        return;
+    }
+    let Some(document) = session.document.as_ref() else {
+        return;
+    };
+    session.crop_ratio_choice = "Free".to_string();
+    session.crop_rect = Some(CGRect::new(
+        0.0,
+        0.0,
+        document.width as f64,
+        document.height as f64,
+    ));
 }
 
 impl AppState {
@@ -157,19 +200,7 @@ impl AppState {
         }
         self.tab().session.tool = tool;
         self.tab().session.cancel_lasso();
-        // Entering Crop with no frame presets a full-document one (:347-351).
-        if tool == NavigationTool::Crop
-            && self.tab().session.crop_rect.is_none()
-            && self.tab().session.document.is_some()
-        {
-            let document = self.tab().session.document.as_ref().unwrap();
-            self.tab().session.crop_rect = Some(CGRect::new(
-                0.0,
-                0.0,
-                document.width as f64,
-                document.height as f64,
-            ));
-        }
+        crop_entry_preset(&mut self.tab().session, tool);
         self.touch(cx);
     }
 
