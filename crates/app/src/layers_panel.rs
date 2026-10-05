@@ -14,6 +14,7 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable;
 
+use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
 use compositor_core::effects::LayerEffectKind;
@@ -188,8 +189,24 @@ impl AppState {
         }
         panel = panel.child(list);
 
-        // Footer buttons (Lucide glyphs; tooltips keep the wording).
+        // Footer buttons (Lucide glyphs; tooltips keep the wording). The set
+        // mirrors Swift's footer (LayersPanel.swift:38-60): add, group, mask
+        // menu, effects, adjustment menu, then the trash — no duplicate or
+        // move buttons (those live in the menus and on the shortcuts).
         let fx_entries = self.effects_menu_entries();
+        let adjustment_entries = self.adjustment_menu_entries();
+        // The trash's label follows the target (deleteLayerOrMask,
+        // SelectionEdits.swift:71-75).
+        let session = self.current_tab();
+        let delete_tooltip = if session.session.effect_selection.is_some() {
+            "Delete selected effect"
+        } else if session.session.is_mask_selected {
+            "Delete layer mask"
+        } else if session.session.selected_layer_ids.len() > 1 {
+            "Delete selected layers"
+        } else {
+            "Delete selected layer"
+        };
         panel = panel.child(
             gpui_kit::div()
                 .flex()
@@ -213,9 +230,13 @@ impl AppState {
                         this.touch(cx);
                     },
                 )))
-                .child(footer_button("layer-group", IconName::FolderPlus, "New Group", cx.listener(
+                .child(footer_button("layer-group", IconName::FolderPlus, "Group selected layers (⌘G)", cx.listener(
                     |this, _, _, cx| {
-                        this.add_group(cx);
+                        // The footer groups the SELECTION (LayerGroups.swift:
+                        // 119 groupSelectedLayers), not an empty folder above
+                        // the active layer.
+                        this.tab().session.group_selected_layers();
+                        this.touch(cx);
                     },
                 )))
                 // The effects menu (LayersPanel.swift's sparkles): one entry
@@ -236,28 +257,45 @@ impl AppState {
                             move |menu, _, _| crate::ui::build_menu(&app, menu, &fx_entries)
                         }),
                 )
-                .child(footer_button("layer-dup", IconName::Copy, "Duplicate Layer", cx.listener(
-                    |this, _, _, cx| {
-                        this.tab().session.duplicate_active_layer();
-                        this.touch(cx);
-                    },
-                )))
-                .child(footer_button("layer-del", IconName::Trash, "Delete Layer", cx.listener(
-                    |this, _, _, cx| {
-                        this.tab().session.delete_active_layer();
-                        this.touch(cx);
-                    },
-                )))
-                .child(footer_button("layer-up", IconName::ArrowUp, "Move Layer Up", cx.listener(
-                    |this, _, _, cx| {
-                        this.tab().session.move_active_layer(1);
-                        this.touch(cx);
-                    },
-                )))
-                .child(footer_button("layer-down", IconName::ArrowDown, "Move Layer Down", cx.listener(
-                    |this, _, _, cx| {
-                        this.tab().session.move_active_layer(-1);
-                        this.touch(cx);
+                .child(
+                    Button::new("layer-adjustment")
+                        .icon(Icon::new(IconName::Contrast))
+                        .accessibility_label("New adjustment layer")
+                        .ghost()
+                        .small()
+                        .tooltip("New adjustment layer")
+                        .dropdown_caret(true)
+                        .dropdown_menu({
+                            let app = app.clone();
+                            move |menu, _, _| {
+                                crate::ui::build_menu(&app, menu, &adjustment_entries)
+                            }
+                        }),
+                )
+                // deleteLayerOrMask (SelectionEdits.swift:71-75): a selected
+                // effect goes first; a targeted mask goes alone; otherwise
+                // every selected layer, through the live-mask ask.
+                .child(footer_button("layer-del", IconName::Trash, delete_tooltip, cx.listener(
+                    |this, _, window, cx| {
+                        if this.tab().session.effect_selection.is_some() {
+                            this.tab().session.remove_selected_effect();
+                            this.touch(cx);
+                            return;
+                        }
+                        let mask_targeted = this.tab().session.is_mask_selected
+                            && this
+                                .tab()
+                                .session
+                                .active_layer()
+                                .map(|layer| layer.mask.is_some())
+                                .unwrap_or(false)
+                            && this.tab().session.selected_layer_ids.len() <= 1;
+                        if mask_targeted {
+                            this.tab().session.delete_layer_mask();
+                            this.touch(cx);
+                        } else {
+                            this.request_delete_layer(window, cx);
+                        }
                     },
                 ))),
         );
@@ -276,6 +314,23 @@ impl AppState {
                 let kind = *kind;
                 MenuEntry::new(format!("{}…", kind.label()), move |state, window, cx| {
                     state.add_effect(kind, window, cx);
+                })
+                .disabled(!enabled)
+            })
+            .collect()
+    }
+
+    /// The 12 adjustment kinds (LayersPanel.swift's half-circle menu): one
+    /// entry per kind; choosing one adds an adjustment layer. Entries use
+    /// the kinds' raw labels, no ellipsis, like Swift's footer menu.
+    fn adjustment_menu_entries(&self) -> Vec<MenuEntry> {
+        let enabled = self.current_tab().session.can_edit_layers();
+        AdjustmentKind::ALL
+            .iter()
+            .map(|kind| {
+                let kind = *kind;
+                MenuEntry::new(kind.label(), move |state, _, cx| {
+                    state.add_adjustment(kind, cx);
                 })
                 .disabled(!enabled)
             })

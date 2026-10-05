@@ -185,6 +185,38 @@ impl EditorSession {
         }
     }
 
+    /// `removeSelectedEffect` (LayerEffects.swift:357-368): drop the selected
+    /// kind from its layer's effects in one "Remove <kind>" step, releasing
+    /// the panel binding when it pointed at the removed effect.
+    pub fn remove_selected_effect(&mut self) {
+        let Some(selection) = self.selected_effect() else {
+            return;
+        };
+        if !self.can_edit_layers() {
+            return;
+        }
+        if self.effects_editing == Some(selection) {
+            self.close_color_picker(false);
+            self.effects_editing = None;
+            self.effects_editing_original = None;
+        }
+        let Some(mut effects) = self
+            .document
+            .as_ref()
+            .and_then(|document| document.layer(selection.layer_id))
+            .and_then(|layer| layer.effects)
+        else {
+            return;
+        };
+        effects.remove(selection.kind);
+        self.set_effects(
+            effects,
+            Some(selection.layer_id),
+            &format!("Remove {}", selection.kind.label()),
+        );
+        self.effect_selection = None;
+    }
+
     /// `setEffects(_:on:name:)` — one undo step; rejects folders, layers
     /// without pixels and invalid values, and normalizes empty effects to nil.
     pub fn set_effects(&mut self, effects: LayerEffects, on: Option<Uuid>, name: &str) {
@@ -333,6 +365,38 @@ mod tests {
             .layer(id)
             .and_then(|layer| layer.effects)
             .unwrap_or_default()
+    }
+
+    /// `removeSelectedEffect` (LayerEffects.swift:357-368): the selected
+    /// kind leaves in one "Remove <kind>" step and the selection clears;
+    /// removing the effect the panel edits releases the binding too.
+    #[test]
+    fn remove_selected_effect_drops_the_kind_in_one_step() {
+        let mut s = session();
+        let id = s.active_layer_id.unwrap();
+
+        s.add_effect(LayerEffectKind::Stroke);
+        s.finish_effects_editing(true);
+        s.add_effect(LayerEffectKind::Shadow);
+        s.finish_effects_editing(true);
+        s.select_effect(LayerEffectKind::Stroke, id, false);
+        assert_eq!(
+            s.selected_effect(),
+            Some(LayerEffectSelection { layer_id: id, kind: LayerEffectKind::Stroke })
+        );
+
+        s.remove_selected_effect();
+        let effects = effects_of(&s, id);
+        assert!(!effects.contains(LayerEffectKind::Stroke));
+        assert!(effects.contains(LayerEffectKind::Shadow));
+        assert_eq!(s.history.undo_name(), "Remove Stroke");
+        assert_eq!(s.selected_effect(), None);
+
+        // Removing the effect the panel is editing releases the binding.
+        s.select_effect(LayerEffectKind::Shadow, id, true);
+        s.remove_selected_effect();
+        assert_eq!(s.effects_editing, None);
+        assert!(effects_of(&s, id).is_empty());
     }
 
     #[test]
