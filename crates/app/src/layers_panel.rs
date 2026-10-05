@@ -43,6 +43,31 @@ fn selection_mode(shift: bool, alt: bool) -> SelectionMode {
     }
 }
 
+/// What the trash acts on (`deleteLayerOrMask`, SelectionEdits.swift:
+/// 71-75): a selected effect goes first, a targeted mask goes alone,
+/// everything else deletes through the live-mask ask.
+enum DeleteTarget {
+    Effect,
+    Mask,
+    Layers,
+}
+
+fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTarget {
+    if session.effect_selection.is_some() {
+        DeleteTarget::Effect
+    } else if session.is_mask_selected
+        && session
+            .active_layer()
+            .map(|layer| layer.mask.is_some())
+            .unwrap_or(false)
+        && session.selected_layer_ids.len() <= 1
+    {
+        DeleteTarget::Mask
+    } else {
+        DeleteTarget::Layers
+    }
+}
+
 /// The shared thumbnail cell: square, rounded, hairline border; the accent
 /// ring marks the edit target, a disabled mask reads dimmed, and an image
 /// fills the cell when one is on hand.
@@ -196,16 +221,17 @@ impl AppState {
         let fx_entries = self.effects_menu_entries();
         let adjustment_entries = self.adjustment_menu_entries();
         // The trash's label follows the target (deleteLayerOrMask,
-        // SelectionEdits.swift:71-75).
-        let session = self.current_tab();
-        let delete_tooltip = if session.session.effect_selection.is_some() {
-            "Delete selected effect"
-        } else if session.session.is_mask_selected {
-            "Delete layer mask"
-        } else if session.session.selected_layer_ids.len() > 1 {
-            "Delete selected layers"
-        } else {
-            "Delete selected layer"
+        // SelectionEdits.swift:71-75) — the same decision its action makes.
+        let delete_tooltip = match delete_target(&self.current_tab().session) {
+            DeleteTarget::Effect => "Delete selected effect",
+            DeleteTarget::Mask => "Delete layer mask",
+            DeleteTarget::Layers => {
+                if self.current_tab().session.selected_layer_ids.len() > 1 {
+                    "Delete selected layers"
+                } else {
+                    "Delete selected layer"
+                }
+            }
         };
         panel = panel.child(
             gpui_kit::div()
@@ -228,15 +254,6 @@ impl AppState {
                     }),
                 ))
                 .child(footer_button(
-                    "layer-mask",
-                    IconName::SquareDashedBottom,
-                    "Add Reveal-All Mask",
-                    cx.listener(|this, _, _, cx| {
-                        this.tab().session.add_layer_mask(true);
-                        this.touch(cx);
-                    }),
-                ))
-                .child(footer_button(
                     "layer-group",
                     IconName::FolderPlus,
                     "Group selected layers (⌘G)",
@@ -245,6 +262,15 @@ impl AppState {
                         // 119 groupSelectedLayers), not an empty folder above
                         // the active layer.
                         this.tab().session.group_selected_layers();
+                        this.touch(cx);
+                    }),
+                ))
+                .child(footer_button(
+                    "layer-mask",
+                    IconName::SquareDashedBottom,
+                    "Add Reveal-All Mask",
+                    cx.listener(|this, _, _, cx| {
+                        this.tab().session.add_layer_mask(true);
                         this.touch(cx);
                     }),
                 ))
@@ -287,24 +313,16 @@ impl AppState {
                     IconName::Trash,
                     delete_tooltip,
                     cx.listener(|this, _, window, cx| {
-                        if this.tab().session.effect_selection.is_some() {
-                            this.tab().session.remove_selected_effect();
-                            this.touch(cx);
-                            return;
-                        }
-                        let mask_targeted = this.tab().session.is_mask_selected
-                            && this
-                                .tab()
-                                .session
-                                .active_layer()
-                                .map(|layer| layer.mask.is_some())
-                                .unwrap_or(false)
-                            && this.tab().session.selected_layer_ids.len() <= 1;
-                        if mask_targeted {
-                            this.tab().session.delete_layer_mask();
-                            this.touch(cx);
-                        } else {
-                            this.request_delete_layer(window, cx);
+                        match delete_target(&this.tab().session) {
+                            DeleteTarget::Effect => {
+                                this.tab().session.remove_selected_effect();
+                                this.touch(cx);
+                            }
+                            DeleteTarget::Mask => {
+                                this.tab().session.delete_layer_mask();
+                                this.touch(cx);
+                            }
+                            DeleteTarget::Layers => this.request_delete_layer(window, cx),
                         }
                     }),
                 )),
@@ -495,6 +513,11 @@ impl AppState {
         let layer_is_target = is_active && !(mask_selected && has_mask);
         // What a thumbnail double-click opens (NativeLayerList.swift:141-143).
         let holds_text = layer.text.is_some();
+        let editable_adjustment = layer
+            .adjustment
+            .as_ref()
+            .map(|a| a.kind.is_editable())
+            .unwrap_or(false);
         row = row.child(thumbnail_cell(
             format!("layer-thumb-{}", index),
             layer_is_target,
@@ -508,8 +531,11 @@ impl AppState {
                     this.tab().session.select_layer_target(id, false);
                     if holds_text {
                         this.tab().session.edit_active_text();
-                    } else if this.edit_layer_adjustment(id, cx) {
-                        // The editor opened.
+                    } else if editable_adjustment {
+                        // Swift points adjustmentEditingID at the layer
+                        // unconditionally (NativeLayerList.swift:143); a
+                        // refused begin (busy) opens nothing, renames never.
+                        this.edit_layer_adjustment(id, cx);
                     } else {
                         this.begin_rename(id, window, cx);
                     }
@@ -589,6 +615,19 @@ impl AppState {
                 if clipped_to.is_some() { "↳ " } else { "" },
                 layer.name
             );
+            let clip_tooltip = clipped_to.map(|source| {
+                let source_name = self
+                    .tab()
+                    .session
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.layer(source))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "Missing source".to_string());
+                format!(
+                    "Clipping mask based on {source_name}. Option-click the bottom of its row to release."
+                )
+            });
             let subtitle = if let Some(source) = clipped_to {
                 let source_name = self
                     .tab()
@@ -636,14 +675,21 @@ impl AppState {
                             .text_ellipsis()
                             .child(SharedString::from(name)),
                     )
-                    .child(
-                        gpui_kit::div()
+                    .child({
+                        let mut line = gpui_kit::div()
+                            .id(SharedString::from(format!("layer-subtitle-{}", index)))
                             .text_size(px(10.0))
                             .text_color(gpui_kit::rgb(crate::ui::FG_DIM))
                             .overflow_hidden()
-                            .text_ellipsis()
-                            .child(SharedString::from(subtitle)),
-                    ),
+                            .text_ellipsis();
+                        if let Some(tip) = clip_tooltip.clone() {
+                            line = line.tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            });
+                        }
+                        line.child(SharedString::from(subtitle))
+                    }),
             );
         }
         row = row.child(name_cell);
@@ -795,7 +841,18 @@ fn app_activate(
     cx: &mut gpui_kit::Context<gpui_kit::component::menu::PopupMenu>,
 ) {
     app.update(cx, |state, cx| {
-        state.tab().session.select_layer(Some(id));
+        // Swift's menu activation runs selectLayerTarget -> selectLayer,
+        // which moves the ACTIVE layer without touching selectedLayerIDs
+        // (NativeLayerList.swift:763, EditorSession.swift:325-331): a right
+        // click on a row already inside a multi-selection keeps that
+        // selection, so the menu's Delete acts on all of it.
+        let session = &mut state.tab().session;
+        if session.selected_layer_ids.contains(&id) {
+            session.active_layer_id = Some(id);
+            session.is_mask_selected = false;
+        } else {
+            session.select_layer(Some(id));
+        }
         state.sync_opacity_slider(window, cx);
         state.touch(cx);
     })

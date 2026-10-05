@@ -33,7 +33,7 @@ pub enum CameraRawGlowStyle {
 }
 
 impl CameraRawGlowStyle {
-    pub fn shader_index(&self) -> i32 {
+    pub fn kernel_value(&self) -> i32 {
         match self {
             CameraRawGlowStyle::Diffusion => 0,
             CameraRawGlowStyle::Bloom => 1,
@@ -55,7 +55,7 @@ pub enum CameraRawVignetteStyle {
 }
 
 impl CameraRawVignetteStyle {
-    pub fn shader_index(&self) -> i32 {
+    pub fn kernel_value(&self) -> i32 {
         match self {
             CameraRawVignetteStyle::HighlightPriority => 0,
             CameraRawVignetteStyle::ColorPriority => 1,
@@ -177,7 +177,7 @@ pub enum CameraRawProcessVersion {
 }
 
 impl CameraRawProcessVersion {
-    pub fn shader_index(&self) -> i32 {
+    pub fn kernel_value(&self) -> i32 {
         match self {
             CameraRawProcessVersion::Version1 => 1,
             CameraRawProcessVersion::Version2 => 2,
@@ -1702,7 +1702,7 @@ impl CameraRawSettings {
                     settings.clarity,
                     settings.dehaze,
                     settings.glow,
-                    settings.glow_style.shader_index(),
+                    settings.glow_style.kernel_value(),
                     settings.glow_range,
                     settings.glow_spread,
                     settings.glow_warmth,
@@ -1711,7 +1711,7 @@ impl CameraRawSettings {
                     settings.vignette_roundness,
                     settings.vignette_feather,
                     settings.vignette_highlights,
-                    settings.vignette_style.shader_index(),
+                    settings.vignette_style.kernel_value(),
                     pixel_scale,
                 );
             }
@@ -1850,7 +1850,7 @@ impl CameraRawSettings {
             calibration.green_saturation,
             calibration.blue_hue,
             calibration.blue_saturation,
-            calibration.process.shader_index(),
+            calibration.process.kernel_value(),
         );
     }
 

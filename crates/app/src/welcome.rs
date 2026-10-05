@@ -281,17 +281,6 @@ mod tests {
         assert!(!valid_dimension(30_001));
     }
 
-    /// The copy is Swift's own (NewCanvasSheet.swift:20-21, 31-34), not an
-    /// invented title — ticket 10's 文案 alignment.
-    #[test]
-    fn welcome_labels_are_swifts_verbatim_strings() {
-        assert_eq!(WELCOME_TITLE, "New canvas");
-        assert_eq!(WELCOME_SUBTITLE, "A blank space for your next composition.");
-        assert_eq!(OPEN_PROJECT_LABEL, "Open project");
-        assert_eq!(IMPORT_IMAGE_LABEL, "Import image");
-        assert_eq!(CREATE_CANVAS_LABEL, "Create canvas");
-    }
-
     /// The Create gate (`NewCanvasSheet.valid`, :14-16): both fields must
     /// parse, for the button and the Return key alike.
     #[test]

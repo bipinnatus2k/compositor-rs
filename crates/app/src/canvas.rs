@@ -936,11 +936,29 @@ fn paint_target(
     })
 }
 
-/// The rest of `canPaint` (:5-12) beyond the surface rules: exactly one
-/// layer selected, the active layer still effectively visible, and an
-/// explicitly empty selection leaves nothing paintable. (`canEditLayers`'s
-/// UI-idle conjuncts stay enforced by the canvas drag gates.)
+/// The rest of `canPaint` (:5-12) beyond the surface rules: the session's
+/// UI-idle conjuncts (`canEditLayers`, EditorSession.swift:600-602 — a
+/// text draft, a pending adjustment or crop, a pixel move all block a
+/// stroke), exactly one layer selected, the active layer still
+/// effectively visible, and an explicitly empty selection leaves nothing
+/// paintable. The conjuncts that live app-side here: a brush or warp
+/// stroke IS the drag, the project-busy/import flags ride the tab, and
+/// a pending core gradient never coexists with a fresh press (Swift's
+/// beginGradient bypasses canEditLayers for its re-anchor too).
 fn can_paint(session: &EditorSession, document: &CanvasDocument) -> bool {
+    if session.selection_amount_operation.is_some()
+        || session.text_draft.is_some()
+        || session.shows_new_document
+        || session.transform_edit.is_some()
+        || session.crop_rect.is_some()
+        || session.pixel_move.is_some()
+        || session.hue_saturation.is_some()
+        || session.levels.is_some()
+        || session.filter_edit.is_some()
+        || session.adjustment_editing_id.is_some()
+    {
+        return false;
+    }
     if session.selected_layer_ids.len() != 1 {
         return false;
     }
@@ -2219,6 +2237,7 @@ mod tests {
             .layer_mut(id)
             .unwrap()
             .is_visible = true;
+        let document = session.document.clone().unwrap();
 
         // An explicitly empty selection paints nothing; a absent selection
         // paints everywhere (:6).
@@ -2260,6 +2279,23 @@ mod tests {
                 .expect("layer pixels paintable again")
                 .is_mask
         );
+
+        // The canEditLayers conjuncts (EditorSession.swift:600-602): an
+        // open adjustment editor or inline text draft blocks a stroke
+        // even with a perfect target.
+        let document = session.document.clone().unwrap();
+        assert!(can_paint(&session, &document));
+        session.adjustment_editing_id = Some(Uuid::new_v4());
+        assert!(!can_paint(&session, &document));
+        session.adjustment_editing_id = None;
+        session.text_draft = Some(compositor_core::session::TextDraft {
+            document_id: Uuid::new_v4(),
+            layer_id: None,
+            origin: CGPoint::ZERO,
+            transform: None,
+            style: Default::default(),
+        });
+        assert!(!can_paint(&session, &document));
     }
 
     #[test]
