@@ -102,6 +102,9 @@ pub fn dropdown(
         .outline()
         .small()
         .w(width)
+        // Native caret affordance (gpui-component button.rs dropdown_caret);
+        // no need to fake it with a "▾" text suffix.
+        .dropdown_caret(true)
         .dropdown_menu(move |menu, _, _| build_menu(&app, menu, &entries))
 }
 
@@ -139,7 +142,8 @@ pub fn labeled_slider(
     div_row()
         .child(
             gpui_kit::div()
-                .text_size(px(11.0))
+                // ToolHeaderStyle.swift:7: the control font is 12.
+                .text_size(px(12.0))
                 .text_color(rgb_u32(FG_DIM))
                 .child(SharedString::from(label.to_string())),
         )
@@ -147,7 +151,8 @@ pub fn labeled_slider(
         .child(
             gpui_kit::div()
                 .w(px(38.0))
-                .text_size(px(11.0))
+                // ToolHeaderStyle.swift:7: the control font is 12.
+                .text_size(px(12.0))
                 .text_color(rgb_u32(FG_TEXT))
                 .child(SharedString::from(value)),
         )
@@ -172,13 +177,19 @@ pub fn labeled_checkbox(
             app.update(cx, move |state, cx| handler(state, checked, window, cx))
                 .ok();
         })
-        .text_size(px(11.0))
+        // ToolHeaderStyle.swift:7: the control font is 12.
+        .text_size(px(12.0))
+        // The checkbox root lays its indicator out items_start
+        // (gpui-component checkbox.rs), which top-aligns the box against the
+        // text at this small size; centering overrides the refinement.
+        .items_center()
 }
 
 /// A plain text label in header/panel style.
 pub fn text_label(label: impl Into<String>, dim: bool) -> gpui_kit::Div {
     gpui_kit::div()
-        .text_size(px(11.0))
+        // ToolHeaderStyle.swift:7: the control font is 12.
+        .text_size(px(12.0))
         .text_color(rgb_u32(if dim { FG_DIM } else { FG_TEXT }))
         .child(SharedString::from(label.into()))
 }

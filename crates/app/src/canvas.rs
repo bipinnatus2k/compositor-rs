@@ -63,6 +63,12 @@ pub struct CanvasScene {
 
 impl AppState {
     pub fn render_canvas(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // An empty tab shows the welcome form in place of a canvas (Swift's
+        // `if session.document == nil { welcome }`, ContentView.swift:99-110 —
+        // the tab-embedded NewCanvasSheet).
+        if self.current_tab().session.document.is_none() {
+            return self.render_welcome(cx);
+        }
         let composite = self.composite();
         let image = composite.as_ref().map(|composite| self.frame_image(composite));
         let scene = self.build_scene(image);
@@ -492,7 +498,7 @@ impl AppState {
                     start_pan.1 + (f32::from(event.position.y) - f32::from(start.y)) as f64,
                 );
             }
-            Some(CanvasDrag::Stroke(edit)) => {
+            Some(CanvasDrag::Stroke(edit, _)) => {
                 edit.append_smoothed(doc);
             }
             Some(CanvasDrag::Warp(stroke)) => {
@@ -504,7 +510,7 @@ impl AppState {
                 self.shape_rect = Some(rect);
                 self.shape_shape = Some(shape);
             }
-            Some(CanvasDrag::Gradient(_, _)) => {
+            Some(CanvasDrag::Gradient(..)) => {
                 self.gradient_cursor = Some(doc);
             }
             Some(CanvasDrag::MarqueeLasso) => {
@@ -590,15 +596,22 @@ impl AppState {
         self.workspace.current_mut().busy.has_brush_stroke = false;
         if let Some(drag) = drag {
             match drag {
-                CanvasDrag::Stroke(mut edit) => {
+                CanvasDrag::Stroke(mut edit, id) => {
                     edit.flush();
-                    self.commit_stroke(edit, cx);
+                    self.commit_stroke(edit, id, cx);
                 }
-                CanvasDrag::Gradient(edit, start) => {
+                CanvasDrag::Gradient(edit, start, id) => {
                     let local = self.local_position(event.position);
                     self.gradient_cursor = Some(self.screen_to_doc(local.0, local.1));
                     let result = self.gradient_result(&edit, start);
-                    self.commit_bitmap(result, edit.paint_transform, "Gradient", cx);
+                    self.commit_pixels(
+                        compositor_core::raster::ImportedImage::new(result, String::new()),
+                        id,
+                        edit.paint_transform,
+                        "Gradient",
+                        edit.is_mask,
+                        cx,
+                    );
                 }
                 CanvasDrag::Warp(stroke) => {
                     self.finish_warp(stroke, cx);
@@ -682,9 +695,9 @@ impl AppState {
         self.drag = drag;
         self.workspace.current_mut().busy.has_brush_stroke = matches!(
             self.drag,
-            Some(CanvasDrag::Stroke(_))
+            Some(CanvasDrag::Stroke(..))
                 | Some(CanvasDrag::Warp(_))
-                | Some(CanvasDrag::Gradient(_, _))
+                | Some(CanvasDrag::Gradient(..))
                 | Some(CanvasDrag::Shape { .. })
         );
     }
@@ -708,9 +721,6 @@ impl AppState {
         let Some(layer) = document.layer(id) else {
             return;
         };
-        if layer.is_group {
-            return;
-        }
         // Clone Stamp: option-click sets the source; strokes copy from it.
         if self.tab().session.tool == NavigationTool::CloneStamp {
             if alt {
@@ -750,6 +760,11 @@ impl AppState {
                 NavigationTool::SpotHealing | NavigationTool::CloneStamp
             )
         {
+            return;
+        }
+        // Groups have no pixels of their own; only their mask is paintable
+        // (canPaint, EditorSession+Brush.swift:7).
+        if layer.is_group && !mask_target {
             return;
         }
         if !mask_target && layer.adjustment.is_some() {
@@ -822,7 +837,7 @@ impl AppState {
             }
         }
         edit.append_smoothed(doc);
-        self.set_drag(Some(CanvasDrag::Stroke(edit)));
+        self.set_drag(Some(CanvasDrag::Stroke(edit, id)));
     }
 
     /// What the Clone Stamp samples: the composite or the active layer.
@@ -919,7 +934,7 @@ pub(crate) fn blur_mask_sample(document: &CanvasDocument, layer: &ImageLayer) ->
 }
 
 impl AppState {
-    fn commit_stroke(&mut self, mut edit: RasterEdit, cx: &mut Context<Self>) {
+    fn commit_stroke(&mut self, mut edit: RasterEdit, layer_id: uuid::Uuid, cx: &mut Context<Self>) {
         if !edit.has_paint() {
             return;
         }
@@ -939,7 +954,7 @@ impl AppState {
             edit.heal(mode, seed);
             let (snapshot, transform, _) = edit.paint_snapshot();
             let mask = edit.is_mask;
-            self.commit_pixels(snapshot, transform, "Spot Healing", mask, cx);
+            self.commit_pixels(snapshot, layer_id, transform, "Spot Healing", mask, cx);
             return;
         }
         let erasing = edit.settings.erasing;
@@ -957,7 +972,7 @@ impl AppState {
             "Brush Stroke"
         };
         let mask = edit.is_mask;
-        self.commit_pixels(snapshot, transform, name, mask, cx);
+        self.commit_pixels(snapshot, layer_id, transform, name, mask, cx);
     }
 
     // MARK: Smudge / Liquify
@@ -1029,8 +1044,8 @@ impl AppState {
             name,
             selection_clip,
         ) {
-            // The warp always targets the layer's pixels.
-            self.commit_pixels(snapshot, transform, name, false, cx);
+            // The warp always targets the layer it started on.
+            self.commit_pixels(snapshot, id, transform, name, false, cx);
         }
     }
 
@@ -1093,17 +1108,18 @@ impl AppState {
     pub(crate) fn commit_pixels(
         &mut self,
         image: compositor_core::raster::ImportedImage,
+        layer_id: uuid::Uuid,
         transform: compositor_core::transform::LayerTransform,
         name: &str,
         mask: bool,
         cx: &mut Context<Self>,
     ) {
         self.history_edit(name, move |session| {
-            let Some(id) = session.active_layer_id else {
-                return;
-            };
             if let Some(doc) = session.document.as_mut() {
-                if let Some(layer) = doc.layer_mut(id) {
+                // The edit lands on the layer captured when it began —
+                // never on whatever happens to be active at mouse-up
+                // (EditorSession+Brush.swift:130-133).
+                if let Some(layer) = doc.layer_mut(layer_id) {
                     let mut image = image;
                     if mask {
                         if let Some(m) = layer.mask.as_mut() {
@@ -1125,12 +1141,14 @@ impl AppState {
     pub(crate) fn commit_bitmap(
         &mut self,
         bitmap: Bitmap,
+        layer_id: uuid::Uuid,
         transform: compositor_core::transform::LayerTransform,
         name: &str,
         cx: &mut Context<Self>,
     ) {
         self.commit_pixels(
             compositor_core::raster::ImportedImage::new(bitmap, String::new()),
+            layer_id,
             transform,
             name,
             false,
@@ -1150,21 +1168,47 @@ impl AppState {
         let Some(layer) = document.layer(id) else {
             return;
         };
-        if layer.is_group {
+        // Same target rules as a brush stroke: a selected enabled mask is
+        // the surface ("Gradient Mask", Gradient.swift:95-99), groups have
+        // no pixels of their own (EditorSession+Brush.swift:7), and an
+        // adjustment layer's pixels are not paintable.
+        let mask_target = self.tab().session.is_mask_selected
+            && layer
+                .mask
+                .as_ref()
+                .map(|m| m.is_enabled)
+                .unwrap_or(false);
+        if layer.is_group && !mask_target {
             return;
         }
-        let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
+        if !mask_target && layer.adjustment.is_some() {
+            return;
+        }
+        let (source, base_transform, is_mask) = if mask_target {
+            let m = layer.mask.as_ref().unwrap();
+            (
+                Some(m.asset.image.as_ref().clone()),
+                layer.mask_transform(),
+                true,
+            )
+        } else {
+            (
+                layer.asset.as_ref().map(|a| a.image.as_ref().clone()),
+                layer.transform,
+                false,
+            )
+        };
         let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
         let edit = RasterEdit::new(
             source,
-            layer.transform,
-            false,
+            base_transform,
+            is_mask,
             self.tab().session.brush_settings,
             CGSize::new(document.width as f64, document.height as f64),
             clip,
         );
         self.gradient_cursor = Some(doc);
-        self.set_drag(Some(CanvasDrag::Gradient(edit, doc)));
+        self.set_drag(Some(CanvasDrag::Gradient(edit, doc, id)));
     }
 
     // MARK: Move
@@ -1324,7 +1368,7 @@ impl AppState {
     /// sheet. The order mirrors Swift's cancel chain: the color picker first,
     /// then the floating panels (each panel's cancel is its `onClose`
     /// semantics), then a modal sheet, then the canvas edits.
-    pub fn cancel_active(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab().session.color_picker.is_some() {
             self.close_color_picker_ui(false, cx);
             return;
@@ -1336,7 +1380,7 @@ impl AppState {
         if self.sheet.is_some() {
             // Route through cancel_sheet so sheet-specific cancel semantics
             // run (the Effects sheet restores the edited effect).
-            self.cancel_sheet(cx);
+            self.cancel_sheet(window, cx);
             return;
         }
         if self.tab().session.lasso_draft.take().is_some() {

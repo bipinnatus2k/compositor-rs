@@ -429,9 +429,11 @@ impl AppState {
     }
 
     /// Presents the SaveAs pending stored on the flow's tab (the confirm's
-    /// Save button path).
+    /// Save button path). A *peek*, not a take: the panel's OK finishes
+    /// through `finish_save`, which consumes the controller's pending
+    /// itself (the plain `start_save` presentation leaves it in place too).
     fn present_pending_save_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pending = self.with_current_tab(|controller, _, _| controller.take_pending());
+        let pending = self.with_current_tab(|controller, _, _| controller.peek_pending());
         match pending {
             Some(pending @ Pending::SaveAs { .. }) => {
                 self.present_pending(pending, window, cx);
@@ -470,13 +472,39 @@ impl AppState {
     /// Cancel on one of the controller-driven sheets: the second half runs
     /// with no answer, releasing the flow's `is_project_busy` / `is_managing`
     /// guard (Swift's panel Cancel runs the same completion with nil).
-    pub(crate) fn cancel_pending_sheet(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_pending_sheet(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
             Some(SheetKind::SaveComp) => {
-                self.pending_save = None;
-                self.with_current_tab(|controller, session, busy| {
-                    controller.finish_save(session, busy, None);
-                });
+                let (tab_id, after) = self
+                    .pending_save
+                    .take()
+                    .unwrap_or((self.workspace.selected_id(), SaveAfter::Nothing));
+                let saved = match self.workspace.tab_mut(tab_id) {
+                    Some(ProjectTab {
+                        session,
+                        busy,
+                        controller,
+                        ..
+                    }) => controller.finish_save(session, busy, None),
+                    None => false,
+                };
+                // A save panel raised by the close/quit flow's Save button
+                // resumes that flow with "not saved", releasing its guard.
+                match after {
+                    SaveAfter::Nothing => {}
+                    SaveAfter::Close => {
+                        let step = self.workspace.close_after_save(saved);
+                        self.follow_close_step(step, window, cx);
+                    }
+                    SaveAfter::Quit => {
+                        let step = self.workspace.quit_after_save(saved);
+                        self.follow_quit_step(step, window, cx);
+                    }
+                }
             }
             Some(SheetKind::ExportPng) => {
                 self.with_current_tab(|controller, _, busy| {

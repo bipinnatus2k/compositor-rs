@@ -241,6 +241,14 @@ impl ProjectController {
         self.pending.take()
     }
 
+    /// The pending without consuming it. The save panel must be presented
+    /// from a *peek*: `finish_save` consumes `Pending::SaveAs` itself at
+    /// OK time, so a flow that `take_pending`s first makes every save from
+    /// its panel silently fail.
+    pub fn peek_pending(&self) -> Option<Pending> {
+        self.pending.clone()
+    }
+
     /// `canStart` (:11-13): the session half lives in
     /// [`ProjectBusy::ready`]; `is_managing` is the workspace's flag, passed
     /// in because the controller does not hold a workspace reference.
@@ -633,6 +641,26 @@ impl ProjectController {
         session: &mut EditorSession,
         busy: &mut ProjectBusy,
     ) -> Step<bool> {
+        self.confirm_step(session, busy, ConfirmStep::Quit)
+    }
+
+    /// The close-tab flow's half of `confirmQuit` — the same question, but
+    /// the alert carries `ConfirmStep::Close` so the app routes the answer
+    /// back into the close flow (`close(_:)` :233-244 forwards here per tab).
+    pub fn confirm_close(
+        &mut self,
+        session: &mut EditorSession,
+        busy: &mut ProjectBusy,
+    ) -> Step<bool> {
+        self.confirm_step(session, busy, ConfirmStep::Close)
+    }
+
+    fn confirm_step(
+        &mut self,
+        session: &mut EditorSession,
+        busy: &mut ProjectBusy,
+        step: ConfirmStep,
+    ) -> Step<bool> {
         if !self.begin(session, busy) {
             return Step::Done(false);
         }
@@ -642,7 +670,7 @@ impl ProjectController {
             Some(message) => {
                 let pending = Pending::Confirm {
                     tab: None,
-                    step: ConfirmStep::Quit,
+                    step,
                     message,
                 };
                 self.pending = Some(pending.clone());

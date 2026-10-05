@@ -349,8 +349,12 @@ impl ProjectWorkspace {
             return Step::Done(());
         };
         self.is_managing = true;
+        // The asked tab comes on screen (the quit flow does the same,
+        // Swift :110): the app resolves the alert's answer through the
+        // tab that is currently selected.
+        self.selected_id = id;
         let tab = &mut self.tabs[index];
-        match tab.controller.confirm_quit(&mut tab.session, &mut tab.busy) {
+        match tab.controller.confirm_close(&mut tab.session, &mut tab.busy) {
             Step::Done(true) => {
                 self.is_managing = false;
                 self.remove_tab(id);
@@ -1035,6 +1039,83 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `close(_:)` (:89-96) asks with `ConfirmStep::Close` — not Quit — so
+    /// the app routes the answer to `resolve_close`; the guard releases and
+    /// the tab actually closes.
+    #[test]
+    fn close_asks_with_the_close_step_and_resolve_close_closes() {
+        let mut workspace = ProjectWorkspace::new();
+        let first = workspace.selected_id();
+        let tab = workspace.tab_mut(first).unwrap();
+        tab.session.create_document(10, 10, true);
+        tab.session.add_blank_layer();
+
+        match workspace.close(first) {
+            Step::Pending(Pending::Confirm { step, message, .. }) => {
+                assert_eq!(step, crate::project::ConfirmStep::Close);
+                assert_eq!(message, "Save changes to Untitled?");
+            }
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+        assert_eq!(workspace.selected_id(), first, "the asked tab comes on screen");
+        assert!(!workspace.can_switch(), "is_managing blocks switching mid-close");
+
+        assert!(matches!(workspace.resolve_close(UnsavedChoice::DontSave), Step::Done(())));
+        assert!(workspace.can_switch(), "the guard releases when the flow ends");
+        assert!(workspace.close_pending_tab().is_none());
+    }
+
+    /// The close flow's Save button raises a save panel; a panel Cancel
+    /// resumes `close_after_save(false)` — the tab stays and the guard
+    /// releases (Swift's panel Cancel runs the completion with nil).
+    #[test]
+    fn close_save_panel_cancel_releases_the_guard_and_keeps_the_tab() {
+        let mut workspace = ProjectWorkspace::new();
+        let first = workspace.selected_id();
+        let tab = workspace.tab_mut(first).unwrap();
+        tab.session.create_document(10, 10, true);
+        tab.session.add_blank_layer();
+
+        assert!(matches!(workspace.close(first), Step::Pending(_)));
+        match workspace.resolve_close(UnsavedChoice::Save) {
+            Step::Pending(Pending::SaveAs { default_name, .. }) => {
+                assert_eq!(default_name, "Untitled.comp");
+            }
+            other => panic!("expected a save panel, got {other:?}"),
+        }
+        assert_eq!(workspace.close_pending_tab(), Some(first));
+        // The panel presents from a peek, not a take: `finish_save` consumes
+        // the controller's `Pending::SaveAs` itself at OK time, so it must
+        // still be set here — otherwise every save from the panel silently
+        // fails.
+        assert!(matches!(
+            workspace
+                .tabs()
+                .iter()
+                .find(|tab| tab.id == first)
+                .unwrap()
+                .controller
+                .peek_pending(),
+            Some(Pending::SaveAs { .. })
+        ));
+
+        // The panel's Cancel: finish_save(None) on the owning tab, then the
+        // close flow resumes with saved = false.
+        {
+            let tab = workspace.tab_mut(first).unwrap();
+            let ProjectTab {
+                session, busy, controller, ..
+            } = tab;
+            assert!(!controller.finish_save(session, busy, None));
+        }
+        assert!(matches!(workspace.close_after_save(false), Step::Done(())));
+        assert!(workspace.can_switch(), "the guard releases on panel Cancel");
+        assert_eq!(workspace.close_pending_tab(), None);
+        assert!(workspace.tabs().iter().any(|tab| tab.id == first),
+            "the tab survives a cancelled close");
+        assert!(workspace.current().session.is_modified());
     }
 
     /// `closeWindow` (:115-119): after the last confirmation the tabs are

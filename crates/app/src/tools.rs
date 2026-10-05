@@ -3,41 +3,47 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    px, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    px, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Disableable, Selectable, Sizable};
 
 use compositor_core::document::NavigationTool;
+use compositor_core::geometry::CGRect;
 use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 use compositor_core::tools::brush::GradientShape;
 use compositor_core::transform::LayerSampling;
 
-use crate::state::AppState;
+use crate::state::{AppState, CanvasDrag};
 use crate::ui::{div_row, dropdown, labeled_slider, text_label, MenuEntry};
 
-/// The rail entries in display order: (tool, letter, name).
-const TOOLS: [(NavigationTool, &str, &str); 16] = [
-    (NavigationTool::Move, "V", "Move / Transform"),
-    (NavigationTool::Marquee, "M", "Marquee"),
-    (NavigationTool::Lasso, "L", "Lasso"),
-    (NavigationTool::Wand, "W", "Magic Wand"),
-    (NavigationTool::Crop, "C", "Crop"),
-    (NavigationTool::Brush, "B", "Brush"),
-    (NavigationTool::Brush, "E", "Eraser"),
-    (NavigationTool::SpotHealing, "J", "Spot Healing Brush"),
-    (NavigationTool::CloneStamp, "S", "Clone Stamp"),
-    (NavigationTool::Blur, "R", "Smear"),
-    (NavigationTool::Gradient, "G", "Gradient"),
-    (NavigationTool::Shape, "U", "Shape"),
-    (NavigationTool::Type, "T", "Type"),
-    (NavigationTool::Eyedropper, "I", "Eyedropper"),
-    (NavigationTool::Hand, "H", "Hand"),
-    (NavigationTool::Zoom, "Z", "Zoom"),
+/// The rail entries in display order: (tool, id letter, Lucide icon, name,
+/// eraser-variant flag). The letter only names the button element (kept so
+/// existing element ids are stable); the glyph comes from the bundled
+/// Lucide set (`gpui_kit::assets`). Brush and Eraser share the Brush tool.
+const TOOLS: [(NavigationTool, &str, IconName, &str, bool); 16] = [
+    (NavigationTool::Move, "V", IconName::Move, "Move / Transform", false),
+    (NavigationTool::Marquee, "M", IconName::SquareDashed, "Marquee", false),
+    (NavigationTool::Lasso, "L", IconName::Lasso, "Lasso", false),
+    (NavigationTool::Wand, "W", IconName::WandSparkles, "Magic Wand", false),
+    (NavigationTool::Crop, "C", IconName::Crop, "Crop", false),
+    (NavigationTool::Brush, "B", IconName::Brush, "Brush", false),
+    (NavigationTool::Brush, "E", IconName::Eraser, "Eraser", true),
+    (NavigationTool::SpotHealing, "J", IconName::Bandage, "Spot Healing Brush", false),
+    (NavigationTool::CloneStamp, "S", IconName::Stamp, "Clone Stamp", false),
+    (NavigationTool::Blur, "R", IconName::Droplet, "Smear", false),
+    (NavigationTool::Gradient, "G", IconName::Blend, "Gradient", false),
+    (NavigationTool::Shape, "U", IconName::Square, "Shape", false),
+    (NavigationTool::Type, "T", IconName::Type, "Type", false),
+    (NavigationTool::Eyedropper, "I", IconName::Pipette, "Eyedropper", false),
+    (NavigationTool::Hand, "H", IconName::Hand, "Hand", false),
+    (NavigationTool::Zoom, "Z", IconName::ZoomIn, "Zoom", false),
 ];
 
 fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
@@ -115,18 +121,61 @@ mod tests {
 
 impl AppState {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
+        // `selectTool` (EditorSession.swift:332-352): the one gate every
+        // tool switch passes. The text draft commits first — a failed apply
+        // refuses the switch (:333). A stroke mid-flight, a project
+        // operation, or an adjustment editor open refuses outright (:334).
+        // Transform and the pending gradient auto-confirm; crop
+        // auto-cancels (:335).
+        let switching = self.tab().session.tool != tool;
+        if switching && !self.tab().session.finish_text() {
+            return;
+        }
+        if matches!(
+            self.drag,
+            Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
+        ) {
+            return;
+        }
+        if self.current_tab().busy.is_project_busy
+            || self.current_tab().session.adjustment_editing_id.is_some()
+        {
+            return;
+        }
+        if switching {
+            self.tab().session.commit_transform();
+            self.tab().session.resolve_gradient();
+            self.tab().session.cancel_crop();
+        }
+        // A shape drag dies with the switch (Swift's cancelShape :335); it
+        // lives app-side, so dropping it here is the whole cancel.
+        if matches!(self.drag, Some(CanvasDrag::Shape { .. })) {
+            self.drag = None;
+        }
         if tool == NavigationTool::Brush {
             self.tab().session.brush_mode = BrushToolMode::Paint;
         }
         self.tab().session.tool = tool;
         self.tab().session.cancel_lasso();
+        // Entering Crop with no frame presets a full-document one (:347-351).
+        if tool == NavigationTool::Crop
+            && self.tab().session.crop_rect.is_none()
+            && self.tab().session.document.is_some()
+        {
+            let document = self.tab().session.document.as_ref().unwrap();
+            self.tab().session.crop_rect = Some(CGRect::new(
+                0.0,
+                0.0,
+                document.width as f64,
+                document.height as f64,
+            ));
+        }
         self.touch(cx);
     }
 
     pub fn set_tool_eraser(&mut self, cx: &mut Context<Self>) {
-        self.tab().session.tool = NavigationTool::Brush;
+        self.set_tool(NavigationTool::Brush, cx);
         self.tab().session.brush_mode = BrushToolMode::Erase;
-        self.tab().session.cancel_lasso();
         self.touch(cx);
     }
 
@@ -146,13 +195,15 @@ impl AppState {
             .py_1()
             .bg(crate::ui::panel_bg());
 
-        for (tool, letter, name) in TOOLS {
-            let selected = match letter {
-                "E" => eraser_active,
-                "B" => active == NavigationTool::Brush && !eraser_active,
-                _ => active == tool,
+        for (tool, letter, icon, name, eraser_entry) in TOOLS {
+            let selected = if eraser_entry {
+                eraser_active
+            } else if tool == NavigationTool::Brush {
+                active == NavigationTool::Brush && !eraser_active
+            } else {
+                active == tool
             };
-            rail = rail.child(tool_button(tool, letter, name, selected, cx));
+            rail = rail.child(tool_button(tool, letter, icon, name, eraser_entry, selected, cx));
         }
 
         // Foreground / background swatches: clicking either opens the color
@@ -194,21 +245,30 @@ impl AppState {
         let erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
 
         let mut header = gpui_kit::div()
+            // Stateful so the bar can scroll sideways (overflow_x_scroll is a
+            // StatefulInteractiveElement method, gpui div.rs).
+            .id("options-header")
             .flex()
             .flex_row()
             .items_center()
             .w_full()
-            .h(px(36.0))
-            .px_2()
+            // ToolHeaderStyle.swift:5 (height 42) and BrushControls.swift:111
+            // (horizontal padding 18).
+            .h(px(42.0))
+            .px(px(18.0))
             .gap_3()
             .flex_shrink_0()
-            .overflow_hidden()
+            // Dense bars (Type, Move) run out of width; scroll sideways
+            // instead of clipping the tail controls.
+            .overflow_x_scroll()
             .bg(crate::ui::panel_bg());
 
         header = header.child(
             text_label(tool_title(tool, erasing), false)
                 .w(px(82.0))
-                .text_size(px(12.0))
+                // ToolHeaderStyle.swift:6: the title is 13pt semibold.
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
                 .flex_shrink_0(),
         );
 
@@ -577,7 +637,9 @@ impl AppState {
             header = header
                 .child(
                     text_label(if mask { "Transform Mask" } else { "Transform" }, false)
-                        .text_size(px(12.0))
+                        // Section title: ToolHeaderStyle.swift:6 (13 semibold).
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .flex_shrink_0(),
                 )
                 .child(checkbox(
@@ -711,7 +773,11 @@ impl AppState {
             header = header
                 .child(dropdown(&app, "type-font", font, px(150.0), entries))
                 .child(
+                    // The unit hugs its field (Swift unitSuffix HStack
+                    // spacing 2, ToolHeaderStyle.swift:13-18): a tighter gap
+                    // than the row's control spacing.
                     div_row()
+                        .gap_1()
                         .child(Input::new(&self.type_size_input).id("type-size").small().w(px(52.0)))
                         .child(text_label("px", true)),
                 )
@@ -1002,6 +1068,9 @@ fn sampling_dropdown(
         .label(current.label())
         .outline()
         .small()
+        // Same caret affordance as the ui::dropdown helper (gpui-component
+        // button.rs dropdown_caret).
+        .dropdown_caret(true)
         .w(px(120.0))
         .disabled(!enabled);
     button
@@ -1028,20 +1097,29 @@ pub fn checkbox(
             app.update(cx, move |state, cx| handler(state, checked, window, cx))
                 .ok();
         })
-        .text_size(px(11.0))
+        // ToolHeaderStyle.swift:7: the control font is 12.
+        .text_size(px(12.0))
+        // The checkbox root lays its indicator out items_start
+        // (gpui-component checkbox.rs), which top-aligns the box against the
+        // text at this small size; centering overrides the refinement.
+        .items_center()
         .into_any_element()
 }
 
 fn tool_button(
     tool: NavigationTool,
     letter: &'static str,
+    icon: IconName,
     name: &'static str,
+    eraser: bool,
     selected: bool,
     cx: &mut Context<AppState>,
 ) -> Button {
-    let eraser = letter == "E";
     Button::new(SharedString::from(format!("tool-{}", letter)))
-        .label(letter)
+        .icon(Icon::new(icon))
+        // Icon-only buttons have no label to read aloud; the tooltip name
+        // doubles as the announced one.
+        .accessibility_label(name)
         .ghost()
         .compact()
         .selected(selected)

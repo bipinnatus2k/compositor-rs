@@ -21,4 +21,5 @@ pub mod state;
 pub mod tabs;
 pub mod tools;
 pub mod ui;
+pub mod welcome;
 pub mod workspace;

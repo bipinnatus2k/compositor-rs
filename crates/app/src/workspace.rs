@@ -1179,8 +1179,8 @@ impl AppState {
             self.touch(cx);
         }
     }
-    fn on_cancel(&mut self, _: &keys::CancelAction, _w: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_active(cx);
+    fn on_cancel(&mut self, _: &keys::CancelAction, w: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_active(w, cx);
     }
 
     // MARK: Shared handler helpers

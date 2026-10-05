@@ -56,10 +56,13 @@ pub fn clamp_zoom(zoom: f64) -> f64 {
 pub enum CanvasDrag {
     /// Hand tool or middle-mouse panning.
     Pan { start: Point<Pixels>, start_pan: (f64, f64) },
-    /// A brush-family stroke in progress.
-    Stroke(RasterEdit),
-    /// Gradient drag: the edit plus the document-space start point.
-    Gradient(RasterEdit, CGPoint),
+    /// A brush-family stroke in progress on the layer captured at
+    /// `begin_stroke` (EditorSession+Brush.swift:130-133 commits to the
+    /// captured layer, never to whatever is active at mouse-up).
+    Stroke(RasterEdit, uuid::Uuid),
+    /// Gradient drag: the edit plus the document-space start point, on the
+    /// captured layer.
+    Gradient(RasterEdit, CGPoint, uuid::Uuid),
     /// Marquee / freehand lasso drag; the draft lives in the session.
     MarqueeLasso,
     /// A Smudge or Liquify stroke working on a document-size copy.
@@ -383,6 +386,11 @@ pub struct AppState {
     pub transform_h_input: Entity<InputState>,
     pub transform_scale_input: Entity<InputState>,
     pub transform_rotation_input: Entity<InputState>,
+    /// The empty tab's welcome form's numeric fields (`render_welcome`,
+    /// NewCanvasSheet's `@State width`/`height`, shown while the tab has no
+    /// document). Built here because an `InputState` needs the window.
+    pub welcome_width_input: Entity<InputState>,
+    pub welcome_height_input: Entity<InputState>,
     /// The inline canvas text editor (`InlineTextEditor.swift`): one
     /// persistent multi-line input, shown as an overlay while a text draft
     /// is open (see `inline_text`).
@@ -525,6 +533,10 @@ impl AppState {
         let inline_text_input = cx.new(|cx| {
             gpui_kit::component::input::TextareaState::new(window, cx).default_value("")
         });
+        // The welcome form's defaults: NewCanvasSheet's `@State width`/
+        // `height` ("1920" / "1080").
+        let welcome_width_input = number_input(1920.0, window, cx);
+        let welcome_height_input = number_input(1080.0, window, cx);
 
         let brush_sliders = [
             cx.new(|_| slider(1.0, 300.0, 1.0, brush.diameter as f32)),
@@ -586,6 +598,8 @@ impl AppState {
             transform_h_input,
             transform_scale_input,
             transform_rotation_input,
+            welcome_width_input,
+            welcome_height_input,
             inline_text_input,
             inline_text_open: false,
             inline_text_pushed: None,
@@ -1447,6 +1461,25 @@ impl AppState {
     /// preview standing in for the active layer's pixels.
     pub fn composite(&self) -> Option<Bitmap> {
         let document = self.current_tab().session.document.as_ref()?;
+        // While the inline text editor is open, its draft's layer is held
+        // out of the composite (`EditorCanvas`'s draw loop skips
+        // `layer.id == session.textDraft?.layerID`): the overlay input paints
+        // the live text, and the layer's stale raster would double it from
+        // underneath. The layer returns as soon as the draft is committed or
+        // cancelled — no draft, no skip — and every other layer, plus the
+        // preview branches below, compose as usual against the rest.
+        let held = self
+            .current_tab()
+            .session
+            .text_draft
+            .as_ref()
+            .and_then(|draft| draft.layer_id)
+            .map(|id| {
+                let mut doc = document.clone();
+                doc.layers.retain(|layer| layer.id != id);
+                doc
+            });
+        let document = held.as_ref().unwrap_or(document);
         let active_id = self.current_tab().session.active_layer_id;
         let override_pixels = |doc: &mut CanvasDocument, pixels: &Bitmap, transform: LayerTransform| {
             if let Some(id) = active_id {
@@ -1475,7 +1508,7 @@ impl AppState {
             }
         }
         // A stroke in progress overrides the active layer too.
-        if let Some(CanvasDrag::Stroke(edit)) = &self.drag {
+        if let Some(CanvasDrag::Stroke(edit, _)) = &self.drag {
             let result = edit.result();
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);
@@ -1510,7 +1543,7 @@ impl AppState {
             }
         }
         // A gradient drag previews the fill.
-        if let Some(CanvasDrag::Gradient(edit, start)) = &self.drag {
+        if let Some(CanvasDrag::Gradient(edit, start, _)) = &self.drag {
             let result = self.gradient_result(edit, *start);
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);

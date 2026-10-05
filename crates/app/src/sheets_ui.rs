@@ -232,7 +232,9 @@ impl AppState {
                     Button::new("sheet-cancel")
                         .label("Cancel")
                         .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_sheet(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_sheet(window, cx)
+                        })),
                 )
                 .child(
                     Button::new("sheet-ok")
@@ -574,7 +576,7 @@ impl AppState {
         body.into_any_element()
     }
 
-    pub fn cancel_sheet(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The Confirm sheet's Cancel aborts the close/quit flow; the
         // Alert's Cancel is just OK; the controller-driven panels release
         // their pending (with no answer).
@@ -601,7 +603,7 @@ impl AppState {
                 | SheetKind::CanvasSize
                 | SheetKind::Trim,
             ) => {
-                self.cancel_pending_sheet(cx);
+                self.cancel_pending_sheet(window, cx);
                 return;
             }
             _ => {}
@@ -924,7 +926,7 @@ impl AppState {
             document.selection.as_ref().map(|s| s.clip(document.size())),
         );
         let result = edit.fill(color);
-        self.commit_bitmap(result, layer.transform, name, cx);
+        self.commit_bitmap(result, id, layer.transform, name, cx);
     }
 
     // MARK: File operations

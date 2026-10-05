@@ -18,6 +18,10 @@ fn main() {
         gpui_kit::init(cx);
         cx.bind_keys(keys::bindings());
         Theme::change(ThemeMode::Dark, None, cx);
+        // Panels and sheets paint a hand-picked 0x2d2d2d; the default dark
+        // theme's `input` border — the unchecked checkbox indicator and
+        // input outlines — is nearly the same gray and disappears on it.
+        cx.global_mut::<Theme>().input = gpui_kit::rgb(0x5f5f5f).into();
 
         cx.spawn(async move |cx| {
             let options = WindowOptions {

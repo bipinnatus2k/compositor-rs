@@ -8,9 +8,22 @@
 //! the canvas paints with), keeps its text two-way bound to the draft, and
 //! routes Enter/Escape like the Swift editor: plain Return inserts a line
 //! break (the text system's own behavior), ⌘Return commits, Escape cancels.
+//!
+//! Two typeface metrics the committed raster carries have no editing-time
+//! counterpart in gpui's text stack:
+//!
+//! - **Tracking is not shown while editing.** The core steps every glyph by
+//!   `advance + tracking` (tools/text.rs:283), but neither gpui's
+//!   `TextStyle` nor gpui-component's Input exposes a letter-spacing knob,
+//!   so the overlay always lays the text out at zero tracking
+//!   (`inline_text_line_ratio` fixes the row stride instead). The committed
+//!   raster keeps the style's tracking; the Option-arrow tracking steps
+//!   change only the draft and become visible at commit.
+//! - **Alignment** (`LayerTextStyle.alignment`) is likewise a commit-time
+//!   layout: the overlay's input is left-aligned.
 
 use gpui_kit::component::input::{Textarea, TextareaState};
-use gpui_kit::{px, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
+use gpui_kit::{px, relative, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
 use gpui_kit::MouseButton;
 use gpui_kit::{Context, Entity, Window};
 
@@ -26,11 +39,16 @@ pub const INLINE_TEXT_MAX_CHARS: usize = 100_000;
 
 /// The screen-space box the inline editor occupies: origin and size in
 /// viewport pixels, plus the on-canvas typeface (size and color follow the
-/// draft's style at the current zoom).
+/// draft's style at the current zoom). `inset` is the text content's inset
+/// from the box in viewport pixels (`LayerTextStyle.padding` scaled the way
+/// the box itself is scaled) and `line_ratio` is the overlay's line stride
+/// as a fraction of the font size, so the rows land where the commit's do.
 #[derive(Clone, PartialEq, Debug)]
 pub struct InlineTextOverlay {
     pub origin: (f32, f32),
     pub size: (f32, f32),
+    pub inset: (f32, f32),
+    pub line_ratio: f32,
     pub font_px: f32,
     pub color: u32,
     pub font_family: String,
@@ -100,6 +118,51 @@ pub fn inline_text_box(
 pub fn inline_text_measured_size(style: &LayerTextStyle) -> CGSize {
     let size = compositor_core::tools::text::text_box_size(style);
     CGSize::new(size.width.max(16.0), size.height.max(16.0))
+}
+
+/// The text content's inset from the editor box, in viewport pixels. The
+/// committed raster starts its glyphs `LayerTextStyle.padding` layer pixels
+/// from the box's edges (first baseline at `PADDING + ascent`,
+/// tools/text.rs:255, pen at `PADDING`, :259), and Swift insets its text
+/// view by that same padding inside the logical box
+/// (InlineTextEditor.swift:137-138). The inset here is that padding scaled
+/// the way the box itself is scaled onto the screen — zoom times whatever
+/// scale the layer's transform carries — so the editing glyphs start where
+/// the commit would put them. The scale reads off the box's screen size over
+/// its logical size; for a rotated box that is the axis-aligned bounds'
+/// scale, matching the axis-aligned text this port draws (see the module
+/// note on `render_inline_text_overlay`). A degenerate logical size falls
+/// back to the plain zoom.
+pub fn inline_text_content_inset(
+    box_screen: (f32, f32),
+    logical: CGSize,
+    zoom: f64,
+) -> (f32, f32) {
+    let scale_x = if logical.width > 0.0 {
+        box_screen.0 as f64 / logical.width
+    } else {
+        zoom
+    };
+    let scale_y = if logical.height > 0.0 {
+        box_screen.1 as f64 / logical.height
+    } else {
+        zoom
+    };
+    (
+        (LayerTextStyle::PADDING * scale_x) as f32,
+        (LayerTextStyle::PADDING * scale_y) as f32,
+    )
+}
+
+/// The overlay's line stride as a fraction of the font size. Core's rows
+/// advance by `style.line_height()` layer pixels per line — the style's
+/// explicit leading, else 120% of the size (document.rs:408-418) — so the
+/// fraction reproduces either case, and through gpui's `relative()` line
+/// height it stays correct whatever the on-screen font size is. (gpui rounds
+/// the stride to whole pixels, so sub-pixel drift can accumulate across many
+/// rows; the core raster itself stays exact.)
+pub fn inline_text_line_ratio(style: &LayerTextStyle) -> f32 {
+    (style.line_height() / style.font_size) as f32
 }
 
 /// The word-wrapped line widths of the content inside `container_width`,
@@ -522,11 +585,13 @@ impl AppState {
     /// module note on `render_inline_text_overlay`).
     pub fn inline_text_overlay(&self) -> Option<InlineTextOverlay> {
         let draft = self.current_tab().session.text_draft.as_ref()?;
+        let measured = inline_text_measured_size(&draft.style);
+        let logical = draft.style.box_size.unwrap_or(measured);
         let ((ox, oy), (w, h)) = inline_text_box(
             draft.origin,
             draft.transform,
             draft.style.box_size,
-            inline_text_measured_size(&draft.style),
+            measured,
             self.inline_text_asset_width(draft),
             self.zoom,
             self.pan,
@@ -540,9 +605,12 @@ impl AppState {
             (a.max(*x), b.max(*y))
         });
         let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let size = ((max_x - min_x).max(24.0), (max_y - min_y).max(24.0));
         Some(InlineTextOverlay {
             origin: (min_x, min_y),
-            size: ((max_x - min_x).max(24.0), (max_y - min_y).max(24.0)),
+            size,
+            inset: inline_text_content_inset(size, logical, self.zoom),
+            line_ratio: inline_text_line_ratio(&draft.style),
             font_px: (draft.style.font_size * self.zoom).max(6.0) as f32,
             color: (rgb(draft.style.red) << 16) | (rgb(draft.style.green) << 8) | rgb(draft.style.blue),
             font_family: draft.style.font_name.clone(),
@@ -615,6 +683,26 @@ impl AppState {
         let on_leading_loosen = cx.listener(Self::on_inline_leading_loosen);
         let on_leading_tighten_more = cx.listener(Self::on_inline_leading_tighten_more);
         let on_leading_loosen_more = cx.listener(Self::on_inline_leading_loosen_more);
+        // The text content sits inset from the box by the style's padding
+        // scaled to the screen (`inline_text_content_inset`) — where the
+        // committed raster starts its glyphs (Swift insets its text view the
+        // same way, InlineTextEditor.swift:137-138). The input engine adds
+        // its own multi-line paddings from the component Size on every
+        // render (Input::render → `set_editor_paddings`), so the content div
+        // is offset and sized to cancel exactly those — read from the same
+        // default Size the Textarea is built with — leaving the glyphs on
+        // the inset, and the wrap width equal to the box minus both insets,
+        // which is the container the core wraps the commit's lines in
+        // (`text_image`'s `container_width`, tools/text.rs:246).
+        let engine = gpui_kit::component::Size::default();
+        let engine_px = f32::from(engine.input_px());
+        let engine_py = f32::from(engine.input_py());
+        let content_left = overlay.origin.0 + overlay.inset.0 - engine_px;
+        let content_top = overlay.origin.1 + overlay.inset.1 - engine_py;
+        let content_size = (
+            (overlay.size.0 - overlay.inset.0 * 2.0 + engine_px * 2.0).max(8.0),
+            (overlay.size.1 - overlay.inset.1 * 2.0 + engine_py * 2.0).max(8.0),
+        );
         Some(
             gpui_kit::div()
                 .id("inline-text-editor")
@@ -633,16 +721,29 @@ impl AppState {
                 .on_action(on_leading_tighten_more)
                 .on_action(on_leading_loosen_more)
                 .child(
-                    Textarea::new(&input)
-                        .appearance(false)
-                        .bordered(false)
-                        .aria_label("Canvas text")
-                        // The draft's own typeface (`textAttributes`'s
-                        // `.font: NSFont(name: style.fontName, ...)`). A name
-                        // gpui cannot resolve falls back to the UI font.
-                        .font_family(SharedString::from(overlay.font_family.clone()))
-                        .text_size(px(overlay.font_px))
-                        .text_color(gpui_kit::rgb(overlay.color)),
+                    gpui_kit::div()
+                        .absolute()
+                        .left(px(content_left))
+                        .top(px(content_top))
+                        .w(px(content_size.0))
+                        .h(px(content_size.1))
+                        .child(
+                            Textarea::new(&input)
+                                .appearance(false)
+                                .bordered(false)
+                                .aria_label("Canvas text")
+                                // The draft's own typeface (`textAttributes`'s
+                                // `.font: NSFont(name: style.fontName, ...)`). A name
+                                // gpui cannot resolve falls back to the UI font.
+                                .font_family(SharedString::from(overlay.font_family.clone()))
+                                .text_size(px(overlay.font_px))
+                                .text_color(gpui_kit::rgb(overlay.color))
+                                // The core's row stride: the style's leading, else
+                                // 120% of the size — not the component's flat
+                                // 1.25rem (`relative` scales it with the font
+                                // size, `inline_text_line_ratio`).
+                                .line_height(relative(overlay.line_ratio)),
+                        ),
                 )
                 .children(self.render_inline_caret(cx))
                 .into_any_element(),
@@ -789,9 +890,10 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_text_box, inline_text_box_corners, inline_text_handle_at, inline_text_handle_size,
-        inline_text_key, inline_text_local_point, inline_text_measured_size, inline_text_overflows,
-        inline_text_resize, inline_text_shown_transform, InlineTextKey,
+        inline_text_box, inline_text_box_corners, inline_text_content_inset, inline_text_handle_at,
+        inline_text_handle_size, inline_text_key, inline_text_line_ratio, inline_text_local_point,
+        inline_text_measured_size, inline_text_overflows, inline_text_resize,
+        inline_text_shown_transform, InlineTextKey,
     };
     use crate::state::doc_to_screen_at;
     use compositor_core::document::LayerTextStyle;
@@ -837,6 +939,48 @@ mod tests {
         );
         assert_eq!((ox, oy), (4.0, 6.0));
         assert_eq!((w, h), (measured.width as f32, measured.height as f32));
+    }
+
+    #[test]
+    fn content_inset_tracks_the_boxs_screen_scale() {
+        // At 1:1 the 12-layer-px padding is 12 viewport px.
+        assert_eq!(
+            inline_text_content_inset((200.0, 80.0), CGSize::new(200.0, 80.0), 1.0),
+            (12.0, 12.0)
+        );
+        // Zoom scales it.
+        assert_eq!(
+            inline_text_content_inset((400.0, 160.0), CGSize::new(200.0, 80.0), 2.0),
+            (24.0, 24.0)
+        );
+        // A layer scaled 2x doubles it at the same zoom: the box is twice
+        // the logical size on screen.
+        assert_eq!(
+            inline_text_content_inset((400.0, 160.0), CGSize::new(200.0, 80.0), 1.0),
+            (24.0, 24.0)
+        );
+        // A degenerate logical size falls back to the zoom.
+        assert_eq!(
+            inline_text_content_inset((100.0, 50.0), CGSize::ZERO, 3.0),
+            (36.0, 36.0)
+        );
+    }
+
+    #[test]
+    fn line_ratio_matches_the_core_stride() {
+        // Auto leading: 120% of the size (document.rs:408-410).
+        let auto = LayerTextStyle {
+            font_size: 72.0,
+            ..LayerTextStyle::default()
+        };
+        assert!((inline_text_line_ratio(&auto) - 1.2).abs() < 0.0001);
+        // An explicit leading overrides the auto one (document.rs:412-418).
+        let explicit = LayerTextStyle {
+            font_size: 60.0,
+            leading: 30.0,
+            ..LayerTextStyle::default()
+        };
+        assert!((inline_text_line_ratio(&explicit) - 0.5).abs() < 0.0001);
     }
 
     #[test]
