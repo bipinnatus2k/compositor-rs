@@ -820,18 +820,30 @@ impl AppState {
         let Some(id) = self.tab().session.active_layer_id else {
             return;
         };
+        self.edit_layer_adjustment(id, cx);
+    }
+
+    /// Edit Adjustment… for the layer `id`: refuses Invert (no settings to
+    /// edit) and busy states, prefills the editor from the layer's current
+    /// settings and opens the matching panel. False when nothing opened.
+    pub(crate) fn edit_layer_adjustment(
+        &mut self,
+        id: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(adjustment) = self
             .tab().session
-            .active_layer()
+            .document
+            .as_ref()
+            .and_then(|document| document.layer(id))
             .and_then(|layer| layer.adjustment.clone())
         else {
-            return;
+            return false;
         };
-        // Invert has no settings to edit.
         if adjustment.kind == AdjustmentKind::Invert
             || !self.tab().session.begin_adjustment_editing(id)
         {
-            return;
+            return false;
         }
         // Prefill the editor from the layer's current settings.
         match adjustment.kind {
@@ -858,6 +870,7 @@ impl AppState {
                 }
             }
         }
+        true
     }
 
     // MARK: Select

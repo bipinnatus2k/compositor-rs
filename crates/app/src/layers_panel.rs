@@ -402,13 +402,10 @@ impl AppState {
                 this.tab().session.select_layer(Some(id));
                 this.sync_opacity_slider(window, cx);
                 if double {
-                    if is_group {
-                        // Double-clicking a folder toggles its expansion
-                        // instead of renaming it (the row's disclosure).
-                        this.tab().session.toggle_group_expansion(id);
-                    } else {
-                        this.begin_rename(id, window, cx);
-                    }
+                    // A row double-click renames — folders included
+                    // (renameClickedLayer, NativeLayerList.swift:135-146);
+                    // expansion belongs to the chevron alone.
+                    this.begin_rename(id, window, cx);
                 }
                 this.touch(cx);
             }))
@@ -481,12 +478,30 @@ impl AppState {
         // (NativeLayerList.swift:712-715).
         let thumbnail = self.thumbnail_image(id, layer);
         let layer_is_target = is_active && !(mask_selected && has_mask);
+        // What a thumbnail double-click opens (NativeLayerList.swift:141-143).
+        let holds_text = layer.text.is_some();
         row = row.child(thumbnail_cell(
             format!("layer-thumb-{}", index),
             layer_is_target,
             false,
             thumbnail,
             move |this, event, window, cx| {
+                // A double-click on the thumbnail opens what the layer holds:
+                // its text, or an editable adjustment's editor (Invert falls
+                // through); anything else renames it.
+                if click_count(event) >= 2 {
+                    this.tab().session.select_layer_target(id, false);
+                    if holds_text {
+                        this.tab().session.edit_active_text();
+                    } else if this.edit_layer_adjustment(id, cx) {
+                        // The editor opened.
+                    } else {
+                        this.begin_rename(id, window, cx);
+                    }
+                    this.touch(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let modifiers = event.modifiers();
                 if !modifiers.control && !modifiers.platform {
                     this.tab().session.select_layer_target(id, false);
@@ -520,7 +535,13 @@ impl AppState {
                 move |this, event, window, cx| {
                     let modifiers = event.modifiers();
                     if !modifiers.control && !modifiers.platform {
+                        // selectMask (NativeLayerList.swift:793-796): the
+                        // mask becomes the edit target; Shift also toggles
+                        // it on/off.
                         this.tab().session.select_layer_target(id, true);
+                        if modifiers.shift {
+                            this.tab().session.toggle_layer_mask();
+                        }
                         this.sync_opacity_slider(window, cx);
                         this.touch(cx);
                         cx.stop_propagation();
