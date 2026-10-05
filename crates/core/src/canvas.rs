@@ -6,7 +6,7 @@
 
 use crate::document::{CanvasDocument, ImageLayer};
 use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
-use crate::raster::{resample, Bitmap, ImportedImage};
+use crate::raster::{Bitmap, ImportedImage};
 use crate::transform::{LayerSampling, LayerTransform};
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +59,13 @@ impl CanvasSizeDraft {
     }
 
     pub fn displayed(&self, width_axis: bool) -> f64 {
-        let original = if width_axis { self.original_width } else { self.original_height } as f64;
-        let pixels = (if width_axis { self.width } else { self.height }) - if self.relative { original } else { 0.0 };
+        let original = if width_axis {
+            self.original_width
+        } else {
+            self.original_height
+        } as f64;
+        let pixels = (if width_axis { self.width } else { self.height })
+            - if self.relative { original } else { 0.0 };
         match self.unit {
             CanvasUnit::Pixels => pixels,
             CanvasUnit::Percent => pixels / original * 100.0,
@@ -70,7 +75,11 @@ impl CanvasSizeDraft {
     }
 
     pub fn set(&mut self, value: f64, width_axis: bool) {
-        let original = if width_axis { self.original_width } else { self.original_height } as f64;
+        let original = if width_axis {
+            self.original_width
+        } else {
+            self.original_height
+        } as f64;
         let pixels = match self.unit {
             CanvasUnit::Pixels => value,
             CanvasUnit::Percent => value / 100.0 * original,
@@ -174,13 +183,17 @@ pub fn resize_canvas(
         if !layer.transform.is_valid() {
             return Err("a layer would land out of range".to_string());
         }
-        if let Some(mask) = layer.mask.as_mut() {
-            if let Some(placement) = mask.placement.as_mut() {
-                placement.origin = placement.origin + offset;
-            }
+        if let Some(mask) = layer.mask.as_mut()
+            && let Some(placement) = mask.placement.as_mut()
+        {
+            placement.origin = placement.origin + offset;
         }
     }
-    result.guides = document.guides.iter().map(|g| g.offset(offset.x, offset.y)).collect();
+    result.guides = document
+        .guides
+        .iter()
+        .map(|g| g.offset(offset.x, offset.y))
+        .collect();
     result.selection = None;
     // A colored extension is separate bottom-layer content; the old canvas
     // intersection stays transparent, holes in the artwork included.
@@ -271,10 +284,10 @@ pub fn resize_image(
     if !(1..=30_000).contains(&new_width) || !(1..=30_000).contains(&new_height) {
         return None;
     }
-    if let Some(dpi) = resolution {
-        if !dpi.is_finite() || !(1.0..=9600.0).contains(&dpi) {
-            return None;
-        }
+    if let Some(dpi) = resolution
+        && (!dpi.is_finite() || !(1.0..=9600.0).contains(&dpi))
+    {
+        return None;
     }
     if new_width == document.width && new_height == document.height {
         // Same size: only the resolution changes; layers, guides and the
@@ -311,10 +324,28 @@ pub fn resize_image(
             .iter()
             .map(|p| CGPoint::new(p.x * sx, p.y * sy))
             .collect();
-        let left = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min).floor();
-        let top = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).floor();
-        let width = (corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max).ceil() - left) as usize;
-        let height = (corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max).ceil() - top) as usize;
+        let left = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::INFINITY, f64::min)
+            .floor();
+        let top = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::INFINITY, f64::min)
+            .floor();
+        let width = (corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil()
+            - left) as usize;
+        let height = (corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil()
+            - top) as usize;
         let mut transform = LayerTransform::new(
             CGPoint::new(left, top),
             CGSize::new(width as f64, height as f64),
@@ -409,7 +440,6 @@ pub fn resize_image(
     Some(result)
 }
 
-
 /// `CropGeometry`.
 pub struct CropGeometry;
 
@@ -494,9 +524,10 @@ impl CropDrag {
     pub fn updated(&self, point: CGPoint, ratio: Option<f64>, symmetric: bool) -> CGRect {
         match self.mode {
             CropDragMode::Create => CropGeometry::create(self.start, point, ratio, symmetric),
-            CropDragMode::Move => {
-                CropGeometry::snapped(self.original.offset_by(point.x - self.start.x, point.y - self.start.y))
-            }
+            CropDragMode::Move => CropGeometry::snapped(
+                self.original
+                    .offset_by(point.x - self.start.x, point.y - self.start.y),
+            ),
             CropDragMode::Resize(index) => {
                 let transform = LayerTransform::new(self.original.origin, self.original.size);
                 let drag = crate::transform::TransformDrag {
@@ -530,10 +561,10 @@ impl CropSnap {
             if distance > self.tolerance {
                 continue;
             }
-            if let Some(current) = best {
-                if (current - value).abs() <= distance {
-                    continue;
-                }
+            if let Some(current) = best
+                && (current - value).abs() <= distance
+            {
+                continue;
             }
             best = Some(*target);
         }
@@ -593,28 +624,38 @@ impl CropSnap {
         // The dragged edge is the one on the pointer's side.
         if horizontal {
             if (point.x - result.min_x()).abs() <= (point.x - result.max_x()).abs() {
-                if let Some(x) = self.nearest(result.min_x(), &self.xs) {
-                    if x < result.max_x() {
-                        result = CGRect::new(x, result.min_y(), result.max_x() - x, result.height());
-                    }
+                if let Some(x) = self.nearest(result.min_x(), &self.xs)
+                    && x < result.max_x()
+                {
+                    result = CGRect::new(x, result.min_y(), result.max_x() - x, result.height());
                 }
-            } else if let Some(x) = self.nearest(result.max_x(), &self.xs) {
-                if x > result.min_x() {
-                    result = CGRect::new(result.min_x(), result.min_y(), x - result.min_x(), result.height());
-                }
+            } else if let Some(x) = self.nearest(result.max_x(), &self.xs)
+                && x > result.min_x()
+            {
+                result = CGRect::new(
+                    result.min_x(),
+                    result.min_y(),
+                    x - result.min_x(),
+                    result.height(),
+                );
             }
         }
         if vertical {
             if (point.y - result.min_y()).abs() <= (point.y - result.max_y()).abs() {
-                if let Some(y) = self.nearest(result.min_y(), &self.ys) {
-                    if y < result.max_y() {
-                        result = CGRect::new(result.min_x(), y, result.width(), result.max_y() - y);
-                    }
+                if let Some(y) = self.nearest(result.min_y(), &self.ys)
+                    && y < result.max_y()
+                {
+                    result = CGRect::new(result.min_x(), y, result.width(), result.max_y() - y);
                 }
-            } else if let Some(y) = self.nearest(result.max_y(), &self.ys) {
-                if y > result.min_y() {
-                    result = CGRect::new(result.min_x(), result.min_y(), result.width(), y - result.min_y());
-                }
+            } else if let Some(y) = self.nearest(result.max_y(), &self.ys)
+                && y > result.min_y()
+            {
+                result = CGRect::new(
+                    result.min_x(),
+                    result.min_y(),
+                    result.width(),
+                    y - result.min_y(),
+                );
             }
         }
         if symmetric {
@@ -631,7 +672,8 @@ impl CropSnap {
                     center.x - result.min_x()
                 };
                 if half >= 0.5 {
-                    result = CGRect::new(center.x - half, result.min_y(), half * 2.0, result.height());
+                    result =
+                        CGRect::new(center.x - half, result.min_y(), half * 2.0, result.height());
                 }
             }
             if vertical {
@@ -641,7 +683,8 @@ impl CropSnap {
                     center.y - result.min_y()
                 };
                 if half >= 0.5 {
-                    result = CGRect::new(result.min_x(), center.y - half, result.width(), half * 2.0);
+                    result =
+                        CGRect::new(result.min_x(), center.y - half, result.width(), half * 2.0);
                 }
             }
         }
@@ -701,10 +744,26 @@ pub fn calculate_trim_rect(image: &Bitmap, options: &TrimOptions) -> Option<CGRe
     match options.based_on {
         TrimBasedOn::TransparentPixels => {
             let bounds = image.alpha_bounds()?;
-            let min_x = if options.left { bounds.min_x() as usize } else { 0 };
-            let min_y = if options.top { bounds.min_y() as usize } else { 0 };
-            let max_x = if options.right { bounds.max_x() as usize } else { width };
-            let max_y = if options.bottom { bounds.max_y() as usize } else { height };
+            let min_x = if options.left {
+                bounds.min_x() as usize
+            } else {
+                0
+            };
+            let min_y = if options.top {
+                bounds.min_y() as usize
+            } else {
+                0
+            };
+            let max_x = if options.right {
+                bounds.max_x() as usize
+            } else {
+                width
+            };
+            let max_y = if options.bottom {
+                bounds.max_y() as usize
+            } else {
+                height
+            };
             if max_x <= min_x || max_y <= min_y {
                 return None;
             }
@@ -722,7 +781,11 @@ pub fn calculate_trim_rect(image: &Bitmap, options: &TrimOptions) -> Option<CGRe
     }
 }
 
-fn calculate_color_trim_rect(image: &Bitmap, sample: (usize, usize), options: &TrimOptions) -> Option<CGRect> {
+fn calculate_color_trim_rect(
+    image: &Bitmap,
+    sample: (usize, usize),
+    options: &TrimOptions,
+) -> Option<CGRect> {
     let target = image.pixel(sample.0, sample.1);
     let tol = options.tolerance as i32;
     let matches = |x: usize, y: usize| -> bool {
@@ -797,7 +860,11 @@ pub fn trim(document: &CanvasDocument, options: &TrimOptions) -> Option<CanvasDo
 }
 
 /// `LayerTransform.mirrored` (`LayerFlip.swift`).
-pub fn mirrored_transform(transform: &LayerTransform, horizontally: bool, axis: CGFloat) -> LayerTransform {
+pub fn mirrored_transform(
+    transform: &LayerTransform,
+    horizontally: bool,
+    axis: CGFloat,
+) -> LayerTransform {
     let mut result = *transform;
     if horizontally {
         result.flip_x = !result.flip_x;
@@ -875,7 +942,8 @@ mod tests {
         let mut doc = CanvasDocument::new(100, 100);
         let mut image = Bitmap::new(50, 50);
         image.set_pixel(0, 0, [255, 0, 0, 255]);
-        let mut layer = ImageLayer::with_asset(ImportedImage::new(image, "L"), CGPoint::new(25.0, 25.0));
+        let mut layer =
+            ImageLayer::with_asset(ImportedImage::new(image, "L"), CGPoint::new(25.0, 25.0));
         layer.transform.size = CGSize::new(50.0, 50.0);
         doc.layers = vec![layer];
         let out = resize_image(&doc, 200, 200, Some(144.0), LayerSampling::High).unwrap();
@@ -904,14 +972,21 @@ mod tests {
         let mut layer = ImageLayer::blank("L", doc.size());
         let mut mask = crate::document::LayerMask::solid(true);
         // A placed mask keeps its pixels; only the placement scales.
-        mask.placement = Some(LayerTransform::new(CGPoint::new(10.0, 10.0), CGSize::new(50.0, 50.0)));
+        mask.placement = Some(LayerTransform::new(
+            CGPoint::new(10.0, 10.0),
+            CGSize::new(50.0, 50.0),
+        ));
         layer.mask = Some(mask);
         doc.layers = vec![layer];
         let out = resize_image(&doc, 200, 200, None, LayerSampling::High).unwrap();
         let mask = out.layers[0].mask.as_ref().unwrap();
         assert_eq!(mask.asset.image.width, 1, "uniform mask untouched");
         let placement = mask.placement.unwrap();
-        assert_eq!(placement.size, CGSize::new(100.0, 100.0), "placement scales");
+        assert_eq!(
+            placement.size,
+            CGSize::new(100.0, 100.0),
+            "placement scales"
+        );
     }
 
     #[test]
@@ -967,7 +1042,11 @@ mod tests {
         doc.layers = vec![layer];
         let mut options = CanvasSizeOptions::new(150, 150);
         options.anchor = 0;
-        options.fill = Some(CanvasExtensionColor { red: 0.2, green: 0.4, blue: 0.8 });
+        options.fill = Some(CanvasExtensionColor {
+            red: 0.2,
+            green: 0.4,
+            blue: 0.8,
+        });
         let out = resize_canvas(&doc, &options).unwrap();
         assert_eq!((out.width, out.height), (150, 150));
         // The extension is the bottom layer, filled where the old canvas
@@ -996,12 +1075,30 @@ mod tests {
 
     #[test]
     fn crop_geometry_create_and_snap() {
-        let rect = CropGeometry::create(CGPoint::new(10.0, 10.0), CGPoint::new(30.5, 25.0), None, false);
+        let rect = CropGeometry::create(
+            CGPoint::new(10.0, 10.0),
+            CGPoint::new(30.5, 25.0),
+            None,
+            false,
+        );
         assert_eq!(rect, CGRect::new(10.0, 10.0, 21.0, 15.0));
-        let symmetric = CropGeometry::create(CGPoint::new(10.0, 10.0), CGPoint::new(15.0, 12.0), None, true);
+        let symmetric = CropGeometry::create(
+            CGPoint::new(10.0, 10.0),
+            CGPoint::new(15.0, 12.0),
+            None,
+            true,
+        );
         assert_eq!(symmetric, CGRect::new(5.0, 8.0, 10.0, 4.0));
-        let ratio = CropGeometry::create(CGPoint::new(0.0, 0.0), CGPoint::new(40.0, 10.0), Some(2.0), false);
-        assert!((ratio.width() / ratio.height() - 2.0).abs() < 1e-9, "{ratio:?}");
+        let ratio = CropGeometry::create(
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(40.0, 10.0),
+            Some(2.0),
+            false,
+        );
+        assert!(
+            (ratio.width() / ratio.height() - 2.0).abs() < 1e-9,
+            "{ratio:?}"
+        );
     }
 
     #[test]

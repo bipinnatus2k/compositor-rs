@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::document::ImageLayer;
 use crate::geometry::CGPoint;
-use crate::raster::ImportedImage;
 use crate::session::EditorSession;
 
 /// The per-project pixel budget (`ProjectWorkspace.swift:172`): the pixels
@@ -63,8 +62,7 @@ pub fn copy_layers_between(
         .unwrap_or(0);
     let added: usize = copied.iter().map(pixels).sum();
     if used + added > PIXEL_BUDGET {
-        return Err("The copied layers exceed this project’s 100-megapixel limit."
-            .to_string());
+        return Err("The copied layers exceed this project’s 100-megapixel limit.".to_string());
     }
 
     // A layer fed by a live mask outside the copied set loses the feed: an
@@ -94,8 +92,10 @@ pub fn copy_layers_between(
     // Every copied layer gets a fresh identity; parents and mask sources that
     // stayed inside the set follow the mapping, the rest drop to None (:188,
     // :198-199).
-    let mapping: HashMap<Uuid, Uuid> =
-        copied.iter().map(|layer| (layer.id, Uuid::new_v4())).collect();
+    let mapping: HashMap<Uuid, Uuid> = copied
+        .iter()
+        .map(|layer| (layer.id, Uuid::new_v4()))
+        .collect();
 
     // `size` (:189): the target document's size when it has one — which is
     // when no document is created below — otherwise the source's.
@@ -124,7 +124,9 @@ pub fn copy_layers_between(
         .into_iter()
         .map(|mut layer| {
             layer.id = mapping[&layer.id];
-            layer.parent_id = layer.parent_id.and_then(|parent| mapping.get(&parent).copied());
+            layer.parent_id = layer
+                .parent_id
+                .and_then(|parent| mapping.get(&parent).copied());
             layer.mask_source_id = layer
                 .mask_source_id
                 .and_then(|source| mapping.get(&source).copied());
@@ -160,11 +162,11 @@ pub fn copy_layers_between(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{CanvasDocument, LayerMask};
-    use crate::raster::Bitmap;
-    use crate::transform::LayerTransform;
     use crate::adjustment::{AdjustmentKind, LayerAdjustment};
+    use crate::document::{CanvasDocument, LayerMask};
     use crate::geometry::{CGFloat, CGSize};
+    use crate::raster::{Bitmap, ImportedImage};
+    use crate::transform::LayerTransform;
 
     fn session_with_document(width: usize, height: usize) -> EditorSession {
         let mut session = EditorSession::new();
@@ -187,7 +189,14 @@ mod tests {
     }
 
     fn center_of(session: &EditorSession, id: Uuid) -> CGPoint {
-        session.document.as_ref().unwrap().layer(id).unwrap().transform.center()
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(id)
+            .unwrap()
+            .transform
+            .center()
     }
 
     fn append_layer(session: &mut EditorSession, layer: ImageLayer) -> Uuid {
@@ -212,10 +221,7 @@ mod tests {
         let copied = &target.document.as_ref().unwrap().layers[0];
         assert_ne!(copied.id, original);
         assert_eq!(copied.transform.center(), CGPoint { x: 100.0, y: 100.0 });
-        assert_eq!(
-            target.history.undo_name(),
-            "Copy Layers from Project"
-        );
+        assert_eq!(target.history.undo_name(), "Copy Layers from Project");
         // The source is untouched, document and undo stack alike.
         assert_eq!(source.document.as_ref().unwrap().layers.len(), 1);
         let source_undo_count = source.history.undo_count();
@@ -242,7 +248,9 @@ mod tests {
             let mut target = session_with_document(100, 100);
             let document = target.document.as_mut().unwrap();
             for _ in 0..count {
-                document.layers.push(pixel_layer(shared.clone(), (0.0, 0.0)));
+                document
+                    .layers
+                    .push(pixel_layer(shared.clone(), (0.0, 0.0)));
             }
             target
         };
@@ -289,7 +297,13 @@ mod tests {
         assert_eq!(copied.mask_source_id, None);
         // The feeder's red covers the copied layer's whole 4×4 grid.
         let baked = copied.asset.as_ref().unwrap();
-        assert!(baked.image.data.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        assert!(
+            baked
+                .image
+                .data
+                .chunks_exact(4)
+                .all(|p| p == [255, 0, 0, 255])
+        );
 
         // The adjustment layer keeps its metadata and loses only the link.
         let mut target = session_with_document(100, 100);
@@ -350,13 +364,19 @@ mod tests {
     #[test]
     fn translation_moves_layers_and_mask_placements() {
         let mut source = session_with_document(100, 100);
-        let mut root = pixel_layer(solid_asset(20, 20, [255, 255, 255, 255], "root"), (20.0, 30.0));
+        let mut root = pixel_layer(
+            solid_asset(20, 20, [255, 255, 255, 255], "root"),
+            (20.0, 30.0),
+        );
         root.mask = Some(LayerMask {
             asset: solid_asset(40, 40, [255, 255, 255, 255], "mask"),
             is_enabled: true,
             placement: Some(LayerTransform::new(
                 CGPoint { x: 50.0, y: 60.0 },
-                CGSize { width: 40.0, height: 40.0 },
+                CGSize {
+                    width: 40.0,
+                    height: 40.0,
+                },
             )),
             is_linked: true,
         });
@@ -386,7 +406,10 @@ mod tests {
         let mask_offset = root.transform.center() - source_root_center;
         let mask_origin = root.mask.as_ref().unwrap().placement.unwrap().origin;
         assert_eq!(
-            (mask_origin.x - source_mask_origin.x, mask_origin.y - source_mask_origin.y),
+            (
+                mask_origin.x - source_mask_origin.x,
+                mask_origin.y - source_mask_origin.y
+            ),
             (mask_offset.x, mask_offset.y)
         );
         let child = target
