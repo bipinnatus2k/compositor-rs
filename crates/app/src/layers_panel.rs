@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    px, prelude::FluentBuilder as _, rgb, Context, ClickEvent, IntoElement, InteractiveElement,
-    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled,
+    px, prelude::FluentBuilder as _, rgb, AnyElement, Context, ClickEvent, IntoElement,
+    InteractiveElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement,
+    Styled, Window,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -16,6 +17,7 @@ use gpui_kit::component::Sizable;
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
 use compositor_core::effects::LayerEffectKind;
+use compositor_core::selection::SelectionMode;
 
 use crate::state::AppState;
 use crate::ui::{dropdown, text_label, MenuEntry};
@@ -27,6 +29,53 @@ fn click_count(event: &ClickEvent) -> usize {
         ClickEvent::Mouse(mouse) => mouse.up.click_count,
         _ => 0,
     }
+}
+
+/// Shift adds, Option subtracts, plain replaces — the thumbnail-click
+/// selection cascade (NativeLayerList.swift:785-789), written once.
+fn selection_mode(shift: bool, alt: bool) -> SelectionMode {
+    if shift {
+        SelectionMode::Add
+    } else if alt {
+        SelectionMode::Subtract
+    } else {
+        SelectionMode::Replace
+    }
+}
+
+/// The shared thumbnail cell: square, rounded, hairline border; the accent
+/// ring marks the edit target, a disabled mask reads dimmed, and an image
+/// fills the cell when one is on hand.
+fn thumbnail_cell(
+    element_id: String,
+    is_target: bool,
+    dimmed: bool,
+    image: Option<Arc<RenderImage>>,
+    on_click: impl Fn(&mut AppState, &ClickEvent, &mut Window, &mut Context<AppState>) + 'static,
+    cx: &Context<AppState>,
+) -> AnyElement {
+    gpui_kit::div()
+        .id(SharedString::from(element_id))
+        .w(px(THUMB))
+        .h(px(THUMB))
+        .flex_shrink_0()
+        .rounded_sm()
+        .overflow_hidden()
+        .border_1()
+        .border_color(gpui_kit::rgb(0x444444))
+        .bg(rgb(0x555555))
+        .when(is_target, |cell| {
+            cell.border_2()
+                .border_color(gpui_kit::rgb(crate::ui::ACCENT))
+        })
+        .when(dimmed, |cell| cell.opacity(0.4))
+        .when_some(image, |cell, image| {
+            cell.child(gpui_kit::img(image).size_full())
+        })
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            on_click(this, event, window, cx);
+        }))
+        .into_any_element()
 }
 
 impl AppState {
@@ -377,50 +426,30 @@ impl AppState {
         // (NativeLayerList.swift:712-715).
         let thumbnail = self.thumbnail_image(id, layer);
         let layer_is_target = is_active && !(mask_selected && has_mask);
-        row = row.child(
-            gpui_kit::div()
-                .id(SharedString::from(format!("layer-thumb-{}", index)))
-                .w(px(THUMB))
-                .h(px(THUMB))
-                .flex_shrink_0()
-                .rounded_sm()
-                .overflow_hidden()
-                .border_1()
-                .border_color(gpui_kit::rgb(0x444444))
-                .bg(rgb(0x555555))
-                .when(layer_is_target, |cell| {
-                    cell.border_2()
-                        .border_color(gpui_kit::rgb(crate::ui::ACCENT))
-                })
-                .when_some(thumbnail, |cell, image| {
-                    cell.child(
-                        gpui_kit::img(image).size_full(),
-                    )
-                })
-                .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                    let modifiers = event.modifiers();
-                    if !modifiers.control && !modifiers.platform {
-                        this.tab().session.select_layer_target(id, false);
-                        this.sync_opacity_slider(window, cx);
-                        this.touch(cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    let mode = if modifiers.shift {
-                        compositor_core::selection::SelectionMode::Add
-                    } else if modifiers.alt {
-                        compositor_core::selection::SelectionMode::Subtract
-                    } else {
-                        compositor_core::selection::SelectionMode::Replace
-                    };
-                    if this.tab().session.is_mask_selected {
-                        this.tab().session.load_mask_selection(id, mode);
-                    } else {
-                        this.tab().session.load_layer_selection(id, mode);
-                    }
+        row = row.child(thumbnail_cell(
+            format!("layer-thumb-{}", index),
+            layer_is_target,
+            false,
+            thumbnail,
+            move |this, event, window, cx| {
+                let modifiers = event.modifiers();
+                if !modifiers.control && !modifiers.platform {
+                    this.tab().session.select_layer_target(id, false);
+                    this.sync_opacity_slider(window, cx);
                     this.touch(cx);
-                })),
-        );
+                    cx.stop_propagation();
+                    return;
+                }
+                let mode = selection_mode(modifiers.shift, modifiers.alt);
+                if this.tab().session.is_mask_selected {
+                    this.tab().session.load_mask_selection(id, mode);
+                } else {
+                    this.tab().session.load_layer_selection(id, mode);
+                }
+                this.touch(cx);
+            },
+            cx,
+        ));
 
         // The mask thumbnail (the row's maskThumbnail): the mask placed on
         // its canvas frame at the layer thumbnail's size; a plain click makes
@@ -428,47 +457,26 @@ impl AppState {
         // selection. A disabled mask reads dimmed.
         if layer.mask.is_some() {
             let mask_image = self.mask_thumbnail_image(layer);
-            row = row.child(
-                gpui_kit::div()
-                    .id(SharedString::from(format!("layer-mask-thumb-{}", index)))
-                    .w(px(THUMB))
-                    .h(px(THUMB))
-                    .flex_shrink_0()
-                    .rounded_sm()
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(gpui_kit::rgb(0x444444))
-                    .bg(rgb(0x555555))
-                    .when(is_active && mask_selected, |cell| {
-                        cell.border_2()
-                            .border_color(gpui_kit::rgb(crate::ui::ACCENT))
-                    })
-                    .when(!mask_enabled, |cell| cell.opacity(0.4))
-                    .when_some(mask_image, |cell, image| {
-                        cell.child(gpui_kit::img(image).size_full())
-                    })
-                    .on_click(cx.listener(
-                        move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                            let modifiers = event.modifiers();
-                            if !modifiers.control && !modifiers.platform {
-                                this.tab().session.select_layer_target(id, true);
-                                this.sync_opacity_slider(window, cx);
-                                this.touch(cx);
-                                cx.stop_propagation();
-                                return;
-                            }
-                            let mode = if modifiers.shift {
-                                compositor_core::selection::SelectionMode::Add
-                            } else if modifiers.alt {
-                                compositor_core::selection::SelectionMode::Subtract
-                            } else {
-                                compositor_core::selection::SelectionMode::Replace
-                            };
-                            this.tab().session.load_mask_selection(id, mode);
-                            this.touch(cx);
-                        },
-                    )),
-            );
+            row = row.child(thumbnail_cell(
+                format!("layer-mask-thumb-{}", index),
+                is_active && mask_selected,
+                !mask_enabled,
+                mask_image,
+                move |this, event, window, cx| {
+                    let modifiers = event.modifiers();
+                    if !modifiers.control && !modifiers.platform {
+                        this.tab().session.select_layer_target(id, true);
+                        this.sync_opacity_slider(window, cx);
+                        this.touch(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let mode = selection_mode(modifiers.shift, modifiers.alt);
+                    this.tab().session.load_mask_selection(id, mode);
+                    this.touch(cx);
+                },
+                cx,
+            ));
         }
 
         // Name (or the rename input).
@@ -674,4 +682,20 @@ fn footer_button(
         .small()
         .tooltip(tooltip)
         .on_click(listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_mode;
+    use compositor_core::selection::SelectionMode;
+
+    /// Shift adds, Option subtracts, plain replaces; shift wins when both
+    /// modifiers ride along (NativeLayerList.swift:785-789).
+    #[test]
+    fn selection_mode_follows_shift_then_alt() {
+        assert!(matches!(selection_mode(false, false), SelectionMode::Replace));
+        assert!(matches!(selection_mode(true, false), SelectionMode::Add));
+        assert!(matches!(selection_mode(false, true), SelectionMode::Subtract));
+        assert!(matches!(selection_mode(true, true), SelectionMode::Add));
+    }
 }
