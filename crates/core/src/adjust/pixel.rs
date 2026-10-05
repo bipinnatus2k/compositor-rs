@@ -3,7 +3,7 @@
 //! a selection, whole-image invert, and guided-filter matte refinement.
 
 use crate::geometry::{CGAffineTransform, CGPoint};
-use crate::raster::{resample, Bitmap, GrayMask, LayerSampling};
+use crate::raster::{Bitmap, GrayMask, LayerSampling, resample};
 use crate::selection::{DocumentSelection, SelectionClip};
 
 /// Selection coverage on the image's pixel grid, read from a clip that was
@@ -111,7 +111,12 @@ pub fn blend(
 ) -> Bitmap {
     debug_assert_eq!(adjusted.width, original.width);
     debug_assert_eq!(adjusted.height, original.height);
-    let mask = coverage(selection, adjusted.width, adjusted.height, pixel_to_document);
+    let mask = coverage(
+        selection,
+        adjusted.width,
+        adjusted.height,
+        pixel_to_document,
+    );
     blend_with_mask(adjusted, original, &mask)
 }
 
@@ -126,7 +131,12 @@ pub fn blend_path(
 ) -> Bitmap {
     debug_assert_eq!(adjusted.width, original.width);
     debug_assert_eq!(adjusted.height, original.height);
-    let mask = coverage_path(selection, adjusted.width, adjusted.height, pixel_to_document);
+    let mask = coverage_path(
+        selection,
+        adjusted.width,
+        adjusted.height,
+        pixel_to_document,
+    );
     blend_with_mask(adjusted, original, &mask)
 }
 
@@ -137,7 +147,12 @@ pub fn blend_gray(
     selection: &SelectionClip,
     pixel_to_document: &CGAffineTransform,
 ) -> GrayMask {
-    let mask = coverage(selection, adjusted.width, adjusted.height, pixel_to_document);
+    let mask = coverage(
+        selection,
+        adjusted.width,
+        adjusted.height,
+        pixel_to_document,
+    );
     let mut result = adjusted.clone();
     for i in 0..result.data.len() {
         let a = mask.data[i] as u32;
@@ -259,7 +274,11 @@ pub fn guided_filter(
     let mean_slope = guided_box(&slope, width, height, radius);
     let mean_offset = guided_box(&offset, width, height, radius);
     (0..count)
-        .map(|i| (mean_slope[i] * guide[i] + mean_offset[i]).min(1.0).max(0.0))
+        .map(|i| {
+            (mean_slope[i] * guide[i] + mean_offset[i])
+                .min(1.0)
+                .max(0.0)
+        })
         .collect()
 }
 
@@ -381,7 +400,8 @@ mod tests {
         let mut transform = LayerTransform::new(CGPoint::new(5.0, 5.0), CGSize::new(10.0, 10.0));
         transform.rotation = 45.0;
         let mapping = pixel_to_document(&transform, 10.0, 10.0);
-        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(4.0, 4.0, 12.0, 12.0)));
+        let selection =
+            DocumentSelection::new(SelectionPath::rect(CGRect::new(4.0, 4.0, 12.0, 12.0)));
         let mask = coverage_path(&selection, 10, 10, &mapping);
         // A grid pixel is selected where its document position lands inside
         // the rectangle: the edge midpoints are in, the far corners out.
@@ -395,12 +415,24 @@ mod tests {
         // keep only a sliver, their neighbors about seven-eighths.
         assert!(mask.value(0, 0) < 64, "{}", mask.value(0, 0));
         assert!(mask.value(9, 9) < 64, "{}", mask.value(9, 9));
-        assert!((190..=240).contains(&mask.value(1, 0)), "{}", mask.value(1, 0));
-        assert!((190..=240).contains(&mask.value(9, 8)), "{}", mask.value(9, 8));
+        assert!(
+            (190..=240).contains(&mask.value(1, 0)),
+            "{}",
+            mask.value(1, 0)
+        );
+        assert!(
+            (190..=240).contains(&mask.value(9, 8)),
+            "{}",
+            mask.value(9, 8)
+        );
         // Across the top row the transition happens within one pixel, with no
         // half-lit band spilling past the edge.
         assert_eq!(mask.value(2, 0), 255);
-        assert!((190..=240).contains(&mask.value(1, 0)), "{}", mask.value(1, 0));
+        assert!(
+            (190..=240).contains(&mask.value(1, 0)),
+            "{}",
+            mask.value(1, 0)
+        );
         assert!(mask.value(9, 0) < 64, "{}", mask.value(9, 0));
     }
 
@@ -413,7 +445,8 @@ mod tests {
         use crate::transform::LayerTransform;
         // Document x 2.5…6.5 over a layer shifted two pixels right: the rim
         // lands mid-pixel on both ends of the run.
-        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
+        let selection =
+            DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
         let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
         let mapping = pixel_to_document(&transform, 10.0, 1.0);
         let base = solid(10, [0, 0, 0, 255]);
@@ -437,7 +470,11 @@ mod tests {
         let adjusted = solid(4, [255, 255, 255, 255]);
         let out = blend_path(&adjusted, &base, &selection, &CGAffineTransform::IDENTITY);
         for x in 0..4 {
-            assert_eq!(out.pixel(x, 0)[0], 0, "an empty selection clips the edit away");
+            assert_eq!(
+                out.pixel(x, 0)[0],
+                0,
+                "an empty selection clips the edit away"
+            );
         }
     }
 
@@ -506,9 +543,17 @@ mod tests {
         let refined = guided_filter(&mask, &guide, width, height, 2, 1e-4);
         // The guided filter keeps the mask near its mean far from edges and
         // lets it follow the guide across the edge (variance nonzero there).
-        assert!(refined[2 * width + 2] < refined[2 * width + 9] || refined[2 * width + 2] < 0.61,
-            "{} vs {}", refined[2 * width + 2], refined[2 * width + 9]);
-        assert!(refined[2 * width + 17] > 0.59, "{}", refined[2 * width + 17]);
+        assert!(
+            refined[2 * width + 2] < refined[2 * width + 9] || refined[2 * width + 2] < 0.61,
+            "{} vs {}",
+            refined[2 * width + 2],
+            refined[2 * width + 9]
+        );
+        assert!(
+            refined[2 * width + 17] > 0.59,
+            "{}",
+            refined[2 * width + 17]
+        );
     }
 
     #[test]
@@ -543,7 +588,11 @@ mod tests {
         // A constant mask has no correlation with the guide: it stays put.
         assert_eq!(refined.width, 8);
         for i in 0..refined.data.len() {
-            assert!((refined.data[i] as i32 - 128).abs() <= 2, "{}", refined.data[i]);
+            assert!(
+                (refined.data[i] as i32 - 128).abs() <= 2,
+                "{}",
+                refined.data[i]
+            );
         }
     }
 

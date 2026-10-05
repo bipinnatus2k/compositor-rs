@@ -3,16 +3,16 @@
 
 use std::rc::Rc;
 
-use gpui_kit::{
-    px, Context, ElementId, Entity, IntoElement, ParentElement, Pixels, SharedString, Styled,
-    WeakEntity, Window,
-};
 use gpui_kit::component::{
+    Sizable,
     button::Button,
     checkbox::Checkbox,
-    menu::{DropdownMenu, PopupMenuItem, PopupMenu},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     slider::{Slider, SliderState},
-    Sizable,
+};
+use gpui_kit::{
+    Context, ElementId, Entity, IntoElement, ParentElement, Pixels, SharedString, Styled,
+    WeakEntity, Window, px,
 };
 
 use crate::state::AppState;

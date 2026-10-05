@@ -36,18 +36,28 @@ pub fn white_pixels(mask: &GrayMask) -> Option<SelectionPath> {
 /// least 50% opaque — a layer's visible pixels, ignoring its mask, as in
 /// Photoshop (`alpha >= 128`).
 pub fn opaque_pixels(image: &Bitmap) -> Option<SelectionPath> {
-    trace(image.width, image.height, |x, y| image.pixel(x, y)[3] >= 128)
+    trace(image.width, image.height, |x, y| {
+        image.pixel(x, y)[3] >= 128
+    })
 }
 
 /// `MaskTracing.trace`: outline, in the image's top-left pixel coordinates,
 /// of the `width` × `height` pixels whose value passes `test`. One ring per
 /// boundary loop; `None` when no pixel passes.
-pub fn trace(width: usize, height: usize, selected: impl Fn(usize, usize) -> bool) -> Option<SelectionPath> {
+pub fn trace(
+    width: usize,
+    height: usize,
+    selected: impl Fn(usize, usize) -> bool,
+) -> Option<SelectionPath> {
     if width == 0 || height == 0 {
         return None;
     }
     let inside = |x: i64, y: i64| -> bool {
-        x >= 0 && y >= 0 && x < width as i64 && y < height as i64 && selected(x as usize, y as usize)
+        x >= 0
+            && y >= 0
+            && x < width as i64
+            && y < height as i64
+            && selected(x as usize, y as usize)
     };
     // Directed unit edges between selected and unselected pixels, keyed by
     // their start vertex on the (width + 1) × (height + 1) corner grid. The
@@ -56,7 +66,10 @@ pub fn trace(width: usize, height: usize, selected: impl Fn(usize, usize) -> boo
     let stride = width + 1;
     let mut outgoing: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut edge = |x0: usize, y0: usize, x1: usize, y1: usize| {
-        outgoing.entry(y0 * stride + x0).or_default().push(y1 * stride + x1);
+        outgoing
+            .entry(y0 * stride + x0)
+            .or_default()
+            .push(y1 * stride + x1);
     };
     for y in 0..height {
         for x in 0..width {
@@ -90,7 +103,9 @@ pub fn trace(width: usize, height: usize, selected: impl Fn(usize, usize) -> boo
         let mut loop_indices: Vec<usize> = Vec::new();
         let mut current = start;
         loop {
-            let Some(ends) = outgoing.get_mut(&current) else { break };
+            let Some(ends) = outgoing.get_mut(&current) else {
+                break;
+            };
             let Some(end) = ends.pop() else { break };
             if ends.is_empty() {
                 outgoing.remove(&current);
@@ -194,7 +209,11 @@ mod tests {
             for x in 0..100 {
                 let black_square = (20..60).contains(&x) && (30..70).contains(&y);
                 let white_square = (30..40).contains(&x) && (40..50).contains(&y);
-                mask.data[y * 100 + x] = if black_square && !white_square { 0 } else { 255 };
+                mask.data[y * 100 + x] = if black_square && !white_square {
+                    0
+                } else {
+                    255
+                };
             }
         }
         let path = white_pixels(&mask).unwrap();
@@ -202,10 +221,22 @@ mod tests {
         assert_eq!(path.rings.len(), 3, "outer, black square, white square");
         let covered = rasterize(&path, 100, 100, false);
         assert_eq!(covered.value(25, 35), 0, "black: hidden");
-        assert_eq!(covered.value(35, 45), 255, "white square back inside the black one");
+        assert_eq!(
+            covered.value(35, 45),
+            255,
+            "white square back inside the black one"
+        );
         assert_eq!(covered.value(80, 80), 255, "white surroundings");
-        assert_eq!(covered.value(59, 69), 0, "the black square's last pixel is hidden");
-        assert_eq!(covered.value(60, 70), 255, "exact pixel edges: 60,70 is white-side");
+        assert_eq!(
+            covered.value(59, 69),
+            0,
+            "the black square's last pixel is hidden"
+        );
+        assert_eq!(
+            covered.value(60, 70),
+            255,
+            "exact pixel edges: 60,70 is white-side"
+        );
     }
 
     #[test]
@@ -224,12 +255,21 @@ mod tests {
             }
         }
         image.set_pixel(0, 0, [255, 0, 0, 64]);
-        assert!(opaque_pixels(&Bitmap::new(50, 50)).is_none(), "a blank layer selects nothing");
+        assert!(
+            opaque_pixels(&Bitmap::new(50, 50)).is_none(),
+            "a blank layer selects nothing"
+        );
         let path = opaque_pixels(&image).unwrap();
         assert_eq!(path.bounds(), Some(CGRect::new(10.0, 10.0, 30.0, 30.0)));
         assert!(path.contains(CGPoint::new(15.0, 15.0)), "opaque ring");
-        assert!(!path.contains(CGPoint::new(25.0, 25.0)), "transparent center");
-        assert!(!path.contains(CGPoint::new(0.5, 0.5)), "the 25% pixel is under the threshold");
+        assert!(
+            !path.contains(CGPoint::new(25.0, 25.0)),
+            "transparent center"
+        );
+        assert!(
+            !path.contains(CGPoint::new(0.5, 0.5)),
+            "the 25% pixel is under the threshold"
+        );
     }
 
     #[test]

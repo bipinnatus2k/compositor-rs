@@ -223,24 +223,19 @@ fn b_separable(cb: f32, cs: f32, mode: LayerBlendMode) -> f32 {
         }
         LayerBlendMode::HardMix => {
             // PDF: B(Cb, Cs) = Csum < 1 ? 0 : 1, where Csum = Cb + Cs.
-            if cb + cs < 1.0 {
-                0.0
-            } else {
-                1.0
-            }
+            if cb + cs < 1.0 { 0.0 } else { 1.0 }
         }
         LayerBlendMode::Difference => (cb - cs).abs(),
         LayerBlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
         LayerBlendMode::Subtract => (cb - cs).max(0.0),
         LayerBlendMode::Divide => {
             // PDF: Cs = 0 gives white regardless of the backdrop.
-            if cs <= 0.0 {
-                1.0
-            } else {
-                (cb / cs).min(1.0)
-            }
+            if cs <= 0.0 { 1.0 } else { (cb / cs).min(1.0) }
         }
-        LayerBlendMode::Hue | LayerBlendMode::Saturation | LayerBlendMode::Color | LayerBlendMode::Luminosity => {
+        LayerBlendMode::Hue
+        | LayerBlendMode::Saturation
+        | LayerBlendMode::Color
+        | LayerBlendMode::Luminosity => {
             unreachable!("non-separable handled separately")
         }
     }
@@ -336,9 +331,10 @@ fn b_non_separable(cb: [f32; 3], cs: [f32; 3], mode: LayerBlendMode) -> [f32; 3]
 /// The blended color `B(cb, cs)` for one pixel.
 pub fn blend_color(mode: LayerBlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     match mode {
-        LayerBlendMode::Hue | LayerBlendMode::Saturation | LayerBlendMode::Color | LayerBlendMode::Luminosity => {
-            b_non_separable(cb, cs, mode)
-        }
+        LayerBlendMode::Hue
+        | LayerBlendMode::Saturation
+        | LayerBlendMode::Color
+        | LayerBlendMode::Luminosity => b_non_separable(cb, cs, mode),
         _ => {
             let mut out = [0.0f32; 3];
             for i in 0..3 {
@@ -393,12 +389,19 @@ mod tests {
     fn serde_names_match_manifest() {
         let mode: LayerBlendMode = serde_json::from_str("\"Linear Dodge (Add)\"").unwrap();
         assert_eq!(mode, LayerBlendMode::LinearDodge);
-        assert_eq!(serde_json::to_string(&LayerBlendMode::ColorBurn).unwrap(), "\"Color Burn\"");
+        assert_eq!(
+            serde_json::to_string(&LayerBlendMode::ColorBurn).unwrap(),
+            "\"Color Burn\""
+        );
     }
 
     #[test]
     fn normal_passthrough() {
-        let out = composite_pixel(LayerBlendMode::Normal, [0.2, 0.4, 0.6, 1.0], [0.8, 0.2, 0.1, 1.0]);
+        let out = composite_pixel(
+            LayerBlendMode::Normal,
+            [0.2, 0.4, 0.6, 1.0],
+            [0.8, 0.2, 0.1, 1.0],
+        );
         assert_eq!(out, [0.8, 0.2, 0.1, 1.0]);
     }
 
@@ -432,7 +435,11 @@ mod tests {
     fn linear_burn_and_dodge() {
         let burn = blend_color(LayerBlendMode::LinearBurn, [0.6, 0.6, 0.6], [0.5, 0.5, 0.5]);
         assert!(close(burn[0], 0.1));
-        let dodge = blend_color(LayerBlendMode::LinearDodge, [0.6, 0.6, 0.6], [0.5, 0.5, 0.5]);
+        let dodge = blend_color(
+            LayerBlendMode::LinearDodge,
+            [0.6, 0.6, 0.6],
+            [0.5, 0.5, 0.5],
+        );
         assert!(close(dodge[0], 1.0));
     }
 
@@ -476,18 +483,29 @@ mod tests {
         // Multiply white over a 50%-coverage black backdrop: the PDF equation
         // shows white where the backdrop is absent — 0.5·1 (Cs term) + 0.5·0
         // (blend term) = 0.5 grey — not the blend color alone (black).
-        let out = composite_pixel(LayerBlendMode::Multiply, [0.0, 0.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0]);
+        let out = composite_pixel(
+            LayerBlendMode::Multiply,
+            [0.0, 0.0, 0.0, 0.5],
+            [1.0, 1.0, 1.0, 1.0],
+        );
         assert!(close(out[3], 1.0));
         assert!(close(out[0], 0.5), "{out:?}");
         // And the plain source-over term: source over a fully absent backdrop.
-        let over = composite_pixel(LayerBlendMode::Multiply, [0.9, 0.9, 0.9, 0.0], [0.2, 0.4, 0.6, 1.0]);
+        let over = composite_pixel(
+            LayerBlendMode::Multiply,
+            [0.9, 0.9, 0.9, 0.0],
+            [0.2, 0.4, 0.6, 1.0],
+        );
         assert_eq!(over, [0.2, 0.4, 0.6, 1.0]);
     }
 
     #[test]
     fn difference_symmetry() {
         let a = blend_color(LayerBlendMode::Difference, [0.7, 0.1, 0.4], [0.2, 0.9, 0.4]);
-        assert!(close(a[0], 0.5) && close(a[1], 0.8) && close(a[2], 0.0), "{a:?}");
+        assert!(
+            close(a[0], 0.5) && close(a[1], 0.8) && close(a[2], 0.0),
+            "{a:?}"
+        );
     }
 
     #[test]
@@ -519,7 +537,11 @@ mod tests {
     #[test]
     fn composite_alpha_blending() {
         // 50% transparent white over opaque black in Normal mode → mid grey.
-        let out = composite_pixel(LayerBlendMode::Normal, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 0.5]);
+        let out = composite_pixel(
+            LayerBlendMode::Normal,
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 0.5],
+        );
         assert!(close(out[3], 1.0));
         assert!(close(out[0], 0.5));
     }

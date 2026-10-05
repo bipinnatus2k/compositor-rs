@@ -14,16 +14,16 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{
-    canvas, px, point, rgba, size, AnyElement, AppContext, Bounds, Context, Corners, Entity,
-    Focusable, Global, IntoElement, InteractiveElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, RenderImage, Styled,
-    WeakEntity, Window,
-};
+use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::slider::SliderState;
-use gpui_kit::component::Sizable;
+use gpui_kit::{
+    AnyElement, AppContext, Bounds, Context, Corners, Entity, Focusable, Global,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, PathBuilder, Pixels, Point, RenderImage, Styled, WeakEntity, Window, canvas,
+    point, px, rgba, size,
+};
 use image::Frame;
 
 use compositor_core::document::{PaletteColor, PickerHSB};
@@ -99,9 +99,7 @@ impl AppState {
                 .step(1.0)
                 .default_value((hsb.brightness * 100.0) as f32)
         });
-        let hex = cx.new(|cx| {
-            InputState::new(window, cx).default_value(picker.color().hex())
-        });
+        let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
         // A stale drag from a previous open must not survive.
         cx.default_global::<PickerFieldState>().drag = None;
         self.picker_ui = Some(PickerUi {
@@ -114,7 +112,8 @@ impl AppState {
         // (ColorPickerSheet.swift:167-181): first opened centered on the
         // canvas, afterwards wherever it was last left.
         let title = self
-            .tab().session
+            .tab()
+            .session
             .color_picker
             .as_ref()
             .map(|picker| picker.target.title())
@@ -139,17 +138,18 @@ impl AppState {
                 .unwrap_or_default();
             // A well-formed hex entry overrides the field (Swift's
             // commitHex on submit).
-            if let Some(color) = PaletteColor::from_hex(&text) {
-                if let Some(picker) = self.tab().session.color_picker.as_mut() {
-                    picker.hsb = PickerHSB::from_rgb(color);
-                }
+            if let Some(color) = PaletteColor::from_hex(&text)
+                && let Some(picker) = self.tab().session.color_picker.as_mut()
+            {
+                picker.hsb = PickerHSB::from_rgb(color);
             }
             self.tab().session.close_color_picker(true);
         } else {
             self.tab().session.close_color_picker(false);
         }
         self.picker_ui = None;
-        self.panels.close(crate::panels::panel_names::COLOR_PICKER_PANEL);
+        self.panels
+            .close(crate::panels::panel_names::COLOR_PICKER_PANEL);
         self.sync_panel_guard();
         cx.default_global::<PickerFieldState>().drag = None;
         self.touch(cx);
@@ -240,13 +240,18 @@ impl AppState {
             apply(&mut picker.hsb);
         }
         if matches!(
-            self.tab().session.color_picker.as_ref().map(|picker| &picker.target),
+            self.tab()
+                .session
+                .color_picker
+                .as_ref()
+                .map(|picker| &picker.target),
             Some(ColorPickerTarget::Effect { .. })
         ) {
             self.tab().session.preview_effect_color();
         }
         let text = self
-            .tab().session
+            .tab()
+            .session
             .color_picker
             .as_ref()
             .map(|picker| picker.color().hex())
@@ -480,8 +485,10 @@ fn install_sv_drag_events(app: &WeakEntity<AppState>, window: &mut Window) {
             .try_global::<PickerFieldState>()
             .is_some_and(|state| state.drag == Some(PickerDrag::Sv));
         if dragging {
-            app.update(cx, |state, cx| state.picker_sv_drag(event.position, window, cx))
-                .ok();
+            app.update(cx, |state, cx| {
+                state.picker_sv_drag(event.position, window, cx)
+            })
+            .ok();
         }
     });
     window.on_mouse_event(move |_event: &MouseUpEvent, _phase, _window, cx| {
@@ -499,8 +506,10 @@ fn install_hue_drag_events(app: &WeakEntity<AppState>, window: &mut Window) {
             .try_global::<PickerFieldState>()
             .is_some_and(|state| state.drag == Some(PickerDrag::Hue));
         if dragging {
-            app.update(cx, |state, cx| state.picker_hue_drag(event.position, window, cx))
-                .ok();
+            app.update(cx, |state, cx| {
+                state.picker_hue_drag(event.position, window, cx)
+            })
+            .ok();
         }
     });
     window.on_mouse_event(move |_event: &MouseUpEvent, _phase, _window, cx| {
@@ -660,7 +669,10 @@ pub fn sv_from_position(position: Point<Pixels>, bounds: Bounds<Pixels>) -> (f64
     let height = f32::from(bounds.size.height).max(1.0) as f64;
     let x = (f32::from(position.x) - f32::from(bounds.origin.x)) as f64;
     let y = (f32::from(position.y) - f32::from(bounds.origin.y)) as f64;
-    ((x / width).clamp(0.0, 1.0), (1.0 - y / height).clamp(0.0, 1.0))
+    (
+        (x / width).clamp(0.0, 1.0),
+        (1.0 - y / height).clamp(0.0, 1.0),
+    )
 }
 
 /// Window position inside the hue strip → hue degrees: 360 at the top down to
@@ -728,10 +740,14 @@ pub fn sv_field_bitmap(hue: f64, width: usize, height: usize) -> Vec<u8> {
     // Per column: white → pure hue across x (the bottom gradient).
     let mut columns = Vec::with_capacity(width * 3);
     for x in 0..width {
-        let t = if width <= 1 { 0.0 } else { x as f64 / (width - 1) as f64 };
-        columns.push(lerp(1.0, pure.red as f64, t));
-        columns.push(lerp(1.0, pure.green as f64, t));
-        columns.push(lerp(1.0, pure.blue as f64, t));
+        let t = if width <= 1 {
+            0.0
+        } else {
+            x as f64 / (width - 1) as f64
+        };
+        columns.push(lerp(1.0, pure.red, t));
+        columns.push(lerp(1.0, pure.green, t));
+        columns.push(lerp(1.0, pure.blue, t));
     }
     // Per row: fade by brightness down y (the top gradient).
     let mut data = Vec::with_capacity(width * height * 4);
@@ -752,7 +768,7 @@ pub fn sv_field_bitmap(hue: f64, width: usize, height: usize) -> Vec<u8> {
 /// brightness (`PickerHSB(hue:…, saturation: 1, brightness: 1).rgb`).
 fn strip_stop(hue: f64) -> (f64, f64, f64) {
     let color = PickerHSB::new(hue, 1.0, 1.0).rgb();
-    (color.red as f64, color.green as f64, color.blue as f64)
+    (color.red, color.green, color.blue)
 }
 
 /// The strip's color at `t` (0 = top row, 1 = bottom): SwiftUI's
@@ -760,7 +776,9 @@ fn strip_stop(hue: f64) -> (f64, f64, f64) {
 /// stops `stride(from: 360, through: 0, by: -60)` — in color space, not
 /// around the hue wheel.
 pub fn strip_color_at(t: f64) -> (f64, f64, f64) {
-    let stops: Vec<_> = (0..=6).map(|step| strip_stop(360.0 - step as f64 * 60.0)).collect();
+    let stops: Vec<_> = (0..=6)
+        .map(|step| strip_stop(360.0 - step as f64 * 60.0))
+        .collect();
     let scaled = (t.clamp(0.0, 1.0) * 6.0) as usize;
     let index = scaled.min(5);
     let f = (t.clamp(0.0, 1.0) * 6.0) - index as f64;
@@ -797,7 +815,7 @@ mod tests {
         sv_cache_key, sv_field_bitmap, sv_from_position, sv_marker_center,
     };
     use compositor_core::document::PickerHSB;
-    use gpui_kit::{point, px, size, Bounds, Pixels};
+    use gpui_kit::{Bounds, Pixels, point, px, size};
 
     fn field_bounds() -> Bounds<Pixels> {
         Bounds::new(point(px(10.0), px(20.0)), size(px(256.0), px(256.0)))
@@ -812,11 +830,26 @@ mod tests {
         let bounds = field_bounds();
         // Left edge is saturation 0; right is 1. Top is brightness 1; the
         // bottom is 0. Off-canvas presses clamp.
-        assert_eq!(sv_from_position(point(px(10.0), px(20.0)), bounds), (0.0, 1.0));
-        assert_eq!(sv_from_position(point(px(266.0), px(276.0)), bounds), (1.0, 0.0));
-        assert_eq!(sv_from_position(point(px(138.0), px(148.0)), bounds), (0.5, 0.5));
-        assert_eq!(sv_from_position(point(px(-500.0), px(-500.0)), bounds), (0.0, 1.0));
-        assert_eq!(sv_from_position(point(px(500.0), px(500.0)), bounds), (1.0, 0.0));
+        assert_eq!(
+            sv_from_position(point(px(10.0), px(20.0)), bounds),
+            (0.0, 1.0)
+        );
+        assert_eq!(
+            sv_from_position(point(px(266.0), px(276.0)), bounds),
+            (1.0, 0.0)
+        );
+        assert_eq!(
+            sv_from_position(point(px(138.0), px(148.0)), bounds),
+            (0.5, 0.5)
+        );
+        assert_eq!(
+            sv_from_position(point(px(-500.0), px(-500.0)), bounds),
+            (0.0, 1.0)
+        );
+        assert_eq!(
+            sv_from_position(point(px(500.0), px(500.0)), bounds),
+            (1.0, 0.0)
+        );
     }
 
     #[test]
@@ -858,7 +891,8 @@ mod tests {
         let (width, height) = (512usize, 512usize);
         let data = sv_field_bitmap(0.0, width, height);
         assert_eq!(data.len(), width * height * 4);
-        let pixel = |x: usize, y: usize| (data[(y * width + x) * 4..(y * width + x) * 4 + 4]).to_vec();
+        let pixel =
+            |x: usize, y: usize| (data[(y * width + x) * 4..(y * width + x) * 4 + 4]).to_vec();
         // Top left: white. Top right: pure red. Bottom row: black. (BGRA.)
         assert_eq!(pixel(0, 0), vec![255, 255, 255, 255]);
         assert_eq!(pixel(width - 1, 0), vec![0, 0, 255, 255]);
@@ -875,12 +909,31 @@ mod tests {
         let hue = 210.0;
         let (width, height) = (256usize, 256usize);
         let data = sv_field_bitmap(hue, width, height);
-        for (x, y) in [(0usize, 0usize), (width - 1, 0), (width / 2, height / 2), (width - 1, height * 3 / 4)] {
-            let expected = PickerHSB::new(hue, x as f64 / (width - 1) as f64, 1.0 - y as f64 / (height - 1) as f64).rgb();
+        for (x, y) in [
+            (0usize, 0usize),
+            (width - 1, 0),
+            (width / 2, height / 2),
+            (width - 1, height * 3 / 4),
+        ] {
+            let expected = PickerHSB::new(
+                hue,
+                x as f64 / (width - 1) as f64,
+                1.0 - y as f64 / (height - 1) as f64,
+            )
+            .rgb();
             let px = &data[(y * width + x) * 4..(y * width + x) * 4 + 4];
-            assert!(((expected.blue * 255.0).round() - px[0] as f64).abs() <= 1.0, "b at {x},{y}");
-            assert!(((expected.green * 255.0).round() - px[1] as f64).abs() <= 1.0, "g at {x},{y}");
-            assert!(((expected.red * 255.0).round() - px[2] as f64).abs() <= 1.0, "r at {x},{y}");
+            assert!(
+                ((expected.blue * 255.0).round() - px[0] as f64).abs() <= 1.0,
+                "b at {x},{y}"
+            );
+            assert!(
+                ((expected.green * 255.0).round() - px[1] as f64).abs() <= 1.0,
+                "g at {x},{y}"
+            );
+            assert!(
+                ((expected.red * 255.0).round() - px[2] as f64).abs() <= 1.0,
+                "r at {x},{y}"
+            );
         }
     }
 
@@ -890,7 +943,8 @@ mod tests {
         let (width, height) = (40usize, 513usize);
         let data = hue_strip_bitmap(width, height);
         assert_eq!(data.len(), width * height * 4);
-        let pixel = |x: usize, y: usize| (data[(y * width + x) * 4..(y * width + x) * 4 + 4]).to_vec();
+        let pixel =
+            |x: usize, y: usize| (data[(y * width + x) * 4..(y * width + x) * 4 + 4]).to_vec();
         // 360° at the top and 0° at the bottom are both red; the middle row
         // is 180° cyan. Columns are constant. (BGRA.)
         assert_eq!(pixel(0, 0), vec![0, 0, 255, 255]);

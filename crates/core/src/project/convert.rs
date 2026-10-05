@@ -8,12 +8,12 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use super::ProjectData;
 use super::manifest::{
-    image_file_name, mask_file_name, ManifestEffects, ManifestGuide, ManifestShape,
-    ManifestTextStyle, ManifestTransform, ProjectLayerRecord, ProjectManifest,
+    ManifestEffects, ManifestGuide, ManifestShape, ManifestTextStyle, ManifestTransform,
+    ProjectLayerRecord, ProjectManifest, image_file_name, mask_file_name,
 };
 use super::store::validate;
-use super::ProjectData;
 use crate::blend::LayerBlendMode;
 use crate::document::{
     CanvasDocument, ImageLayer, LayerMask, LayerShape, LayerText, LayerTextStyle,
@@ -60,9 +60,7 @@ pub fn document_from_project(
 /// has no mask file or the package has no such mask asset. Missing flags fall
 /// back to enabled and linked (older projects).
 fn mask_for(data: &ProjectData, record: &ProjectLayerRecord) -> Option<LayerMask> {
-    if record.mask_file.is_none() {
-        return None;
-    }
+    record.mask_file.as_ref()?;
     let gray = data.masks.get(&record.id)?;
     // The document model keeps mask pixels in an RGBA bitmap; a grayscale mask
     // becomes neutral RGB at full alpha.
@@ -89,9 +87,10 @@ fn layer_from_record(data: &ProjectData, record: &ProjectLayerRecord) -> ImageLa
         .map(|bitmap| ImportedImage::new(bitmap.clone(), record.name.clone()));
     // `LayerText.loaded` / `LayerShape.loaded`: both need the layer's image,
     // and text must be valid to display.
-    let text = record.text.as_ref().filter(|style| {
-        LayerTextStyle::from((*style).clone()).is_valid()
-    });
+    let text = record
+        .text
+        .as_ref()
+        .filter(|style| LayerTextStyle::from((*style).clone()).is_valid());
     let text = text.zip(asset.as_ref()).map(|(style, asset)| LayerText {
         style: LayerTextStyle::from(style.clone()),
         image: asset.image.clone(),
@@ -115,7 +114,7 @@ fn layer_from_record(data: &ProjectData, record: &ProjectLayerRecord) -> ImageLa
         mask: mask_for(data, record),
         adjustment: record.adjustment.clone(),
         shape,
-        effects: record.effects.as_ref().map(|m| LayerEffects::from(m)),
+        effects: record.effects.as_ref().map(LayerEffects::from),
         text,
     }
 }
@@ -151,14 +150,18 @@ pub fn project_from_document(doc: &CanvasDocument) -> ProjectData {
                 mask_enabled: mask_record.map(|mask| mask.is_enabled),
                 mask_source_id: layer.mask_source_id,
                 adjustment: layer.adjustment.clone(),
-                mask_placement: mask_record.and_then(|mask| mask.placement).map(|p| ManifestTransform::from(&p)),
+                mask_placement: mask_record
+                    .and_then(|mask| mask.placement)
+                    .map(|p| ManifestTransform::from(&p)),
                 mask_linked: mask_record.map(|mask| mask.is_linked),
                 shape: layer.shape.as_ref().map(ManifestShape::from),
                 effects: layer.effects.as_ref().map(ManifestEffects::from),
                 // Only text that is still live is saved; a rasterized text
                 // layer keeps its pixels but drops the metadata, exactly as
                 // `layer.liveText?.style` does.
-                text: layer.live_text().map(|text| ManifestTextStyle::from(&text.style)),
+                text: layer
+                    .live_text()
+                    .map(|text| ManifestTextStyle::from(&text.style)),
             }
         })
         .collect();
@@ -200,7 +203,9 @@ mod tests {
     use super::super::store::{load, save};
     use super::*;
     use crate::document::{CanvasGuide, GuideAxis, ShapeKind};
-    use crate::effects::{ColorOverlayEffect, InnerShadowEffect, LayerEffects, ShadowEffect, StrokeEffect};
+    use crate::effects::{
+        ColorOverlayEffect, InnerShadowEffect, LayerEffects, ShadowEffect, StrokeEffect,
+    };
     use crate::geometry::{CGPoint, CGSize};
     use crate::raster::ImportedImage;
     use crate::transform::LayerSampling;
@@ -238,7 +243,8 @@ mod tests {
     fn styled_document() -> (CanvasDocument, Uuid, Uuid) {
         let mut doc = CanvasDocument::new(60, 60);
         doc.resolution = 300.0;
-        let mut image = ImageLayer::with_asset(ImportedImage::new(fixture(), "Photo"), CGPoint::ZERO);
+        let mut image =
+            ImageLayer::with_asset(ImportedImage::new(fixture(), "Photo"), CGPoint::ZERO);
         image.name = "Photo".into();
         image.opacity = 0.8;
         image.blend_mode = crate::blend::LayerBlendMode::Multiply;
@@ -287,7 +293,10 @@ mod tests {
         image.mask = Some(LayerMask {
             asset: ImportedImage::new(mask_bitmap(&gray), "Layer Mask"),
             is_enabled: false,
-            placement: Some(LayerTransform::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0))),
+            placement: Some(LayerTransform::new(
+                CGPoint::new(5.0, 6.0),
+                CGSize::new(7.0, 8.0),
+            )),
             is_linked: false,
         });
         let image_id = image.id;
@@ -330,7 +339,7 @@ mod tests {
             filled: true,
             start: crate::geometry::CGPoint::ZERO,
             end: crate::geometry::CGPoint::new(1.0, 1.0),
-});
+        });
         doc.layers = vec![folder, text, shape, image];
         doc.guides = vec![CanvasGuide::new(GuideAxis::Vertical, 30.0)];
         (doc, image_id, folder_id)
@@ -339,7 +348,11 @@ mod tests {
     fn mask_bitmap(gray: &GrayMask) -> Bitmap {
         let mut bitmap = Bitmap::new(gray.width, gray.height);
         for (index, &value) in gray.data.iter().enumerate() {
-            bitmap.set_pixel(index % gray.width, index / gray.width, [value, value, value, 255]);
+            bitmap.set_pixel(
+                index % gray.width,
+                index / gray.width,
+                [value, value, value, 255],
+            );
         }
         bitmap
     }
@@ -391,7 +404,10 @@ mod tests {
         assert!(!mask.is_linked);
         assert_eq!(
             mask.placement,
-            Some(LayerTransform::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0)))
+            Some(LayerTransform::new(
+                CGPoint::new(5.0, 6.0),
+                CGSize::new(7.0, 8.0)
+            ))
         );
         assert_eq!(mask.asset.image.width, 2);
         assert_eq!(mask.asset.image.pixel(0, 0)[0], 255);
@@ -438,7 +454,10 @@ mod tests {
         });
         doc.layers = vec![layer];
         let data = project_from_document(&doc);
-        assert!(data.manifest.layers[0].text.is_none(), "stale text is dropped");
+        assert!(
+            data.manifest.layers[0].text.is_none(),
+            "stale text is dropped"
+        );
     }
 
     #[test]
@@ -464,7 +483,10 @@ mod tests {
             .unwrap();
         assert_eq!(record.mask_source_id, Some(base_id));
         let (reopened, _) = document_from_project(&loaded).unwrap();
-        assert_eq!(reopened.layer(clipped_id).unwrap().mask_source_id, Some(base_id));
+        assert_eq!(
+            reopened.layer(clipped_id).unwrap().mask_source_id,
+            Some(base_id)
+        );
         let _ = base_id;
     }
 }

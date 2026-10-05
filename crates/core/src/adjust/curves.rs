@@ -28,7 +28,10 @@ fn default_channels() -> Vec<Vec<CurvePoint>> {
 }
 
 fn default_curve() -> Vec<CurvePoint> {
-    vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 255.0, y: 255.0 }]
+    vec![
+        CurvePoint { x: 0.0, y: 0.0 },
+        CurvePoint { x: 255.0, y: 255.0 },
+    ]
 }
 
 impl Default for CurvesSettings {
@@ -48,11 +51,12 @@ impl CurvesSettings {
                     && points.first().map(|p| p.x) == Some(0.0)
                     && points.last().map(|p| p.x) == Some(255.0)
                     && points.iter().all(|p| {
-                        p.x.is_finite() && p.y.is_finite() && (0.0..=255.0).contains(&p.x) && (0.0..=255.0).contains(&p.y)
+                        p.x.is_finite()
+                            && p.y.is_finite()
+                            && (0.0..=255.0).contains(&p.x)
+                            && (0.0..=255.0).contains(&p.y)
                     })
-                    && points
-                        .windows(2)
-                        .all(|w| w[0].x < w[1].x)
+                    && points.windows(2).all(|w| w[0].x < w[1].x)
             })
     }
 
@@ -65,7 +69,10 @@ impl CurvesSettings {
             .rposition(|pt| pt.x <= x)
             .unwrap_or(0)
             .min(p.len() - 2);
-        let d: Vec<f64> = p.windows(2).map(|w| (w[1].y - w[0].y) / (w[1].x - w[0].x)).collect();
+        let d: Vec<f64> = p
+            .windows(2)
+            .map(|w| (w[1].y - w[0].y) / (w[1].x - w[0].x))
+            .collect();
         let slope = |j: usize| -> f64 {
             if j == 0 {
                 return d[0];
@@ -152,9 +159,17 @@ mod tests {
     #[test]
     fn invalid_shapes_rejected() {
         let mut c = CurvesSettings::default();
-        c.channels[0] = vec![CurvePoint { x: 10.0, y: 0.0 }, CurvePoint { x: 255.0, y: 255.0 }];
+        c.channels[0] = vec![
+            CurvePoint { x: 10.0, y: 0.0 },
+            CurvePoint { x: 255.0, y: 255.0 },
+        ];
         assert!(!c.is_valid()); // must start at 0
-        c.channels[0] = vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 100.0, y: 0.0 }, CurvePoint { x: 50.0, y: 255.0 }, CurvePoint { x: 255.0, y: 255.0 }];
+        c.channels[0] = vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 100.0, y: 0.0 },
+            CurvePoint { x: 50.0, y: 255.0 },
+            CurvePoint { x: 255.0, y: 255.0 },
+        ];
         assert!(!c.is_valid()); // x not increasing
     }
 

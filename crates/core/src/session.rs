@@ -8,9 +8,10 @@
 
 use crate::blend::LayerBlendMode;
 use crate::canvas::{
-    mirrored_transform, resize_canvas, resize_image, trim as trim_document, CanvasSizeOptions,
-    CropDrag, CropDragMode, CropGeometry, TrimOptions,
+    CanvasSizeOptions, CropDrag, CropDragMode, CropGeometry, TrimOptions, mirrored_transform,
+    resize_canvas, resize_image, trim as trim_document,
 };
+use crate::document::PickerHSB;
 use crate::document::{
     CanvasDocument, CanvasGuide, GuideAxis, ImageLayer, LayerMask, LayerTextStyle, NavigationTool,
     PaletteColor,
@@ -19,11 +20,10 @@ use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use crate::history::DocumentHistory;
 use crate::raster::{Bitmap, ImportedImage};
 use crate::selection::{
-    drag_box_rect, DocumentSelection, LassoDraft, LassoKind, SelectionMode, SelectionPath,
+    DocumentSelection, LassoDraft, LassoKind, SelectionMode, SelectionPath, drag_box_rect,
 };
 use crate::tools::brush::RasterEdit;
 use crate::transform::{LayerSampling, LayerTransform, TransformEdit, TransformGroup};
-use crate::document::PickerHSB;
 use uuid::Uuid;
 
 /// The Blur tool's modes (`BlurToolMode`).
@@ -208,11 +208,19 @@ impl PixelMove {
 /// filter-edit session to attach to yet, so nothing opens it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorPickerTarget {
-    Palette { background: bool },
+    Palette {
+        background: bool,
+    },
     /// A layer effect's own color.
-    Effect { kind: crate::effects::LayerEffectKind },
-    GradientMap { highlights: bool },
-    Text { draft_id: Option<Uuid> },
+    Effect {
+        kind: crate::effects::LayerEffectKind,
+    },
+    GradientMap {
+        highlights: bool,
+    },
+    Text {
+        draft_id: Option<Uuid>,
+    },
 }
 
 impl ColorPickerTarget {
@@ -225,7 +233,11 @@ impl ColorPickerTarget {
             }
             ColorPickerTarget::Palette { background } => format!(
                 "Color Picker ({} Color)",
-                if *background { "Background" } else { "Foreground" }
+                if *background {
+                    "Background"
+                } else {
+                    "Foreground"
+                }
             ),
             ColorPickerTarget::GradientMap { highlights } => format!(
                 "Color Picker (Gradient Map {})",
@@ -597,7 +609,8 @@ impl EditorSession {
     // `pub(crate)`: `project::copy_layers_between` runs one whole copy as a
     // single undoable edit, exactly as `ProjectWorkspace.copyLayer` does.
     pub(crate) fn begin_edit(&mut self, name: &str) {
-        self.history.begin(name, &self.document, self.active_layer_id);
+        self.history
+            .begin(name, &self.document, self.active_layer_id);
     }
 
     pub(crate) fn end_edit(&mut self) {
@@ -667,8 +680,11 @@ impl EditorSession {
         if let Some(id) = self.active_layer_id {
             self.selected_layer_ids = vec![id];
         }
-        self.is_mask_selected =
-            keep_mask_target && self.active_layer().map(|l| l.mask.is_some()).unwrap_or(false);
+        self.is_mask_selected = keep_mask_target
+            && self
+                .active_layer()
+                .map(|l| l.mask.is_some())
+                .unwrap_or(false);
         // Swift then refits the viewport when the canvas itself changed
         // (`viewport.fit(documentSize:)`); the core session has no viewport,
         // so that stays with the app.
@@ -706,8 +722,7 @@ impl EditorSession {
         self.guide_drag = None;
         self.transform_edit = None;
         self.active_layer_id = active_layer_id;
-        self.selected_layer_ids =
-            active_layer_id.map(|id| vec![id]).unwrap_or_default();
+        self.selected_layer_ids = active_layer_id.map(|id| vec![id]).unwrap_or_default();
         self.document = Some(document);
         self.project_url = Some(url.to_path_buf());
         self.history.reset();
@@ -773,31 +788,31 @@ impl EditorSession {
             .unwrap_or(document.layers.len());
         // With a folder selected the layer goes to the top of the folder:
         // just above its last (topmost) contents.
-        if let (Some(active), Some(folder)) = (self.active_layer(), self.active_layer_id) {
-            if active.is_group {
-                let parents: std::collections::HashMap<Uuid, Option<Uuid>> = document
-                    .layers
-                    .iter()
-                    .map(|l| (l.id, l.parent_id))
-                    .collect();
-                let is_inside = |id: Uuid| -> bool {
-                    let mut parent = parents.get(&id).copied().flatten();
-                    let mut steps = 0;
-                    while let Some(current) = parent {
-                        if current == folder {
-                            return true;
-                        }
-                        parent = parents.get(&current).copied().flatten();
-                        steps += 1;
-                        if steps > 64 {
-                            break;
-                        }
+        if let (Some(active), Some(folder)) = (self.active_layer(), self.active_layer_id)
+            && active.is_group
+        {
+            let parents: std::collections::HashMap<Uuid, Option<Uuid>> = document
+                .layers
+                .iter()
+                .map(|l| (l.id, l.parent_id))
+                .collect();
+            let is_inside = |id: Uuid| -> bool {
+                let mut parent = parents.get(&id).copied().flatten();
+                let mut steps = 0;
+                while let Some(current) = parent {
+                    if current == folder {
+                        return true;
                     }
-                    false
-                };
-                if let Some(topmost) = document.layers.iter().rposition(|l| is_inside(l.id)) {
-                    insertion = insertion.max(topmost + 1);
+                    parent = parents.get(&current).copied().flatten();
+                    steps += 1;
+                    if steps > 64 {
+                        break;
+                    }
                 }
+                false
+            };
+            if let Some(topmost) = document.layers.iter().rposition(|l| is_inside(l.id)) {
+                insertion = insertion.max(topmost + 1);
             }
         }
         self.begin_edit("New Blank Layer");
@@ -856,13 +871,20 @@ impl EditorSession {
         }
         // The deleted active layer's selection moves to a neighbor
         // (finishDeletingLayer): layers[min(index, count-1)].
-        if self.active_layer_id.map(|a| removed.contains(&a)).unwrap_or(false) {
+        if self
+            .active_layer_id
+            .map(|a| removed.contains(&a))
+            .unwrap_or(false)
+        {
             let count = self.document.as_ref().map(|d| d.layers.len()).unwrap_or(0);
             if count == 0 {
                 self.active_layer_id = None;
                 self.selected_layer_ids.clear();
             } else {
-                let neighbor = self.document.as_ref().map(|d| d.layers[index.min(count - 1)].id);
+                let neighbor = self
+                    .document
+                    .as_ref()
+                    .map(|d| d.layers[index.min(count - 1)].id);
                 self.active_layer_id = neighbor;
                 self.selected_layer_ids = neighbor.map(|n| vec![n]).unwrap_or_default();
             }
@@ -965,7 +987,7 @@ impl EditorSession {
         let Some(source_id) = self.active_layer_id else {
             return;
         };
-        let Some(source) = document.layer(source_id).cloned() else {
+        let Some(_source) = document.layer(source_id).cloned() else {
             return;
         };
         let Some(index) = document.layer_index(source_id) else {
@@ -981,10 +1003,8 @@ impl EditorSession {
         if document.layers.len() + originals.len() > 10_000 {
             return;
         }
-        let mapping: std::collections::HashMap<Uuid, Uuid> = originals
-            .iter()
-            .map(|l| (l.id, Uuid::new_v4()))
-            .collect();
+        let mapping: std::collections::HashMap<Uuid, Uuid> =
+            originals.iter().map(|l| (l.id, Uuid::new_v4())).collect();
         let mut copies = originals;
         for copy in copies.iter_mut() {
             copy.id = mapping[&copy.id];
@@ -1032,8 +1052,13 @@ impl EditorSession {
         }
         let transform = LayerTransform::new(rect.origin, rect.size);
         let undo_name = shape.kind.label().to_string();
-        let raster = crate::render::render_shape_image(&shape, transform.size.width.round() as usize, transform.size.height.round() as usize);
-        let mut layer = ImageLayer::with_asset(ImportedImage::new(raster, name.clone()), rect.origin);
+        let raster = crate::render::render_shape_image(
+            &shape,
+            transform.size.width.round() as usize,
+            transform.size.height.round() as usize,
+        );
+        let mut layer =
+            ImageLayer::with_asset(ImportedImage::new(raster, name.clone()), rect.origin);
         layer.transform = transform;
         layer.shape = Some(shape);
         // Above the active layer, in its folder.
@@ -1088,10 +1113,11 @@ impl EditorSession {
     }
 
     pub fn displayed_blend_mode(&self, layer: &ImageLayer) -> LayerBlendMode {
-        if let Some((id, mode)) = self.blend_preview {
-            if id == layer.id && self.active_layer_id == Some(layer.id) {
-                return mode;
-            }
+        if let Some((id, mode)) = self.blend_preview
+            && id == layer.id
+            && self.active_layer_id == Some(layer.id)
+        {
+            return mode;
         }
         layer.blend_mode
     }
@@ -1121,7 +1147,10 @@ impl EditorSession {
             return;
         };
         let modes = LayerBlendMode::ALL;
-        let index = modes.iter().position(|m| *m == layer.blend_mode).unwrap_or(0);
+        let index = modes
+            .iter()
+            .position(|m| *m == layer.blend_mode)
+            .unwrap_or(0);
         let next = modes[(index + if forward { 1 } else { modes.len() - 1 }) % modes.len()];
         self.set_layer_blend_mode(next);
     }
@@ -1156,11 +1185,11 @@ impl EditorSession {
     }
 
     pub fn begin_opacity_edit(&mut self) {
-        if self.opacity_edit_layer_id.is_none() {
-            if let Some(id) = self.active_layer_id {
-                self.begin_edit("Layer Opacity");
-                self.opacity_edit_layer_id = Some(id);
-            }
+        if self.opacity_edit_layer_id.is_none()
+            && let Some(id) = self.active_layer_id
+        {
+            self.begin_edit("Layer Opacity");
+            self.opacity_edit_layer_id = Some(id);
         }
     }
 
@@ -1182,10 +1211,10 @@ impl EditorSession {
         if standalone {
             self.begin_edit("Layer Opacity");
         }
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(id) {
-                layer.opacity = opacity.clamp(0.0, 1.0);
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(layer) = doc.layer_mut(id)
+        {
+            layer.opacity = opacity.clamp(0.0, 1.0);
         }
         if standalone {
             self.end_edit();
@@ -1333,10 +1362,10 @@ impl EditorSession {
         let Some(draft) = self.lasso_draft.as_mut() else {
             return;
         };
-        if let Some(last) = draft.points.last() {
-            if last.distance_to(to) < 0.25 {
-                return;
-            }
+        if let Some(last) = draft.points.last()
+            && last.distance_to(to) < 0.25
+        {
+            return;
         }
         draft.points.push(to);
     }
@@ -1575,10 +1604,10 @@ impl EditorSession {
         let dx = dx.round();
         let dy = dy.round();
         self.begin_edit("Move Selection");
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(selection) = doc.selection.as_mut() {
-                selection.path = selection.path.translated(dx, dy);
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(selection) = doc.selection.as_mut()
+        {
+            selection.path = selection.path.translated(dx, dy);
         }
         self.end_edit();
     }
@@ -1725,7 +1754,9 @@ impl EditorSession {
             // The outline walk bails on an untraceably busy selection
             // (MagicWand.tooDetailed); that is an error to show, not silence.
             Err(_) => {
-                self.brush_error = Some("The Magic Wand can't trace this selection — try a lower tolerance.".into());
+                self.brush_error = Some(
+                    "The Magic Wand can't trace this selection — try a lower tolerance.".into(),
+                );
                 return;
             }
         };
@@ -1752,12 +1783,11 @@ impl EditorSession {
             crate::render::draw_live_composite(document)
         } else {
             let mut out = Bitmap::new(document.width, document.height);
-            if let Some(layer) = self.active_layer() {
-                if !layer.is_group {
-                    if let Some(asset) = layer.asset.as_ref() {
-                        crate::render::draw_layer_pixels(asset.image.as_ref(), &layer.transform, &mut out);
-                    }
-                }
+            if let Some(layer) = self.active_layer()
+                && !layer.is_group
+                && let Some(asset) = layer.asset.as_ref()
+            {
+                crate::render::draw_layer_pixels(asset.image.as_ref(), &layer.transform, &mut out);
             }
             out
         }
@@ -1767,11 +1797,18 @@ impl EditorSession {
 
     /// `canEditMask`: canEditLayers && one selected layer.
     pub fn can_edit_mask(&self) -> bool {
-        self.can_edit_layers() && self.selected_layer_ids.len() == 1 && self.active_layer().is_some()
+        self.can_edit_layers()
+            && self.selected_layer_ids.len() == 1
+            && self.active_layer().is_some()
     }
 
     pub fn add_layer_mask(&mut self, revealing: bool) {
-        if !self.can_edit_mask() || self.active_layer().map(|l| l.mask.is_some()).unwrap_or(true) {
+        if !self.can_edit_mask()
+            || self
+                .active_layer()
+                .map(|l| l.mask.is_some())
+                .unwrap_or(true)
+        {
             return;
         }
         let Some(id) = self.active_layer_id else {
@@ -1803,7 +1840,11 @@ impl EditorSession {
             .map(|m| m.is_enabled);
         if let Some(enabled) = enabled {
             self.finish_opacity_edit();
-            self.begin_edit(if enabled { "Disable Layer Mask" } else { "Enable Layer Mask" });
+            self.begin_edit(if enabled {
+                "Disable Layer Mask"
+            } else {
+                "Enable Layer Mask"
+            });
             if let Some(doc) = self.document.as_mut() {
                 doc.layer_mut(id).unwrap().mask.as_mut().unwrap().is_enabled = !enabled;
             }
@@ -1818,7 +1859,11 @@ impl EditorSession {
         let Some(id) = self.active_layer_id else {
             return;
         };
-        if self.active_layer().map(|l| l.mask.is_some()).unwrap_or(false) {
+        if self
+            .active_layer()
+            .map(|l| l.mask.is_some())
+            .unwrap_or(false)
+        {
             self.finish_opacity_edit();
             self.begin_edit("Delete Layer Mask");
             if let Some(doc) = self.document.as_mut() {
@@ -1839,8 +1884,11 @@ impl EditorSession {
         self.effect_selection = None;
         self.resolve_gradient();
         self.select_layer(Some(id));
-        self.is_mask_selected =
-            mask && self.active_layer().map(|l| l.mask.is_some()).unwrap_or(false);
+        self.is_mask_selected = mask
+            && self
+                .active_layer()
+                .map(|l| l.mask.is_some())
+                .unwrap_or(false);
     }
 
     /// `canCopyMask` (LayerMask.swift:290-298) — whether an Option-drag can
@@ -1900,10 +1948,10 @@ impl EditorSession {
         } else {
             "Copy Layer Mask"
         });
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(target) {
-                layer.mask = Some(mask);
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(layer) = doc.layer_mut(target)
+        {
+            layer.mask = Some(mask);
         }
         self.select_layer(Some(target));
         self.is_mask_selected = true;
@@ -1933,12 +1981,11 @@ impl EditorSession {
         } else {
             "Link Layer Mask"
         });
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(id) {
-                if let Some(mask) = layer.mask.as_mut() {
-                    mask.is_linked = !linked;
-                }
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(layer) = doc.layer_mut(id)
+            && let Some(mask) = layer.mask.as_mut()
+        {
+            mask.is_linked = !linked;
         }
         self.end_edit();
     }
@@ -2068,22 +2115,22 @@ impl EditorSession {
     ) {
         let (mut image, transform, _) = edit.snapshot_of(composed);
         self.begin_edit(name);
-        if let Some(document) = self.document.as_mut() {
-            if let Some(layer) = document.layer_mut(id) {
-                if edit.is_mask {
-                    let mask = match layer.mask.as_ref() {
-                        Some(m) => m.replacing(image),
-                        None => LayerMask {
-                            asset: image,
-                            ..LayerMask::solid(true)
-                        },
-                    };
-                    layer.mask = Some(mask);
-                } else {
-                    image.name = layer.name.clone();
-                    layer.asset = Some(image);
-                    layer.transform = transform;
-                }
+        if let Some(document) = self.document.as_mut()
+            && let Some(layer) = document.layer_mut(id)
+        {
+            if edit.is_mask {
+                let mask = match layer.mask.as_ref() {
+                    Some(m) => m.replacing(image),
+                    None => LayerMask {
+                        asset: image,
+                        ..LayerMask::solid(true)
+                    },
+                };
+                layer.mask = Some(mask);
+            } else {
+                image.name = layer.name.clone();
+                layer.asset = Some(image);
+                layer.transform = transform;
             }
         }
         self.end_edit();
@@ -2115,7 +2162,11 @@ impl EditorSession {
             ]
         };
         let composed = edit.fill(color);
-        self.commit_pixel_edit(&edit, &composed, if edit.is_mask { "Fill Mask" } else { "Fill" });
+        self.commit_pixel_edit(
+            &edit,
+            &composed,
+            if edit.is_mask { "Fill Mask" } else { "Fill" },
+        );
     }
 
     /// Delete with a selection: image pixels become transparent; on a mask the
@@ -2198,8 +2249,10 @@ impl EditorSession {
         let Some(origin) = &self.selection_move_origin else {
             return;
         };
-        let shift =
-            crate::geometry::CGAffineTransform::translation(offset.width.round(), offset.height.round());
+        let shift = crate::geometry::CGAffineTransform::translation(
+            offset.width.round(),
+            offset.height.round(),
+        );
         let path = origin.path.transformed(&shift);
         if let Some(document) = self.document.as_mut() {
             document.selection = Some(DocumentSelection {
@@ -2252,7 +2305,11 @@ impl EditorSession {
         let Some(move_state) = self.pixel_move.as_mut() else {
             return;
         };
-        if move_state.raster.move_lifted(rounded, move_state.duplicate).is_none() {
+        if move_state
+            .raster
+            .move_lifted(rounded, move_state.duplicate)
+            .is_none()
+        {
             // As in Swift: a rebuild that fails cancels the whole move.
             self.pixel_move = None;
             self.brush_error = Some("The pixels could not be moved.".into());
@@ -2268,16 +2325,15 @@ impl EditorSession {
         if let Some(move_state) = self.pixel_move.as_ref() {
             return Some(move_state.moved_selection());
         }
-        if let Some(edit) = self.transform_edit.as_ref() {
-            if let Some(matrix) = Self::floating_selection_transform(edit) {
-                if let Some(selection) = self.selection() {
-                    return Some(DocumentSelection {
-                        path: selection.path.transformed(&matrix),
-                        antialiased: selection.antialiased,
-                        feather: selection.feather,
-                    });
-                }
-            }
+        if let Some(edit) = self.transform_edit.as_ref()
+            && let Some(matrix) = Self::floating_selection_transform(edit)
+            && let Some(selection) = self.selection()
+        {
+            return Some(DocumentSelection {
+                path: selection.path.transformed(&matrix),
+                antialiased: selection.antialiased,
+                feather: selection.feather,
+            });
         }
         self.selection().cloned()
     }
@@ -2409,14 +2465,26 @@ impl EditorSession {
                 image = expanded;
             }
         }
-        let grid_transform = if mask { layer.mask_transform() } else { layer.transform };
-        let to_doc = crate::raster::pixel_to_document(&grid_transform, image.width as f64, image.height as f64);
+        let grid_transform = if mask {
+            layer.mask_transform()
+        } else {
+            layer.transform
+        };
+        let to_doc = crate::raster::pixel_to_document(
+            &grid_transform,
+            image.width as f64,
+            image.height as f64,
+        );
         for y in 0..image.height {
             for x in 0..image.width {
                 let coverage = match &clip {
                     Some(clip) => {
                         let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&to_doc);
-                        if doc.x < 0.0 || doc.y < 0.0 || doc.x >= document.width as f64 || doc.y >= document.height as f64 {
+                        if doc.x < 0.0
+                            || doc.y < 0.0
+                            || doc.x >= document.width as f64
+                            || doc.y >= document.height as f64
+                        {
                             0.0
                         } else {
                             clip.alpha_at(doc.x.floor() as usize, doc.y.floor() as usize)
@@ -2430,21 +2498,22 @@ impl EditorSession {
                 let o = (y * image.width + x) * 4;
                 for c in 0..3 {
                     let inverted = 255 - image.data[o + c];
-                    image.data[o + c] =
-                        (inverted as f32 * coverage + image.data[o + c] as f32 * (1.0 - coverage)).round() as u8;
+                    image.data[o + c] = (inverted as f32 * coverage
+                        + image.data[o + c] as f32 * (1.0 - coverage))
+                        .round() as u8;
                 }
             }
         }
         self.begin_edit(if mask { "Invert Mask" } else { "Invert" });
-        if let Some(document) = self.document.as_mut() {
-            if let Some(current) = document.layer_mut(layer.id) {
-                if mask {
-                    if let Some(m) = current.mask.as_ref() {
-                        current.mask = Some(m.replacing(ImportedImage::new(image, layer.name.clone())));
-                    }
-                } else {
-                    current.asset = Some(ImportedImage::new(image, layer.name.clone()));
+        if let Some(document) = self.document.as_mut()
+            && let Some(current) = document.layer_mut(layer.id)
+        {
+            if mask {
+                if let Some(m) = current.mask.as_ref() {
+                    current.mask = Some(m.replacing(ImportedImage::new(image, layer.name.clone())));
                 }
+            } else {
+                current.asset = Some(ImportedImage::new(image, layer.name.clone()));
             }
         }
         self.end_edit();
@@ -2461,7 +2530,12 @@ impl EditorSession {
             self.add_layer_mask(revealing);
             return;
         }
-        if !self.can_edit_mask() || self.active_layer().map(|l| l.mask.is_some()).unwrap_or(true) {
+        if !self.can_edit_mask()
+            || self
+                .active_layer()
+                .map(|l| l.mask.is_some())
+                .unwrap_or(true)
+        {
             return;
         }
         let Some(document) = self.document.clone() else {
@@ -2493,11 +2567,16 @@ impl EditorSession {
             chunk[3] = 255;
         }
         if let Some(clip) = self.selection().map(|s| s.clip(document.size())) {
-            let to_doc = crate::raster::pixel_to_document(&layer.transform, width as f64, height as f64);
+            let to_doc =
+                crate::raster::pixel_to_document(&layer.transform, width as f64, height as f64);
             for y in 0..height {
                 for x in 0..width {
                     let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&to_doc);
-                    if doc.x < 0.0 || doc.y < 0.0 || doc.x >= document.width as f64 || doc.y >= document.height as f64 {
+                    if doc.x < 0.0
+                        || doc.y < 0.0
+                        || doc.x >= document.width as f64
+                        || doc.y >= document.height as f64
+                    {
                         continue;
                     }
                     let a = clip.alpha_at(doc.x.floor() as usize, doc.y.floor() as usize);
@@ -2550,8 +2629,10 @@ impl EditorSession {
         // as in Photoshop; Grain gets a pattern of its own.
         if kind == AdjustmentKind::GradientMap {
             let mut settings = crate::adjust::GradientMapSettings::default();
-            settings.shadows = crate::adjust::AdjustmentColor::from_palette(self.palette_color(false));
-            settings.highlights = crate::adjust::AdjustmentColor::from_palette(self.palette_color(true));
+            settings.shadows =
+                crate::adjust::AdjustmentColor::from_palette(self.palette_color(false));
+            settings.highlights =
+                crate::adjust::AdjustmentColor::from_palette(self.palette_color(true));
             adjustment.gradient_map_settings = Some(settings);
         }
         if kind == AdjustmentKind::Grain {
@@ -2576,7 +2657,9 @@ impl EditorSession {
         self.begin_edit(&format!("New {} Adjustment", kind.label()));
         if let Some(document) = self.document.as_mut() {
             let id = layer.id;
-            document.layers.insert(index.min(document.layers.len()), layer);
+            document
+                .layers
+                .insert(index.min(document.layers.len()), layer);
             self.active_layer_id = Some(id);
         }
         self.end_edit();
@@ -2587,10 +2670,10 @@ impl EditorSession {
         if !value.is_valid() {
             return;
         }
-        if let Some(document) = self.document.as_mut() {
-            if let Some(layer) = document.layer_mut(id) {
-                layer.adjustment = Some(value);
-            }
+        if let Some(document) = self.document.as_mut()
+            && let Some(layer) = document.layer_mut(id)
+        {
+            layer.adjustment = Some(value);
         }
     }
 
@@ -2689,11 +2772,14 @@ impl EditorSession {
         let Some(original) = self.adjustment_original.clone() else {
             return false;
         };
-        self.update_adjustment(id, if commit {
-            self.edited_adjustment().unwrap_or_else(|| original.clone())
-        } else {
-            original.clone()
-        });
+        self.update_adjustment(
+            id,
+            if commit {
+                self.edited_adjustment().unwrap_or_else(|| original.clone())
+            } else {
+                original.clone()
+            },
+        );
         self.levels = None;
         self.hue_saturation = None;
         self.filter_edit = None;
@@ -2750,9 +2836,7 @@ impl EditorSession {
         let document = self.document.as_ref()?;
         let clip = self.selection().map(|s| s.clip(document.size()));
         if let Some(clip) = &clip {
-            if clip.coverage.is_none() {
-                return None;
-            }
+            clip.coverage.as_ref()?;
         }
         let region = self.selection_copy_region()?;
         let layer = self.active_layer()?;
@@ -2817,9 +2901,7 @@ impl EditorSession {
         let document = self.document.as_ref()?;
         let clip = self.selection().map(|s| s.clip(document.size()));
         if let Some(clip) = &clip {
-            if clip.coverage.is_none() {
-                return None;
-            }
+            clip.coverage.as_ref()?;
         }
         let region = self.selection_copy_region()?;
         let composite = crate::render::draw_live_composite(document);
@@ -2935,7 +3017,9 @@ impl EditorSession {
         self.begin_edit(edit_name);
         if let Some(document) = self.document.as_mut() {
             let id = layer.id;
-            document.layers.insert(index.min(document.layers.len()), layer);
+            document
+                .layers
+                .insert(index.min(document.layers.len()), layer);
             document.selection = None;
             self.active_layer_id = Some(id);
             self.selected_layer_ids = vec![id];
@@ -2993,8 +3077,7 @@ impl EditorSession {
         let Some(document) = self.document.as_ref() else {
             return;
         };
-        let known: std::collections::HashSet<Uuid> =
-            document.layers.iter().map(|l| l.id).collect();
+        let known: std::collections::HashSet<Uuid> = document.layers.iter().map(|l| l.id).collect();
         let mut valid: Vec<Uuid> = Vec::new();
         for id in ids {
             if known.contains(id) && !valid.contains(id) {
@@ -3029,7 +3112,11 @@ impl EditorSession {
         let mut ids = self.selected_layer_ids.clone();
         if ids.contains(&id) && ids.len() > 1 {
             ids.retain(|i| *i != id);
-            let primary = if self.active_layer_id == Some(id) { ids.first().copied() } else { self.active_layer_id };
+            let primary = if self.active_layer_id == Some(id) {
+                ids.first().copied()
+            } else {
+                self.active_layer_id
+            };
             self.select_layers(&ids, primary);
         } else {
             ids.push(id);
@@ -3057,18 +3144,22 @@ impl EditorSession {
         if selected.is_empty() {
             return;
         }
-        let ancestors = |id: Uuid, by_id: &std::collections::HashMap<Uuid, &ImageLayer>| -> Vec<Option<Uuid>> {
-            let mut result = Vec::new();
-            let mut parent = by_id.get(&id).and_then(|l| l.parent_id);
-            while let Some(current) = parent {
-                result.push(Some(current));
-                parent = by_id.get(&current).and_then(|l| l.parent_id);
-            }
-            result.push(None);
-            result
+        let ancestors =
+            |id: Uuid, by_id: &std::collections::HashMap<Uuid, &ImageLayer>| -> Vec<Option<Uuid>> {
+                let mut result = Vec::new();
+                let mut parent = by_id.get(&id).and_then(|l| l.parent_id);
+                while let Some(current) = parent {
+                    result.push(Some(current));
+                    parent = by_id.get(&current).and_then(|l| l.parent_id);
+                }
+                result.push(None);
+                result
+            };
+        let in_selected = |chain: &Vec<Option<Uuid>>| {
+            chain
+                .iter()
+                .any(|a| a.map(|a| selected.contains(&a)).unwrap_or(false))
         };
-        let in_selected =
-            |chain: &Vec<Option<Uuid>>| chain.iter().any(|a| a.map(|a| selected.contains(&a)).unwrap_or(false));
         // The topmost selected branches: roots of the selected forest.
         let root_ids: Vec<Uuid> = selected
             .iter()
@@ -3087,21 +3178,18 @@ impl EditorSession {
             return;
         }
         // The nearest ancestor chain every selected branch shares.
-        let parent: Option<Uuid> = ordered.first().and_then(|first| {
-            let first_chain = ancestors(*first, &by_id);
-            first_chain
-                .iter()
-                .copied()
-                .find(|candidate| {
-                    ordered.iter().all(|id| {
-                        ancestors(*id, &by_id)
-                            .iter()
-                            .any(|a| *a == *candidate)
-                    })
+        let parent: Option<Uuid> = ordered
+            .first()
+            .and_then(|first| {
+                let first_chain = ancestors(*first, &by_id);
+                first_chain.iter().copied().find(|candidate| {
+                    ordered
+                        .iter()
+                        .all(|id| ancestors(*id, &by_id).contains(candidate))
                 })
-        })
-        .flatten();
-        let mut names: std::collections::HashSet<String> =
+            })
+            .flatten();
+        let names: std::collections::HashSet<String> =
             document.layers.iter().map(|l| l.name.clone()).collect();
         let mut number = 1;
         while names.contains(&format!("Folder {number}")) {
@@ -3124,9 +3212,17 @@ impl EditorSession {
                 branch
             })
             .collect();
-        let highest = document.layers.iter().rposition(|l| branches.contains(&l.id));
+        let highest = document
+            .layers
+            .iter()
+            .rposition(|l| branches.contains(&l.id));
         let insertion = highest
-            .map(|h| document.layers[..=h].iter().filter(|l| !root_set.contains(&l.id)).count())
+            .map(|h| {
+                document.layers[..=h]
+                    .iter()
+                    .filter(|l| !root_set.contains(&l.id))
+                    .count()
+            })
             .unwrap_or(document.layers.len());
         let mut layers = document
             .layers
@@ -3244,7 +3340,13 @@ impl EditorSession {
 
     /// `placeLayer` — moves a layer (with its subtree) under `parent`, above
     /// `target`, or at the very bottom, as one "Move Layer" undo step.
-    pub fn place_layer(&mut self, id: Uuid, parent: Option<Uuid>, above: Option<Uuid>, at_bottom: bool) -> bool {
+    pub fn place_layer(
+        &mut self,
+        id: Uuid,
+        parent: Option<Uuid>,
+        above: Option<Uuid>,
+        at_bottom: bool,
+    ) -> bool {
         if above == Some(id) || !self.can_place_layer(id, parent) {
             return false;
         }
@@ -3291,7 +3393,12 @@ impl EditorSession {
         let Some(parent) = layer.parent_id else {
             return;
         };
-        let Some(group) = self.document.as_ref().and_then(|d| d.layer(parent)).cloned() else {
+        let Some(group) = self
+            .document
+            .as_ref()
+            .and_then(|d| d.layer(parent))
+            .cloned()
+        else {
             return;
         };
         self.place_layer(layer.id, group.parent_id, Some(group.id), false);
@@ -3308,7 +3415,8 @@ impl EditorSession {
         };
         let mut layers = document.layers.clone();
         layers.reverse();
-        if from.is_empty() || from.iter().any(|i| *i >= layers.len()) || destination > layers.len() {
+        if from.is_empty() || from.iter().any(|i| *i >= layers.len()) || destination > layers.len()
+        {
             return;
         }
         // Array.move(fromOffsets:toOffset:): remove (lowest first), then
@@ -3350,12 +3458,11 @@ impl EditorSession {
     }
 
     pub fn set_visibility_in_swipe(&mut self, id: Uuid, visible: bool) {
-        if let Some(document) = self.document.as_mut() {
-            if let Some(layer) = document.layer_mut(id) {
-                if layer.is_visible != visible {
-                    layer.is_visible = visible;
-                }
-            }
+        if let Some(document) = self.document.as_mut()
+            && let Some(layer) = document.layer_mut(id)
+            && layer.is_visible != visible
+        {
+            layer.is_visible = visible;
         }
     }
 
@@ -3415,10 +3522,7 @@ impl EditorSession {
                 self.active_layer_id = None;
                 self.selected_layer_ids.clear();
             } else {
-                let index = document
-                    .layer_index(ids[0])
-                    .unwrap_or(0)
-                    .min(count - 1);
+                let index = document.layer_index(ids[0]).unwrap_or(0).min(count - 1);
                 let neighbor = self.document.as_ref().map(|d| d.layers[index].id);
                 self.active_layer_id = neighbor;
                 self.selected_layer_ids = neighbor.map(|n| vec![n]).unwrap_or_default();
@@ -3532,7 +3636,11 @@ impl EditorSession {
             }
             // No document yet: the drop point does not apply, the first image
             // determines the canvas.
-            let point = if self.document.is_some() { center } else { None };
+            let point = if self.document.is_some() {
+                center
+            } else {
+                None
+            };
             let asset = ImportedImage::new(
                 Bitmap::from_raw(bitmap.width, bitmap.height, bitmap.data),
                 &name,
@@ -3613,8 +3721,8 @@ impl EditorSession {
         for layer in &document.layers {
             let mut path: HashSet<Uuid> = HashSet::new();
             let mut current = Some(layer.id);
-            let mut source_of = |id: Uuid, document: &CanvasDocument| -> Option<Uuid> {
-                if extra.map(|(target, source)| target == id).unwrap_or(false) {
+            let source_of = |id: Uuid, document: &CanvasDocument| -> Option<Uuid> {
+                if extra.map(|(target, _source)| target == id).unwrap_or(false) {
                     Some(extra.unwrap().1)
                 } else {
                     document.layer(id).and_then(|l| l.mask_source_id)
@@ -3666,14 +3774,20 @@ impl EditorSession {
         if !self.can_link_mask(source, target) {
             return false;
         }
-        if self.document.as_ref().and_then(|d| d.layer(target)).and_then(|l| l.mask_source_id) == Some(source) {
+        if self
+            .document
+            .as_ref()
+            .and_then(|d| d.layer(target))
+            .and_then(|l| l.mask_source_id)
+            == Some(source)
+        {
             return true;
         }
         self.begin_edit("Create Clipping Mask");
-        if let Some(document) = self.document.as_mut() {
-            if let Some(layer) = document.layer_mut(target) {
-                layer.mask_source_id = Some(source);
-            }
+        if let Some(document) = self.document.as_mut()
+            && let Some(layer) = document.layer_mut(target)
+        {
+            layer.mask_source_id = Some(source);
         }
         self.end_edit();
         true
@@ -3706,8 +3820,8 @@ impl EditorSession {
         };
         let mut releases = Vec::new();
         for id in &siblings[target_index..] {
-            let keeps = *id == target
-                || document.layer(*id).and_then(|l| l.mask_source_id) == Some(source);
+            let keeps =
+                *id == target || document.layer(*id).and_then(|l| l.mask_source_id) == Some(source);
             if !keeps {
                 break;
             }
@@ -3826,25 +3940,19 @@ impl EditorSession {
                 continue;
             };
             let mut placed = Bitmap::new(width, height);
-            crate::render::draw_layer_pixels(
-                asset.image.as_ref(),
-                &source.transform,
-                &mut placed,
-            );
+            crate::render::draw_layer_pixels(asset.image.as_ref(), &source.transform, &mut placed);
             // A raster mask on the source multiplies in, as the bake's
             // `LayerRenderer.draw` does.
-            if let Some(mask) = &source.mask {
-                if mask.is_enabled {
-                    if let Some(grid) =
-                        crate::render::mask_clip_image(mask, &source.transform, width, height)
-                    {
-                        for i in 0..(width * height) {
-                            let coverage = grid.pixel(i % width, i / width)[0] as f32 / 255.0;
-                            let o = i * 4;
-                            for c in 0..4 {
-                                placed.data[o + c] = (placed.data[o + c] as f32 * coverage) as u8;
-                            }
-                        }
+            if let Some(mask) = &source.mask
+                && mask.is_enabled
+                && let Some(grid) =
+                    crate::render::mask_clip_image(mask, &source.transform, width, height)
+            {
+                for i in 0..(width * height) {
+                    let coverage = grid.pixel(i % width, i / width)[0] as f32 / 255.0;
+                    let o = i * 4;
+                    for c in 0..4 {
+                        placed.data[o + c] = (placed.data[o + c] as f32 * coverage) as u8;
                     }
                 }
             }
@@ -3877,7 +3985,9 @@ impl EditorSession {
             .iter()
             .filter(|l| {
                 !removed.contains(&l.id)
-                    && l.mask_source_id.map(|s| removed.contains(&s)).unwrap_or(false)
+                    && l.mask_source_id
+                        .map(|s| removed.contains(&s))
+                        .unwrap_or(false)
             })
             .map(|l| l.id)
             .collect();
@@ -3892,7 +4002,7 @@ impl EditorSession {
         } else {
             std::collections::HashMap::new()
         };
-        self.delete_selected_layers_with_baked(&ids.to_vec(), baked);
+        self.delete_selected_layers_with_baked(ids, baked);
         true
     }
 
@@ -3944,10 +4054,26 @@ impl EditorSession {
                 continue;
             }
             let corners = layer.transform.corners();
-            let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min).round();
-            let max_x = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max).round();
-            let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).round();
-            let max_y = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max).round();
+            let min_x = corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::INFINITY, f64::min)
+                .round();
+            let max_x = corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round();
+            let min_y = corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f64::INFINITY, f64::min)
+                .round();
+            let max_y = corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round();
             xs.push(min_x);
             xs.push(max_x);
             ys.push(min_y);
@@ -3981,9 +4107,15 @@ impl EditorSession {
         }
         let corners = draft.corners();
         let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-        let max_x = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        let max_x = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::NEG_INFINITY, f64::max);
         let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-        let max_y = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        let max_y = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::NEG_INFINITY, f64::max);
         let bounds = crate::geometry::CGRect::new(min_x, min_y, max_x - min_x, max_y - min_y);
         let targets = self.transform_snap_targets(moving);
         let (offset, guide_x, guide_y) =
@@ -4017,12 +4149,13 @@ impl EditorSession {
             return;
         }
         let is_mask = self.is_mask_selected;
-        if let Some(draft) = self.gradient_edit.as_mut() {
-            if draft.layer_id == id && draft.is_mask == is_mask {
-                draft.start = at;
-                draft.end = at;
-                return;
-            }
+        if let Some(draft) = self.gradient_edit.as_mut()
+            && draft.layer_id == id
+            && draft.is_mask == is_mask
+        {
+            draft.start = at;
+            draft.end = at;
+            return;
         }
         self.finish_opacity_edit();
         self.gradient_edit = Some(GradientDraft {
@@ -4049,8 +4182,7 @@ impl EditorSession {
     /// length (Gradient.swift:32) — no extra square root.
     pub fn refresh_gradient(&self) -> Option<Bitmap> {
         let draft = self.gradient_edit.as_ref()?;
-        let has_line =
-            (draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y) >= 0.5;
+        let has_line = (draft.end.x - draft.start.x).hypot(draft.end.y - draft.start.y) >= 0.5;
         if !has_line {
             return None;
         }
@@ -4138,7 +4270,11 @@ impl EditorSession {
             draft.layer_id,
             &edit,
             &composed,
-            if edit.is_mask { "Gradient Mask" } else { "Gradient" },
+            if edit.is_mask {
+                "Gradient Mask"
+            } else {
+                "Gradient"
+            },
         );
         true
     }
@@ -4174,7 +4310,11 @@ impl EditorSession {
 
     /// Moves the distortion's corners; a twisted or collapsed shape is ignored.
     pub fn preview_corners(&mut self, corners: [CGPoint; 4]) {
-        if self.transform_edit.as_ref().and_then(|edit| edit.corners).is_none()
+        if self
+            .transform_edit
+            .as_ref()
+            .and_then(|edit| edit.corners)
+            .is_none()
             || !crate::tools::distort::is_usable(&corners)
         {
             return;
@@ -4217,7 +4357,11 @@ impl EditorSession {
             Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
             None => vec![edit.layer_id],
         };
-        self.begin_edit(if edit.group.is_none() { "Distort" } else { "Distort Layers" });
+        self.begin_edit(if edit.group.is_none() {
+            "Distort"
+        } else {
+            "Distort Layers"
+        });
         for id in ids {
             let Some(document) = self.document.as_ref() else {
                 continue;
@@ -4279,10 +4423,15 @@ impl EditorSession {
                             let mut cropped = Bitmap::new(crop_w, crop_h);
                             for y in 0..cropped.height {
                                 for x in 0..cropped.width {
-                                    cropped.set_pixel(x, y, warped_mask.pixel(crop_x + x, crop_y + y));
+                                    cropped.set_pixel(
+                                        x,
+                                        y,
+                                        warped_mask.pixel(crop_x + x, crop_y + y),
+                                    );
                                 }
                             }
-                            mask = Some(original.replacing(ImportedImage::new(cropped, "Layer Mask")));
+                            mask =
+                                Some(original.replacing(ImportedImage::new(cropped, "Layer Mask")));
                         }
                     }
                 }
@@ -4315,12 +4464,12 @@ impl EditorSession {
                 }
             }
         }
-        if let Some(document) = self.document.as_mut() {
-            if let Some(current) = document.layer_mut(id) {
-                current.asset = Some(ImportedImage::new(warped, current.name.clone()));
-                current.transform = placed;
-                current.mask = mask;
-            }
+        if let Some(document) = self.document.as_mut()
+            && let Some(current) = document.layer_mut(id)
+        {
+            current.asset = Some(ImportedImage::new(warped, current.name.clone()));
+            current.transform = placed;
+            current.mask = mask;
         }
     }
 
@@ -4356,13 +4505,12 @@ impl EditorSession {
             Some(moved_transform)
         };
         self.begin_edit("Distort Layer Mask");
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(current) = doc.layer_mut(edit.layer_id) {
-                if let Some(current_mask) = current.mask.as_mut() {
-                    current_mask.asset = ImportedImage::new(moved, "Layer Mask");
-                    current_mask.placement = placement;
-                }
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(current) = doc.layer_mut(edit.layer_id)
+            && let Some(current_mask) = current.mask.as_mut()
+        {
+            current_mask.asset = ImportedImage::new(moved, "Layer Mask");
+            current_mask.placement = placement;
         }
         self.end_edit();
     }
@@ -4390,7 +4538,9 @@ impl EditorSession {
                 .iter()
                 .rev()
                 .find(|l| {
-                    visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(point)
+                    visible.contains(&l.id)
+                        && l.live_text().is_some()
+                        && l.transform.contains(point)
                 })
                 .map(|l| l.id)
         };
@@ -4416,10 +4566,7 @@ impl EditorSession {
         self.text_draft = Some(TextDraft {
             document_id: document.id,
             layer_id: target,
-            origin: target_layer
-                .as_ref()
-                .map(|l| l.origin())
-                .unwrap_or(point),
+            origin: target_layer.as_ref().map(|l| l.origin()).unwrap_or(point),
             transform: target_layer.as_ref().map(|l| l.transform),
             style,
         });
@@ -4435,11 +4582,12 @@ impl EditorSession {
         }
         let mut style = self.text_defaults.clone();
         style.box_size = Some(CGSize::new(
-            (rect.width().round() as f64).max(16.0),
-            (rect.height().round() as f64).max(16.0),
+            rect.width().round().max(16.0),
+            rect.height().round().max(16.0),
         ));
         if !style.box_is_valid() {
-            self.brush_error = Some("That text box exceeds the 30,000-pixel or 100-megapixel limit.".into());
+            self.brush_error =
+                Some("That text box exceeds the 30,000-pixel or 100-megapixel limit.".into());
             return;
         }
         let box_size = style.box_size;
@@ -4476,7 +4624,9 @@ impl EditorSession {
     /// `applyText` — rasterizes the draft into the layer it edits (or a new
     /// text layer), as one undo step. Empty new text is a quiet no-op.
     pub fn apply_text(&mut self, draft: TextDraft) -> bool {
-        if self.document.as_ref().map(|d| d.id) != Some(draft.document_id) || !draft.style.is_valid() {
+        if self.document.as_ref().map(|d| d.id) != Some(draft.document_id)
+            || !draft.style.is_valid()
+        {
             return false;
         }
         let pending = self.text_draft.take();
@@ -4496,9 +4646,7 @@ impl EditorSession {
 
     fn apply_text_inner(&mut self, draft: &TextDraft) -> bool {
         // Blank new text: nothing to make.
-        if draft.layer_id.is_none()
-            && draft.style.content.trim().is_empty()
-        {
+        if draft.layer_id.is_none() && draft.style.content.trim().is_empty() {
             return true;
         }
         let Ok(image) = crate::tools::text::text_image(&draft.style) else {
@@ -4515,7 +4663,7 @@ impl EditorSession {
             return false;
         };
         if let Some(layer_id) = draft.layer_id {
-            let Some(index) = document.layer_index(layer_id) else {
+            let Some(_index) = document.layer_index(layer_id) else {
                 return false;
             };
             let Some(layer) = document.layer(layer_id) else {
@@ -4549,28 +4697,28 @@ impl EditorSession {
                 return false;
             }
             self.begin_edit("Edit Text");
-            if let Some(doc) = self.document.as_mut() {
-                if let Some(current) = doc.layer_mut(layer_id) {
-                    let name = asset.name.clone();
-                    let mask_placement = current
-                        .mask
-                        .as_ref()
-                        .filter(|m| m.placement.is_none())
-                        .map(|_| current.mask_transform());
-                    if let Some(placement) = mask_placement {
-                        if let Some(mask) = current.mask.as_mut() {
-                            mask.placement = Some(placement);
-                        }
-                    }
-                    let thumbnail = crate::raster::thumbnail_of(&image);
-                    current.asset = Some(ImportedImage {
-                        image,
-                        thumbnail: std::sync::Arc::new(thumbnail),
-                        name,
-                    });
-                    current.text = Some(text);
-                    current.transform = transform;
+            if let Some(doc) = self.document.as_mut()
+                && let Some(current) = doc.layer_mut(layer_id)
+            {
+                let name = asset.name.clone();
+                let mask_placement = current
+                    .mask
+                    .as_ref()
+                    .filter(|m| m.placement.is_none())
+                    .map(|_| current.mask_transform());
+                if let Some(placement) = mask_placement
+                    && let Some(mask) = current.mask.as_mut()
+                {
+                    mask.placement = Some(placement);
                 }
+                let thumbnail = crate::raster::thumbnail_of(&image);
+                current.asset = Some(ImportedImage {
+                    image,
+                    thumbnail: std::sync::Arc::new(thumbnail),
+                    name,
+                });
+                current.text = Some(text);
+                current.transform = transform;
             }
             self.end_edit();
             return true;
@@ -4651,18 +4799,18 @@ impl EditorSession {
         };
         self.finish_opacity_edit();
         self.begin_edit("Fill Text");
-        if let Some(document) = self.document.as_mut() {
-            if let Some(current) = document.layer_mut(id) {
-                let name = asset.name.clone();
-                let image = std::sync::Arc::new(image);
-                let thumbnail = crate::raster::thumbnail_of(&image);
-                current.asset = Some(ImportedImage {
-                    image: image.clone(),
-                    thumbnail: std::sync::Arc::new(thumbnail),
-                    name,
-                });
-                current.text = Some(crate::document::LayerText { style, image });
-            }
+        if let Some(document) = self.document.as_mut()
+            && let Some(current) = document.layer_mut(id)
+        {
+            let name = asset.name.clone();
+            let image = std::sync::Arc::new(image);
+            let thumbnail = crate::raster::thumbnail_of(&image);
+            current.asset = Some(ImportedImage {
+                image: image.clone(),
+                thumbnail: std::sync::Arc::new(thumbnail),
+                name,
+            });
+            current.text = Some(crate::document::LayerText { style, image });
         }
         self.end_edit();
         true
@@ -4674,7 +4822,10 @@ impl EditorSession {
         self.text_draft
             .as_ref()
             .map(|draft| draft.style.clone())
-            .or_else(|| self.active_layer().and_then(|l| l.live_text().map(|text| text.style.clone())))
+            .or_else(|| {
+                self.active_layer()
+                    .and_then(|l| l.live_text().map(|text| text.style.clone()))
+            })
             .unwrap_or_else(|| self.text_defaults.clone())
     }
 
@@ -4759,7 +4910,7 @@ impl EditorSession {
             if !edit.draft.is_valid() {
                 return;
             }
-            let Some(document) = self.document.as_mut() else {
+            let Some(_document) = self.document.as_mut() else {
                 return;
             };
             self.begin_edit("Transform Layers");
@@ -4816,7 +4967,11 @@ impl EditorSession {
             let new_w = edit.draft.size.width.round().max(1.0) as usize;
             let new_h = edit.draft.size.height.round().max(1.0) as usize;
             if new_w <= 10_000 && new_h <= 10_000 {
-                let name = layer.asset.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+                let name = layer
+                    .asset
+                    .as_ref()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
                 let raster = crate::render::render_shape_image(&shape, new_w, new_h);
                 layer.asset = Some(ImportedImage::new(raster, name));
             }
@@ -4845,12 +5000,11 @@ impl EditorSession {
             return;
         };
         self.begin_edit("Transform Layer Mask");
-        if let Some(doc) = self.document.as_mut() {
-            if let Some(layer) = doc.layer_mut(edit.layer_id) {
-                if let Some(mask) = layer.mask.as_mut() {
-                    mask.placement = placement;
-                }
-            }
+        if let Some(doc) = self.document.as_mut()
+            && let Some(layer) = doc.layer_mut(edit.layer_id)
+            && let Some(mask) = layer.mask.as_mut()
+        {
+            mask.placement = placement;
         }
         self.end_edit();
     }
@@ -4885,8 +5039,10 @@ impl EditorSession {
         let before_active = self.active_layer_id;
         self.begin_edit("Transform Selection");
         self.clear_selected_pixels();
-        let mut floating =
-            ImageLayer::with_asset(ImportedImage::new(lifted_image, "Floating Selection"), region.origin);
+        let mut floating = ImageLayer::with_asset(
+            ImportedImage::new(lifted_image, "Floating Selection"),
+            region.origin,
+        );
         floating.parent_id = source.parent_id;
         floating.opacity = source.opacity;
         floating.blend_mode = source.blend_mode;
@@ -4920,21 +5076,28 @@ impl EditorSession {
 
     /// `floatingSelectionTransform` — maps the original selection to where the
     /// floating pixels are now.
-    pub fn floating_selection_transform(edit: &TransformEdit) -> Option<crate::geometry::CGAffineTransform> {
+    pub fn floating_selection_transform(
+        edit: &TransformEdit,
+    ) -> Option<crate::geometry::CGAffineTransform> {
         let floating = edit.floating.as_ref()?;
         let width = floating.pixel_size.width;
         let height = floating.pixel_size.height;
         // Applied to a document point: undo the original placement, then the
         // current draft.
         Some(
-            crate::raster::pixel_to_document(&edit.draft, width, height)
-                .concat(&crate::raster::pixel_to_document(&floating.original, width, height).inverted()),
+            crate::raster::pixel_to_document(&edit.draft, width, height).concat(
+                &crate::raster::pixel_to_document(&floating.original, width, height).inverted(),
+            ),
         )
     }
 
     /// `mergeFloatingTransform`: composites the transformed pixels back into
     /// their layer, moves the selection with them, and closes the undo step.
-    fn merge_floating_transform(&mut self, edit: &TransformEdit, floating: &crate::selection::FloatingTransform) {
+    fn merge_floating_transform(
+        &mut self,
+        edit: &TransformEdit,
+        floating: &crate::selection::FloatingTransform,
+    ) {
         let merged = self.merge_floating_into_source(edit, floating);
         match merged {
             Some(()) => {
@@ -5087,10 +5250,10 @@ impl EditorSession {
         for id in targets {
             self.select_layer(Some(id));
             self.duplicate_active_layer();
-            if let Some(copy) = self.active_layer_id {
-                if copy != id {
-                    copies.push(copy);
-                }
+            if let Some(copy) = self.active_layer_id
+                && copy != id
+            {
+                copies.push(copy);
             }
         }
         if copies.is_empty() {
@@ -5156,13 +5319,12 @@ impl EditorSession {
                 floating: None,
                 corners: None,
                 mask: false,
-                group: Some(TransformGroup { box_: box_, originals }),
+                group: Some(TransformGroup { box_, originals }),
             });
             return;
         }
-        let mask_alone = self
-            .is_mask_selected
-            && layer.mask.as_ref().map(|m| !m.is_linked).unwrap_or(false);
+        let mask_alone =
+            self.is_mask_selected && layer.mask.as_ref().map(|m| !m.is_linked).unwrap_or(false);
         let draft = if mask_alone {
             layer.mask_transform()
         } else {
@@ -5180,10 +5342,10 @@ impl EditorSession {
     }
 
     pub fn preview_transform(&mut self, value: LayerTransform) {
-        if value.is_valid() {
-            if let Some(edit) = self.transform_edit.as_mut() {
-                edit.draft = value;
-            }
+        if value.is_valid()
+            && let Some(edit) = self.transform_edit.as_mut()
+        {
+            edit.draft = value;
         }
     }
 
@@ -5236,7 +5398,8 @@ impl EditorSession {
                     members.push(layer.id);
                     break;
                 }
-                current = document.layers
+                current = document
+                    .layers
                     .iter()
                     .find(|l| l.id == id)
                     .and_then(|l| l.parent_id);
@@ -5326,9 +5489,19 @@ impl EditorSession {
             };
             let corners = layer.transform.corners();
             min_x = min_x.min(corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min));
-            max_x = max_x.max(corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max));
+            max_x = max_x.max(
+                corners
+                    .iter()
+                    .map(|p| p.x)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            );
             min_y = min_y.min(corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min));
-            max_y = max_y.max(corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max));
+            max_y = max_y.max(
+                corners
+                    .iter()
+                    .map(|p| p.y)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            );
         }
         if !members.is_empty() && min_x.is_finite() {
             let axis = if horizontally {
@@ -5337,7 +5510,11 @@ impl EditorSession {
                 (min_y + max_y) / 2.0
             };
             self.finish_opacity_edit();
-            self.begin_edit(if horizontally { "Flip Horizontal" } else { "Flip Vertical" });
+            self.begin_edit(if horizontally {
+                "Flip Horizontal"
+            } else {
+                "Flip Vertical"
+            });
             if let Some(doc) = self.document.as_mut() {
                 for id in &members {
                     if let Some(layer) = doc.layer_mut(*id) {
@@ -5375,18 +5552,32 @@ impl EditorSession {
         if let Some(doc) = self.document.as_mut() {
             for layer in doc.layers.iter_mut() {
                 layer.transform = mirrored_transform(&layer.transform, horizontally, axis);
-                if let Some(mask) = layer.mask.as_mut() {
-                    if let Some(placement) = mask.placement.as_mut() {
-                        *placement = mirrored_transform(placement, horizontally, axis);
-                    }
+                if let Some(mask) = layer.mask.as_mut()
+                    && let Some(placement) = mask.placement.as_mut()
+                {
+                    *placement = mirrored_transform(placement, horizontally, axis);
                 }
             }
             // The selection mirrors with the canvas.
             if let Some(selection) = doc.selection.as_ref() {
                 let mirror = if horizontally {
-                    CGAffineTransform { a: -1.0, b: 0.0, c: 0.0, d: 1.0, tx: document.size().width, ty: 0.0 }
+                    CGAffineTransform {
+                        a: -1.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: 1.0,
+                        tx: document.size().width,
+                        ty: 0.0,
+                    }
                 } else {
-                    CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: document.size().height }
+                    CGAffineTransform {
+                        a: 1.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: -1.0,
+                        tx: 0.0,
+                        ty: document.size().height,
+                    }
                 };
                 doc.selection = Some(crate::selection::DocumentSelection {
                     path: selection.path.transformed(&mirror),
@@ -5436,12 +5627,10 @@ impl EditorSession {
                 .rev()
                 .find(|l| self.selected_layer_ids.contains(&l.id))?;
             // The merge must include something with pixels of its own.
-            if !ordered.iter().any(|id| {
-                document
-                    .layer(*id)
-                    .map(|l| !l.is_group)
-                    .unwrap_or(false)
-            }) {
+            if !ordered
+                .iter()
+                .any(|id| document.layer(*id).map(|l| !l.is_group).unwrap_or(false))
+            {
                 return None;
             }
             return Some(MergePlan {
@@ -5536,15 +5725,15 @@ impl EditorSession {
             .cloned()
             .collect();
         for layer in subset_doc.layers.iter_mut() {
-            if let Some(parent) = layer.parent_id {
-                if !kept.contains(&parent) {
-                    layer.parent_id = None;
-                }
+            if let Some(parent) = layer.parent_id
+                && !kept.contains(&parent)
+            {
+                layer.parent_id = None;
             }
-            if let Some(source) = layer.mask_source_id {
-                if !kept.contains(&source) {
-                    layer.mask_source_id = None;
-                }
+            if let Some(source) = layer.mask_source_id
+                && !kept.contains(&source)
+            {
+                layer.mask_source_id = None;
             }
         }
         let full = crate::render::draw_live_composite(&subset_doc);
@@ -5568,17 +5757,20 @@ impl EditorSession {
             .collect();
         // Layers clipped to anything that was merged now clip to the result.
         for layer in next.iter_mut() {
-            if let Some(source) = layer.mask_source_id {
-                if plan.removed.contains(&source) {
-                    layer.mask_source_id = Some(merged.id);
-                }
+            if let Some(source) = layer.mask_source_id
+                && plan.removed.contains(&source)
+            {
+                layer.mask_source_id = Some(merged.id);
             }
         }
         let slot = document
             .layer_index(plan.anchor)
             .unwrap_or(document.layers.len());
-        let insertion =
-            slot - document.layers[..slot].iter().filter(|l| plan.removed.contains(&l.id)).count();
+        let insertion = slot
+            - document.layers[..slot]
+                .iter()
+                .filter(|l| plan.removed.contains(&l.id))
+                .count();
         let insertion = insertion.min(next.len());
         let merged_id = merged.id;
         next.insert(insertion, merged);
@@ -5631,10 +5823,7 @@ impl EditorSession {
 
     pub fn begin_crop_drag(&mut self, start: CGPoint, mode: CropDragMode) {
         let original = self.crop_rect.unwrap_or_else(|| {
-            CGRect::from_origin_size(
-                CGPoint::ZERO,
-                self.document_size().unwrap_or(CGSize::ZERO),
-            )
+            CGRect::from_origin_size(CGPoint::ZERO, self.document_size().unwrap_or(CGSize::ZERO))
         });
         self.crop_drag = Some(CropDrag {
             start,
@@ -5678,10 +5867,26 @@ impl EditorSession {
                 continue;
             }
             let corners = layer.transform.corners();
-            let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min).round();
-            let max_x = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max).round();
-            let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).round();
-            let max_y = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max).round();
+            let min_x = corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::INFINITY, f64::min)
+                .round();
+            let max_x = corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round();
+            let min_y = corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f64::INFINITY, f64::min)
+                .round();
+            let max_y = corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round();
             xs.push(min_x);
             xs.push(max_x);
             ys.push(min_y);
@@ -5692,10 +5897,10 @@ impl EditorSession {
 
     pub fn end_crop_drag(&mut self) {
         self.crop_drag = None;
-        if let Some(rect) = self.crop_rect {
-            if !CropGeometry::valid(rect) {
-                self.crop_rect = None;
-            }
+        if let Some(rect) = self.crop_rect
+            && !CropGeometry::valid(rect)
+        {
+            self.crop_rect = None;
         }
     }
 
@@ -5789,13 +5994,13 @@ impl EditorSession {
 
     /// Returns false when nothing remained to trim.
     pub fn trim(&mut self, options: &TrimOptions) -> bool {
-        if let Some(doc) = self.document.clone() {
-            if let Some(trimmed) = trim_document(&doc, options) {
-                self.begin_edit("Trim");
-                self.document = Some(trimmed);
-                self.end_edit();
-                return true;
-            }
+        if let Some(doc) = self.document.clone()
+            && let Some(trimmed) = trim_document(&doc, options)
+        {
+            self.begin_edit("Trim");
+            self.document = Some(trimmed);
+            self.end_edit();
+            return true;
         }
         false
     }
@@ -5805,15 +6010,16 @@ impl EditorSession {
     /// group edit each member follows the box to the draft
     /// (`pendingTransform`, EditorSession.swift:498-502).
     pub fn displayed_transform(&self, layer: &ImageLayer) -> LayerTransform {
-        if let Some(edit) = self.transform_edit.as_ref() {
-            if edit.draft.is_valid() && !edit.mask {
-                if let Some(group) = edit.group.as_ref() {
-                    if let Some(original) = group.original(layer.id) {
-                        return original.following(&group.box_, &edit.draft);
-                    }
-                } else if edit.layer_id == layer.id {
-                    return edit.draft;
+        if let Some(edit) = self.transform_edit.as_ref()
+            && edit.draft.is_valid()
+            && !edit.mask
+        {
+            if let Some(group) = edit.group.as_ref() {
+                if let Some(original) = group.original(layer.id) {
+                    return original.following(&group.box_, &edit.draft);
                 }
+            } else if edit.layer_id == layer.id {
+                return edit.draft;
             }
         }
         layer.transform
@@ -5890,7 +6096,11 @@ impl EditorSession {
                 corners.iter().map(|p| p.y).collect()
             };
             let min = values.iter().cloned().fold(f64::INFINITY, f64::min).round();
-            let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max).round();
+            let max = values
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round();
             targets.push(min);
             targets.push(((min + max) / 2.0).round());
             targets.push(max);
@@ -5979,15 +6189,16 @@ impl EditorSession {
         if drag.is_new {
             self.begin_edit("New Guide");
             if let Some(doc) = self.document.as_mut() {
-                doc.guides.push(crate::document::CanvasGuide::new(drag.axis, drag.position));
+                doc.guides
+                    .push(crate::document::CanvasGuide::new(drag.axis, drag.position));
             }
             self.end_edit();
         } else if drag.original != Some(drag.position) {
             self.begin_edit("Move Guide");
-            if let Some(doc) = self.document.as_mut() {
-                if let Some(guide) = doc.guides.iter_mut().find(|g| g.id == drag.id) {
-                    guide.position = drag.position;
-                }
+            if let Some(doc) = self.document.as_mut()
+                && let Some(guide) = doc.guides.iter_mut().find(|g| g.id == drag.id)
+            {
+                guide.position = drag.position;
             }
             self.end_edit();
         }
@@ -6060,7 +6271,8 @@ fn floating_merge(
     let source_image = source.asset.as_ref()?.image.as_ref();
     let width = source_image.width;
     let height = source_image.height;
-    let to_document = crate::raster::pixel_to_document(&source.transform, width as f64, height as f64);
+    let to_document =
+        crate::raster::pixel_to_document(&source.transform, width as f64, height as f64);
     let to_pixels = to_document.inverted();
     let pw = pixels.width as f64;
     let ph = pixels.height as f64;
@@ -6094,26 +6306,30 @@ fn floating_merge(
         extent.height() * source.transform.size.height / height as f64,
     );
     let center = CGPoint::new(extent.mid_x(), extent.mid_y()).applying(&to_document);
-    merged.origin = CGPoint::new(center.x - merged.size.width / 2.0, center.y - merged.size.height / 2.0);
+    merged.origin = CGPoint::new(
+        center.x - merged.size.width / 2.0,
+        center.y - merged.size.height / 2.0,
+    );
     let mut mask = source.mask.clone();
-    if let Some(current) = source.mask.as_ref() {
-        if current.placement.is_none() && extent != original {
-            // Reveal the grown area: white behind the old mask.
-            let mut grown = Bitmap::new(extent.width() as usize, extent.height() as usize);
-            for chunk in grown.data.chunks_exact_mut(4) {
-                chunk[0] = 255;
-                chunk[1] = 255;
-                chunk[2] = 255;
-                chunk[3] = 255;
-            }
-            crate::raster::draw_over(
-                &mut grown,
-                current.asset.image.as_ref(),
-                placed,
-                LayerSampling::High,
-            );
-            mask = Some(current.replacing(ImportedImage::new(grown, "Layer Mask")));
+    if let Some(current) = source.mask.as_ref()
+        && current.placement.is_none()
+        && extent != original
+    {
+        // Reveal the grown area: white behind the old mask.
+        let mut grown = Bitmap::new(extent.width() as usize, extent.height() as usize);
+        for chunk in grown.data.chunks_exact_mut(4) {
+            chunk[0] = 255;
+            chunk[1] = 255;
+            chunk[2] = 255;
+            chunk[3] = 255;
         }
+        crate::raster::draw_over(
+            &mut grown,
+            current.asset.image.as_ref(),
+            placed,
+            LayerSampling::High,
+        );
+        mask = Some(current.replacing(ImportedImage::new(grown, "Layer Mask")));
     }
     Some((asset, merged, mask))
 }
@@ -6520,8 +6736,14 @@ mod tests {
         s.move_selection_outline(CGSize::new(10.4, -7.6));
         let moved = s.selection().unwrap();
         // (10.4, -7.6) rounds to (10, -8): the rect now spans (20,2)-(40,22).
-        assert!(moved.path.contains(CGPoint::new(30.0, 12.0)), "offset by whole pixels");
-        assert!(!moved.path.contains(CGPoint::new(15.0, 25.0)), "the old spot is vacated");
+        assert!(
+            moved.path.contains(CGPoint::new(30.0, 12.0)),
+            "offset by whole pixels"
+        );
+        assert!(
+            !moved.path.contains(CGPoint::new(15.0, 25.0)),
+            "the old spot is vacated"
+        );
         let undo_count = s.history.undo_count();
         s.end_selection_move();
         assert_eq!(s.history.undo_count(), undo_count + 1);
@@ -6774,7 +6996,10 @@ mod tests {
             .mask
             .clone()
             .unwrap();
-        assert_eq!(copied.placement.map(|p| p.origin), Some(CGPoint::new(10.0, 20.0)));
+        assert_eq!(
+            copied.placement.map(|p| p.origin),
+            Some(CGPoint::new(10.0, 20.0))
+        );
         assert!(!copied.is_linked);
         // Dropping it again replaces what the layer had. The copy has to
         // actually change the document to be recorded (identical masks fold
@@ -6788,7 +7013,10 @@ mod tests {
         }
         s.copy_mask(source, target);
         assert_eq!(s.history.undo_name(), "Replace Layer Mask");
-        assert!(!s.can_copy_mask(source, source), "a layer cannot copy from itself");
+        assert!(
+            !s.can_copy_mask(source, source),
+            "a layer cannot copy from itself"
+        );
     }
 
     #[test]
@@ -6801,8 +7029,15 @@ mod tests {
         assert!(!s.can_copy_mask(source, folder), "a folder takes no mask");
         let count = s.history.undo_count();
         s.copy_mask(source, folder);
-        assert_eq!(s.history.undo_count(), count, "nothing merged, nothing recorded");
-        assert!(!s.can_copy_mask(folder, source), "the folder has no mask to give");
+        assert_eq!(
+            s.history.undo_count(),
+            count,
+            "nothing merged, nothing recorded"
+        );
+        assert!(
+            !s.can_copy_mask(folder, source),
+            "the folder has no mask to give"
+        );
     }
 
     #[test]
@@ -6849,7 +7084,11 @@ mod tests {
         if let Some(edit) = s.transform_edit.as_mut() {
             edit.draft.origin = CGPoint::new(30.0, 0.0);
         }
-        assert_eq!(s.displayed_mask_placement(&layer(&s)), None, "linked stays covering");
+        assert_eq!(
+            s.displayed_mask_placement(&layer(&s)),
+            None,
+            "linked stays covering"
+        );
         s.cancel_transform();
 
         // Unlinked: the mask stays where it was while the layer drags, and the
@@ -6862,7 +7101,11 @@ mod tests {
             edit.draft.origin = CGPoint::new(30.0, 0.0);
         }
         let shown = s.displayed_mask_placement(&layer(&s)).unwrap();
-        assert_eq!(shown.origin, CGPoint::ZERO, "the mask stays while the layer drags");
+        assert_eq!(
+            shown.origin,
+            CGPoint::ZERO,
+            "the mask stays while the layer drags"
+        );
         s.commit_transform();
         assert_eq!(
             layer(&s).mask.as_ref().unwrap().placement.map(|p| p.origin),
@@ -6907,7 +7150,11 @@ mod tests {
             group: None,
         });
         let layer = s.document.as_ref().unwrap().layer(id).unwrap().clone();
-        assert_eq!(s.displayed_mask_placement(&layer), None, "linked keeps covering");
+        assert_eq!(
+            s.displayed_mask_placement(&layer),
+            None,
+            "linked keeps covering"
+        );
         let unlinked_layer = {
             let mut l = layer.clone();
             let mask = l.mask.as_mut().unwrap();
@@ -7040,7 +7287,15 @@ mod tests {
         let mut image = Bitmap::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                image.set_pixel(x, y, if x < 30 { [255, 0, 0, 255] } else { [0, 180, 0, 255] });
+                image.set_pixel(
+                    x,
+                    y,
+                    if x < 30 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 180, 0, 255]
+                    },
+                );
             }
         }
         s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(image, "L"));
@@ -7048,7 +7303,10 @@ mod tests {
         assert!(s.begin_pixel_move(false), "the drag starts");
         s.drag_pixel_move(CGSize::new(25.5, 0.0));
         // Offsets round to whole pixels so edges stay crisp (movePixels).
-        assert_eq!(s.pixel_move.as_ref().unwrap().offset, CGSize::new(26.0, 0.0));
+        assert_eq!(
+            s.pixel_move.as_ref().unwrap().offset,
+            CGSize::new(26.0, 0.0)
+        );
         s.end_pixel_move();
         let image = s
             .active_layer()
@@ -7060,8 +7318,16 @@ mod tests {
             .as_ref()
             .clone();
         assert_eq!(image.pixel(20, 20)[3], 0, "the origin becomes a hole");
-        assert_eq!(image.pixel(36, 20), [255, 0, 0, 255], "the pixels land 26 px over");
-        assert_eq!(image.pixel(60, 20), [0, 180, 0, 255], "the rest stays untouched");
+        assert_eq!(
+            image.pixel(36, 20),
+            [255, 0, 0, 255],
+            "the pixels land 26 px over"
+        );
+        assert_eq!(
+            image.pixel(60, 20),
+            [0, 180, 0, 255],
+            "the rest stays untouched"
+        );
         // The outline moves with the pixels, as one undo step.
         let selection = s.selection().unwrap();
         assert_eq!(selection.path.bounds().unwrap().min_x(), 36.0);
@@ -7104,7 +7370,10 @@ mod tests {
         rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
         s.add_mask_from_selection(true);
         assert!(s.is_mask_selected);
-        assert!(!s.begin_pixel_move(false), "a mask target has no pixels to lift");
+        assert!(
+            !s.begin_pixel_move(false),
+            "a mask target has no pixels to lift"
+        );
         assert!(s.pixel_move.is_none());
     }
 
@@ -7127,7 +7396,11 @@ mod tests {
             .as_ref()
             .clone();
         assert_eq!(image.pixel(20, 20), [255, 0, 0, 255], "the source stays");
-        assert_eq!(image.pixel(40, 20), [255, 0, 0, 255], "the copy lands 15 px over");
+        assert_eq!(
+            image.pixel(40, 20),
+            [255, 0, 0, 255],
+            "the copy lands 15 px over"
+        );
         assert_eq!(s.history.undo_name(), "Duplicate Pixels");
     }
 
@@ -7149,7 +7422,11 @@ mod tests {
             .clone();
         // Moving down refills all but the top 3 rows of the original outline.
         assert_eq!(image.pixel(20, 11)[3], 0, "the strip the pixels left");
-        assert_eq!(image.pixel(20, 23), [255, 0, 0, 255], "the pixels land 3 px down");
+        assert_eq!(
+            image.pixel(20, 23),
+            [255, 0, 0, 255],
+            "the pixels land 3 px down"
+        );
         let selection = s.selection().unwrap();
         assert_eq!(selection.path.bounds().unwrap().min_y(), 13.0);
         assert_eq!(s.history.undo_name(), "Move Pixels");
@@ -7166,7 +7443,11 @@ mod tests {
         s.drag_pixel_move(CGSize::new(4.0, 4.0));
         s.drag_pixel_move(CGSize::new(0.0, 0.0));
         s.end_pixel_move();
-        assert_eq!(s.history.undo_count(), undo_count, "a canceled-out drag is a no-op");
+        assert_eq!(
+            s.history.undo_count(),
+            undo_count,
+            "a canceled-out drag is a no-op"
+        );
         assert!(s.pixel_move.is_none());
         let image = s
             .active_layer()
@@ -7187,14 +7468,24 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "L"));
         rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
         assert_eq!(
-            s.displayed_selection().unwrap().path.bounds().unwrap().min_x(),
+            s.displayed_selection()
+                .unwrap()
+                .path
+                .bounds()
+                .unwrap()
+                .min_x(),
             10.0,
             "without a move the outline is the selection"
         );
         s.begin_pixel_move(false);
         s.drag_pixel_move(CGSize::new(7.0, 0.0));
         assert_eq!(
-            s.displayed_selection().unwrap().path.bounds().unwrap().min_x(),
+            s.displayed_selection()
+                .unwrap()
+                .path
+                .bounds()
+                .unwrap()
+                .min_x(),
             17.0,
             "during the drag the outline leads the pixels"
         );
@@ -7240,7 +7531,10 @@ mod tests {
             .image
             .as_ref()
             .clone();
-        assert!(image.pixel(20, 20)[0] > 200, "black inverts to white in place");
+        assert!(
+            image.pixel(20, 20)[0] > 200,
+            "black inverts to white in place"
+        );
         assert_eq!(image.pixel(75, 75)[0], 255, "unselected white stays");
         assert_eq!(image.pixel(5, 75)[0], 0, "unselected black stays");
         assert_eq!(s.history.undo_name(), "Invert");
@@ -7324,7 +7618,10 @@ mod tests {
         assert_eq!(doc.layers.len(), 2);
         let pasted = doc.layers.last().unwrap();
         assert_eq!(pasted.transform.origin, CGPoint::new(10.0, 10.0));
-        assert_eq!(pasted.asset.as_ref().unwrap().image.pixel(10, 10), [255, 0, 0, 255]);
+        assert_eq!(
+            pasted.asset.as_ref().unwrap().image.pixel(10, 10),
+            [255, 0, 0, 255]
+        );
         assert!(s.selection().is_none(), "pasting drops the selection");
         assert_eq!(s.history.undo_name(), "Paste");
     }
@@ -7347,7 +7644,10 @@ mod tests {
             .clone();
         assert_eq!(image.pixel(20, 20)[3], 0, "cut pixels leave the layer");
         assert_eq!(image.pixel(60, 60), [255, 0, 0, 255], "the rest stays");
-        assert!(s.pixel_clipboard.is_some(), "cut pixels land on the clipboard");
+        assert!(
+            s.pixel_clipboard.is_some(),
+            "cut pixels land on the clipboard"
+        );
     }
 
     #[test]
@@ -7363,7 +7663,10 @@ mod tests {
         let copied = doc.layers.last().unwrap();
         assert_ne!(Some(copied.id), active_before);
         assert_eq!(copied.transform.origin, CGPoint::new(10.0, 10.0));
-        assert_eq!(copied.asset.as_ref().unwrap().image.pixel(5, 5), [255, 0, 0, 255]);
+        assert_eq!(
+            copied.asset.as_ref().unwrap().image.pixel(5, 5),
+            [255, 0, 0, 255]
+        );
         assert_eq!(s.history.undo_name(), "Layer via Copy");
     }
 
@@ -7380,12 +7683,18 @@ mod tests {
         let floating = &doc.layers[1];
         assert_eq!(floating.name, "Floating Selection");
         assert_eq!(floating.transform.origin, CGPoint::new(10.0, 10.0));
-        assert_eq!(floating.asset.as_ref().unwrap().image.pixel(5, 5), [255, 0, 0, 255]);
+        assert_eq!(
+            floating.asset.as_ref().unwrap().image.pixel(5, 5),
+            [255, 0, 0, 255]
+        );
         assert_eq!(s.active_layer_id, Some(floating.id));
         // The source keeps the rest of its pixels but the selection is empty.
         let source = &doc.layers[0];
         assert_eq!(source.asset.as_ref().unwrap().image.pixel(20, 20)[3], 0);
-        assert_eq!(source.asset.as_ref().unwrap().image.pixel(60, 60), [255, 0, 0, 255]);
+        assert_eq!(
+            source.asset.as_ref().unwrap().image.pixel(60, 60),
+            [255, 0, 0, 255]
+        );
     }
 
     #[test]
@@ -7401,7 +7710,10 @@ mod tests {
         let doc = s.document.as_ref().unwrap();
         assert_eq!(doc.layers.len(), 1);
         let layer = &doc.layers[0];
-        assert_eq!(layer.asset.as_ref().unwrap().image.pixel(20, 20), [255, 0, 0, 255]);
+        assert_eq!(
+            layer.asset.as_ref().unwrap().image.pixel(20, 20),
+            [255, 0, 0, 255]
+        );
         assert_eq!(s.active_layer_id, Some(layer.id));
     }
 
@@ -7420,7 +7732,11 @@ mod tests {
         assert_eq!(doc.layers.len(), 1, "the floating layer merges away");
         let image = doc.layers[0].asset.as_ref().unwrap().image.as_ref().clone();
         assert_eq!(image.pixel(12, 12)[3], 0, "the vacated area stays clear");
-        assert_eq!(image.pixel(25, 20), [255, 0, 0, 255], "the pixels land moved");
+        assert_eq!(
+            image.pixel(25, 20),
+            [255, 0, 0, 255],
+            "the pixels land moved"
+        );
         assert_eq!(image.pixel(60, 60), [255, 0, 0, 255], "the rest stays");
         let selection = doc.selection.as_ref().unwrap();
         let bounds = selection.path.bounds().unwrap();
@@ -7431,7 +7747,10 @@ mod tests {
         s.undo();
         let doc = s.document.as_ref().unwrap();
         assert_eq!(doc.layers.len(), 1);
-        assert_eq!(doc.layers[0].asset.as_ref().unwrap().image.pixel(20, 20), [255, 0, 0, 255]);
+        assert_eq!(
+            doc.layers[0].asset.as_ref().unwrap().image.pixel(20, 20),
+            [255, 0, 0, 255]
+        );
     }
 
     #[test]
@@ -7447,7 +7766,10 @@ mod tests {
         s.cancel_transform();
         let doc = s.document.as_ref().unwrap();
         assert_eq!(doc.layers.len(), 1);
-        assert_eq!(doc.layers[0].asset.as_ref().unwrap().image.pixel(20, 20), [255, 0, 0, 255]);
+        assert_eq!(
+            doc.layers[0].asset.as_ref().unwrap().image.pixel(20, 20),
+            [255, 0, 0, 255]
+        );
         assert!(doc.selection.is_some(), "the selection comes back");
         assert_eq!(s.active_layer_id, Some(doc.layers[0].id));
     }
@@ -7474,7 +7796,11 @@ mod tests {
         assert!(folder.is_group);
         assert_eq!(folder.name, "Folder 1");
         // The two selected layers are the folder's children.
-        let children: Vec<&ImageLayer> = doc.layers.iter().filter(|l| l.parent_id == Some(folder.id)).collect();
+        let children: Vec<&ImageLayer> = doc
+            .layers
+            .iter()
+            .filter(|l| l.parent_id == Some(folder.id))
+            .collect();
         assert_eq!(children.len(), 2);
         let ids: Vec<Uuid> = children.iter().map(|l| l.id).collect();
         assert!(ids.contains(&first) && ids.contains(&second));
@@ -7620,16 +7946,23 @@ mod tests {
         let dir = std::env::temp_dir();
         let first = dir.join(format!("compositor-import-{}-a.png", std::process::id()));
         let image = image::RgbaImage::from_pixel(20, 10, image::Rgba([200, 40, 40, 255]));
-        image.save_with_format(&first, image::ImageFormat::Png).unwrap();
+        image
+            .save_with_format(&first, image::ImageFormat::Png)
+            .unwrap();
         let failures = s.import_images(&[first.clone()], None);
         assert!(failures.is_empty(), "{failures:?}");
-        let doc = s.document.as_ref().expect("the first image makes the canvas");
+        let doc = s
+            .document
+            .as_ref()
+            .expect("the first image makes the canvas");
         assert_eq!((doc.width, doc.height), (20, 10));
         assert_eq!(doc.layers.len(), 1);
         // A second image centers on the canvas.
         let second = dir.join(format!("compositor-import-{}-b.png", std::process::id()));
         let image = image::RgbaImage::from_pixel(10, 10, image::Rgba([40, 40, 200, 255]));
-        image.save_with_format(&second, image::ImageFormat::Png).unwrap();
+        image
+            .save_with_format(&second, image::ImageFormat::Png)
+            .unwrap();
         let failures = s.import_images(&[second.clone()], None);
         assert!(failures.is_empty(), "{failures:?}");
         let doc = s.document.as_ref().unwrap();
@@ -7650,10 +7983,16 @@ mod tests {
         // Over the per-side cap.
         assert!(!s.import_size_allowed(30_001, 1));
         // Over the 100-megapixel document budget once content exists.
-        assert!(s.import_size_allowed(5_000, 5_000), "25 MP fits an empty canvas");
+        assert!(
+            s.import_size_allowed(5_000, 5_000),
+            "25 MP fits an empty canvas"
+        );
         s.document.as_mut().unwrap().layers[0].asset =
             Some(ImportedImage::new(red_image(9_500), "L")); // 90.25 MP
-        assert!(!s.import_size_allowed(5_000, 5_000), "90.25 + 25 exceeds 100 MP");
+        assert!(
+            !s.import_size_allowed(5_000, 5_000),
+            "90.25 + 25 exceeds 100 MP"
+        );
     }
 
     #[test]
@@ -7729,7 +8068,10 @@ mod tests {
         assert!(s.recolor_text(layer_id, PaletteColor::new(1.0, 0.0, 0.0)));
         let layer = s.document.as_ref().unwrap().layer(layer_id).unwrap();
         let live = layer.live_text().expect("still live text");
-        assert_eq!((live.style.red, live.style.green, live.style.blue), (1.0, 0.0, 0.0));
+        assert_eq!(
+            (live.style.red, live.style.green, live.style.blue),
+            (1.0, 0.0, 0.0)
+        );
         assert_eq!(s.history.undo_name(), "Fill Text");
     }
 
@@ -7740,8 +8082,7 @@ mod tests {
         // x = 90, y = 90.
         let mut s = session();
         let id = s.document.as_ref().unwrap().layers[0].id;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "L"));
         s.document.as_mut().unwrap().layers[0].transform =
             LayerTransform::new(CGPoint::new(50.0, 50.0), CGSize::new(10.0, 10.0));
         s.select_layer(Some(id));
@@ -7764,8 +8105,7 @@ mod tests {
     fn snapping_off_disables_move_snapping() {
         let mut s = session();
         s.snapping_enabled = false;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "L"));
         s.document.as_mut().unwrap().layers[0].transform =
             LayerTransform::new(CGPoint::new(50.0, 50.0), CGSize::new(10.0, 10.0));
         s.select_layer(Some(s.document.as_ref().unwrap().layers[0].id));
@@ -7794,13 +8134,11 @@ mod tests {
     fn flipping_several_layers_uses_their_shared_box() {
         let mut s = session();
         let first = s.document.as_ref().unwrap().layers[0].id;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "A"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "A"));
         s.document.as_mut().unwrap().layers[0].transform =
             LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
         let second = blank_layer(&mut s, "B");
-        s.document.as_mut().unwrap().layers[1].asset =
-            Some(ImportedImage::new(red_image(10), "B"));
+        s.document.as_mut().unwrap().layers[1].asset = Some(ImportedImage::new(red_image(10), "B"));
         s.document.as_mut().unwrap().layers[1].transform =
             LayerTransform::new(CGPoint::new(50.0, 0.0), CGSize::new(10.0, 10.0));
         s.select_layers(&[first, second], Some(first));
@@ -7833,8 +8171,7 @@ mod tests {
         // vertical center guide for the canvas to draw.
         let mut s = session();
         let id = s.document.as_ref().unwrap().layers[0].id;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "L"));
         s.document.as_mut().unwrap().layers[0].transform =
             LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
         s.select_layer(Some(id));
@@ -7843,7 +8180,11 @@ mod tests {
         draft.origin = CGPoint::new(45.0, 0.0);
         let moved = s.snapped_move(draft, &[id], 10.0);
         assert!((moved.origin.x - 45.0).abs() < 1e-9, "{moved:?}");
-        assert_eq!(s.snap_guides.0, vec![50.0], "vertical center guide recorded");
+        assert_eq!(
+            s.snap_guides.0,
+            vec![50.0],
+            "vertical center guide recorded"
+        );
         // Committing clears the guides.
         s.commit_transform();
         assert_eq!(s.snap_guides, (Vec::new(), Vec::new()));
@@ -7854,9 +8195,21 @@ mod tests {
         let mut s = session();
         rectangular_selection(&mut s, 10.4, 10.0, 30.0, 30.0);
         s.nudge_selection(0.6, 0.0);
-        let bounds = s.document.as_ref().unwrap().selection.as_ref().unwrap().path.bounds().unwrap();
+        let bounds = s
+            .document
+            .as_ref()
+            .unwrap()
+            .selection
+            .as_ref()
+            .unwrap()
+            .path
+            .bounds()
+            .unwrap();
         // 0.6 + 0.6 rounds to whole pixels: the outline lands on an integer.
-        assert!((bounds.min_x() - bounds.min_x().round()).abs() < 1e-6, "{bounds:?}");
+        assert!(
+            (bounds.min_x() - bounds.min_x().round()).abs() < 1e-6,
+            "{bounds:?}"
+        );
     }
 
     #[test]
@@ -7892,15 +8245,14 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "L"));
         s.tool = NavigationTool::Gradient;
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         // The preview rebuilds from the endpoints.
         assert!(s.refresh_gradient().is_some());
         assert!(s.apply_gradient());
-        let image = s
-            .document
-            .as_ref()
-            .unwrap()
-            .layers[0]
+        let image = s.document.as_ref().unwrap().layers[0]
             .asset
             .as_ref()
             .unwrap()
@@ -7917,18 +8269,18 @@ mod tests {
         assert!(end[0] > start[0] + 150, "{start:?} {end:?}");
         assert_eq!(s.history.undo_name(), "Gradient");
         s.undo();
-        let image = s
-            .document
-            .as_ref()
-            .unwrap()
-            .layers[0]
+        let image = s.document.as_ref().unwrap().layers[0]
             .asset
             .as_ref()
             .unwrap()
             .image
             .as_ref()
             .clone();
-        assert_eq!(image.pixel(12, 50), [255, 0, 0, 255], "undo removes the gradient");
+        assert_eq!(
+            image.pixel(12, 50),
+            [255, 0, 0, 255],
+            "undo removes the gradient"
+        );
     }
 
     #[test]
@@ -7942,7 +8294,10 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "A"));
         let a = s.active_layer_id.unwrap();
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         // The active layer changes after the draft was opened.
         s.add_blank_layer();
         assert_ne!(s.active_layer_id, Some(a));
@@ -7967,7 +8322,10 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "A"));
         let a = s.active_layer_id.unwrap();
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         s.add_blank_layer();
         s.delete_layer(a);
         let before = s
@@ -7996,7 +8354,10 @@ mod tests {
         s.is_mask_selected = true;
         s.tool = NavigationTool::Gradient;
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         assert!(s.apply_gradient());
         let mask = s
             .document
@@ -8021,18 +8382,17 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "L"));
         s.tool = NavigationTool::Gradient;
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         let second = blank_layer(&mut s, "B");
         s.select_layer(Some(second));
         assert!(
             s.gradient_edit.is_none(),
             "switching layers applies the pending gradient"
         );
-        let image = s
-            .document
-            .as_ref()
-            .unwrap()
-            .layers[0]
+        let image = s.document.as_ref().unwrap().layers[0]
             .asset
             .as_ref()
             .unwrap()
@@ -8072,8 +8432,7 @@ mod tests {
     #[test]
     fn guide_creation_snaps_to_layer_edges() {
         let mut s = session();
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "L"));
         s.document.as_mut().unwrap().layers[0].transform =
             LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
         // 8 is within the 10px tolerance of the layer's right edge at 10.
@@ -8087,10 +8446,23 @@ mod tests {
         s.shows_guides = true;
         s.add_guide(GuideAxis::Vertical, 20.0);
         s.add_guide(GuideAxis::Vertical, 60.0);
-        assert_eq!(s.hit_guide(CGPoint::new(22.0, 10.0), 10.0), Some(s.document.as_ref().unwrap().guides[0].id));
-        assert_eq!(s.hit_guide(CGPoint::new(59.0, 10.0), 10.0), Some(s.document.as_ref().unwrap().guides[1].id));
-        assert_eq!(s.hit_guide(CGPoint::new(40.0, 10.0), 10.0), None, "no guide within tolerance");
-        assert_eq!(s.hit_guide(CGPoint::new(59.0, 10.0), 10.0), s.hit_guide(CGPoint::new(59.0, 10.0), 10.0));
+        assert_eq!(
+            s.hit_guide(CGPoint::new(22.0, 10.0), 10.0),
+            Some(s.document.as_ref().unwrap().guides[0].id)
+        );
+        assert_eq!(
+            s.hit_guide(CGPoint::new(59.0, 10.0), 10.0),
+            Some(s.document.as_ref().unwrap().guides[1].id)
+        );
+        assert_eq!(
+            s.hit_guide(CGPoint::new(40.0, 10.0), 10.0),
+            None,
+            "no guide within tolerance"
+        );
+        assert_eq!(
+            s.hit_guide(CGPoint::new(59.0, 10.0), 10.0),
+            s.hit_guide(CGPoint::new(59.0, 10.0), 10.0)
+        );
     }
 
     #[test]
@@ -8117,8 +8489,7 @@ mod tests {
     fn displayed_transform_prefers_the_pending_draft() {
         let mut s = session();
         let id = s.document.as_ref().unwrap().layers[0].id;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(10), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(10), "L"));
         let layer = s.document.as_ref().unwrap().layer(id).unwrap().clone();
         assert_eq!(s.displayed_transform(&layer), layer.transform);
         s.begin_transform();
@@ -8153,10 +8524,8 @@ mod tests {
                 end: CGPoint::new(1.0, 1.0),
             };
             let raster = crate::render::render_shape_image(&shape, 10, 10);
-            let mut layer = ImageLayer::with_asset(
-                ImportedImage::new(raster, "Shape"),
-                CGPoint::ZERO,
-            );
+            let mut layer =
+                ImageLayer::with_asset(ImportedImage::new(raster, "Shape"), CGPoint::ZERO);
             layer.id = id;
             layer.shape = Some(shape);
             doc.layers[0] = layer;
@@ -8169,7 +8538,10 @@ mod tests {
         let layer = s.document.as_ref().unwrap().layer(id).unwrap();
         assert_eq!(layer.transform.size, CGSize::new(30.0, 30.0));
         let asset = layer.asset.as_ref().unwrap();
-        assert_eq!(asset.image.width, 30, "the raster was redrawn, not stretched");
+        assert_eq!(
+            asset.image.width, 30,
+            "the raster was redrawn, not stretched"
+        );
         assert_eq!(asset.image.pixel(2, 2), [255, 0, 0, 255]);
     }
 
@@ -8194,7 +8566,10 @@ mod tests {
             Some(ImportedImage::new(red_image(100), "L"));
         s.tool = NavigationTool::Gradient;
         s.begin_gradient(CGPoint::new(10.0, 50.0));
-        s.move_gradient(Some(CGPoint::new(10.0, 50.0)), Some(CGPoint::new(90.0, 50.0)));
+        s.move_gradient(
+            Some(CGPoint::new(10.0, 50.0)),
+            Some(CGPoint::new(90.0, 50.0)),
+        );
         assert!(s.gradient_edit.is_some());
         assert!(s.can_undo(), "pending gradient is undoable");
         assert!(s.apply_gradient());
@@ -8258,7 +8633,11 @@ mod tests {
         assert!(core[3] > 180, "core stays mostly opaque: {core:?}");
         assert!(core[0] > 180, "{core:?}");
         // The blur spreads into the transparent surroundings by a few pixels.
-        assert!(out.pixel(36, 50)[3] > 0, "edge softens outward: {:?}", out.pixel(36, 50));
+        assert!(
+            out.pixel(36, 50)[3] > 0,
+            "edge softens outward: {:?}",
+            out.pixel(36, 50)
+        );
         assert_eq!(out.pixel(5, 5)[3], 0, "far regions stay empty");
     }
 
@@ -8298,8 +8677,14 @@ mod tests {
         );
         s.drag_crop(CGPoint::new(101.0, 40.0), None, false);
         let rect = s.crop_rect.expect("crop active");
-        assert!((rect.max_x() - 100.0).abs() <= 1.0, "right edge snapped: {rect:?}");
-        assert!((rect.min_x() - 20.0).abs() <= 1.0, "left edge untouched: {rect:?}");
+        assert!(
+            (rect.max_x() - 100.0).abs() <= 1.0,
+            "right edge snapped: {rect:?}"
+        );
+        assert!(
+            (rect.min_x() - 20.0).abs() <= 1.0,
+            "left edge untouched: {rect:?}"
+        );
     }
 
     #[test]
@@ -8309,7 +8694,10 @@ mod tests {
         s.begin_crop_drag(CGPoint::new(2.0, 20.0), crate::canvas::CropDragMode::Move);
         s.drag_crop(CGPoint::new(-2.0, 20.0), Some(1.5), false);
         let rect = s.crop_rect.expect("crop active");
-        assert!((rect.min_x() - 2.0).abs() < 3.0, "no snap with a ratio: {rect:?}");
+        assert!(
+            (rect.min_x() - 2.0).abs() < 3.0,
+            "no snap with a ratio: {rect:?}"
+        );
     }
 
     #[test]
@@ -8334,20 +8722,46 @@ mod tests {
         // Option-click the middle layer: clipped to the bottom one.
         s.toggle_clipping_mask(second);
         assert_eq!(
-            s.document.as_ref().unwrap().layer(second).unwrap().mask_source_id,
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(second)
+                .unwrap()
+                .mask_source_id,
             Some(first)
         );
         assert_eq!(s.history.undo_name(), "Create Clipping Mask");
         // Option-click the top layer: it shares the bottom one as its base.
         s.toggle_clipping_mask(third);
         assert_eq!(
-            s.document.as_ref().unwrap().layer(third).unwrap().mask_source_id,
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(third)
+                .unwrap()
+                .mask_source_id,
             Some(first)
         );
         // Releasing the first clipped child releases the whole stack above it.
         s.remove_live_mask(second);
-        assert_eq!(s.document.as_ref().unwrap().layer(second).unwrap().mask_source_id, None);
-        assert_eq!(s.document.as_ref().unwrap().layer(third).unwrap().mask_source_id, None);
+        assert_eq!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(second)
+                .unwrap()
+                .mask_source_id,
+            None
+        );
+        assert_eq!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(third)
+                .unwrap()
+                .mask_source_id,
+            None
+        );
         assert_eq!(s.history.undo_name(), "Release Clipping Mask");
     }
 
@@ -8362,8 +8776,24 @@ mod tests {
         s.toggle_clipping_mask(second);
         s.toggle_clipping_mask(third);
         s.toggle_clipping_mask(second);
-        assert_eq!(s.document.as_ref().unwrap().layer(second).unwrap().mask_source_id, None);
-        assert_eq!(s.document.as_ref().unwrap().layer(third).unwrap().mask_source_id, None);
+        assert_eq!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(second)
+                .unwrap()
+                .mask_source_id,
+            None
+        );
+        assert_eq!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(third)
+                .unwrap()
+                .mask_source_id,
+            None
+        );
         assert_eq!(s.history.undo_name(), "Release Clipping Mask");
         let _ = first;
     }
@@ -8377,7 +8807,15 @@ mod tests {
         // Linking the base to its own clipped child would close a cycle.
         assert!(!s.can_link_mask(second, first));
         assert!(!s.link_mask(second, first));
-        assert_eq!(s.document.as_ref().unwrap().layer(first).unwrap().mask_source_id, None);
+        assert_eq!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(first)
+                .unwrap()
+                .mask_source_id,
+            None
+        );
     }
 
     #[test]
@@ -8484,8 +8922,7 @@ mod tests {
     #[test]
     fn distorting_resamples_pixels_into_the_shape() {
         let mut s = session();
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(40), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(40), "L"));
         s.begin_transform();
         s.begin_distort();
         assert!(s.transform_edit.as_ref().unwrap().corners.is_some());
@@ -8519,8 +8956,7 @@ mod tests {
     fn distorting_a_linked_mask_warps_it_with_the_pixels() {
         let mut s = session();
         let id = s.document.as_ref().unwrap().layers[0].id;
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(red_image(40), "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(40), "L"));
         {
             let doc = s.document.as_mut().unwrap();
             let layer = doc.layer_mut(id).unwrap();
@@ -8825,8 +9261,7 @@ mod tests {
         let mut s = session();
         // A fully transparent layer: nothing remains to trim.
         let transparent = Bitmap::new(100, 100);
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(transparent, "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(transparent, "L"));
         assert!(!s.trim(&TrimOptions::default()));
         // Content in one corner: trim crops to it.
         let mut image = Bitmap::new(100, 100);
@@ -8835,8 +9270,7 @@ mod tests {
                 image.set_pixel(x, y, [255, 0, 0, 255]);
             }
         }
-        s.document.as_mut().unwrap().layers[0].asset =
-            Some(ImportedImage::new(image, "L"));
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(image, "L"));
         assert!(s.trim(&TrimOptions::default()));
         assert_eq!(s.document.as_ref().unwrap().width, 20);
     }
@@ -8923,7 +9357,11 @@ mod tests {
         assert_eq!(adjustment_of(&s, id).levels.ranges[0].white, 200.0);
 
         assert!(s.finish_adjustment_editing(false));
-        assert_eq!(adjustment_of(&s, id), original, "Cancel restores the opening value");
+        assert_eq!(
+            adjustment_of(&s, id),
+            original,
+            "Cancel restores the opening value"
+        );
         // The preview and the cancel never became an undo step.
         assert_eq!(s.history.undo_name(), "New Levels Adjustment");
         assert_eq!(s.adjustment_editing_id, None);
@@ -8944,7 +9382,11 @@ mod tests {
         settings.ranges[0].gamma = 2.0;
         s.levels = Some(settings.clone());
         assert!(s.preview_adjustment_editing(true));
-        assert_eq!(adjustment_of(&s, id).levels, settings, "the edited layer follows");
+        assert_eq!(
+            adjustment_of(&s, id).levels,
+            settings,
+            "the edited layer follows"
+        );
         assert!(
             s.document
                 .as_ref()
@@ -8985,7 +9427,11 @@ mod tests {
         assert!(s.begin_adjustment_editing(id));
 
         s.filter_edit = Some(crate::filters::FilterSettings {
-            exposure: crate::adjust::ExposureSettings { exposure: 1.5, offset: 0.0, gamma: 1.0 },
+            exposure: crate::adjust::ExposureSettings {
+                exposure: 1.5,
+                offset: 0.0,
+                gamma: 1.0,
+            },
             ..Default::default()
         });
         assert_eq!(
@@ -9015,7 +9461,9 @@ mod tests {
         s.add_adjustment(crate::adjustment::AdjustmentKind::Hsv);
         let hsv = s.active_layer_id.unwrap();
         assert!(s.begin_adjustment_editing(hsv));
-        s.hue_saturation = Some(crate::adjust::HueSaturationSettings::new(30.0, 10.0, 0.0, false));
+        s.hue_saturation = Some(crate::adjust::HueSaturationSettings::new(
+            30.0, 10.0, 0.0, false,
+        ));
         assert_eq!(s.edited_adjustment().unwrap().resolved_hsv().hue(), 30.0);
         assert!(s.preview_adjustment_editing(true));
         assert_eq!(adjustment_of(&s, hsv).resolved_hsv().hue(), 30.0);
@@ -9057,8 +9505,7 @@ mod project_install_tests {
             None,
         );
         let active = session.active_layer_id.unwrap();
-        let mut data =
-            crate::project::project_from_document(session.document.as_ref().unwrap());
+        let mut data = crate::project::project_from_document(session.document.as_ref().unwrap());
         data.manifest.active_layer_id = Some(active);
         (session, active, data)
     }

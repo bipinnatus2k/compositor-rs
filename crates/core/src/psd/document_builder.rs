@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 use crate::document::{ImageLayer, LayerBlendMode, LayerMask};
 use crate::geometry::{CGPoint, CGSize};
-use crate::raster::{thumbnail_of, Bitmap, GrayMask, ImportedImage};
+use crate::raster::{Bitmap, GrayMask, ImportedImage, thumbnail_of};
 use crate::transform::{LayerSampling, LayerTransform};
 
-use super::types::{blend_mode_from_psd, PsdConversion, PsdDocument, PsdLayerKind};
+use super::types::{PsdConversion, PsdDocument, PsdLayerKind, blend_mode_from_psd};
 
 /// `PSDImport`: everything the app needs to apply the import.
 #[derive(Clone)]
@@ -54,13 +54,21 @@ impl PsdDocumentBuilder {
             let mut notes: Vec<String> = Vec::new();
             match record.kind {
                 PsdLayerKind::Text => {
-                    notes.push("Editable Photoshop text becomes pixels and can\u{2019}t be retyped.".to_string());
+                    notes.push(
+                        "Editable Photoshop text becomes pixels and can\u{2019}t be retyped."
+                            .to_string(),
+                    );
                 }
                 PsdLayerKind::SmartObject => {
-                    notes.push("The smart object was rasterized. Linked contents can\u{2019}t be edited.".to_string());
+                    notes.push(
+                        "The smart object was rasterized. Linked contents can\u{2019}t be edited."
+                            .to_string(),
+                    );
                 }
                 PsdLayerKind::Effects => {
-                    notes.push("Layer effects were discarded, so the appearance may differ.".to_string());
+                    notes.push(
+                        "Layer effects were discarded, so the appearance may differ.".to_string(),
+                    );
                 }
                 PsdLayerKind::Vector => {
                     if record.shape.is_some() {
@@ -81,7 +89,8 @@ impl PsdDocumentBuilder {
                         record.blend_key
                     ));
                 }
-            } else if blend_mode_from_psd(&record.blend_key).is_none() && record.blend_key != "pass" {
+            } else if blend_mode_from_psd(&record.blend_key).is_none() && record.blend_key != "pass"
+            {
                 notes.push(format!(
                     "Blend mode \u{201C}{}\u{201D} isn\u{2019}t supported and will be applied as Normal.",
                     record.blend_key.trim()
@@ -89,9 +98,12 @@ impl PsdDocumentBuilder {
             }
             if record.kind == PsdLayerKind::Adjustment {
                 if record.adjustment.is_none() {
-                    notes.push("This adjustment type isn\u{2019}t supported and was skipped.".to_string());
+                    notes.push(
+                        "This adjustment type isn\u{2019}t supported and was skipped.".to_string(),
+                    );
                 } else {
-                    notes.push("Adjustment parameters may not match Photoshop exactly.".to_string());
+                    notes
+                        .push("Adjustment parameters may not match Photoshop exactly.".to_string());
                 }
             }
             for note in &notes {
@@ -101,7 +113,8 @@ impl PsdDocumentBuilder {
                 continue;
             }
             let opacity = record.opacity.clamp(0.0, 1.0);
-            let blend_mode = blend_mode_from_psd(&record.blend_key).unwrap_or(LayerBlendMode::Normal);
+            let blend_mode =
+                blend_mode_from_psd(&record.blend_key).unwrap_or(LayerBlendMode::Normal);
             let mut layer = if record.is_group {
                 // Folders carry an opacity of their own (1.1.6), which multiplies into what's inside
                 // them just as Photoshop's group opacity does.
@@ -201,15 +214,20 @@ impl PsdDocumentBuilder {
         }
         // Clipping: a clipped layer borrows the mask of the nearest unclipped
         // base below it in the same parent.
-        let id_to_index: HashMap<Uuid, usize> =
-            layers.iter().enumerate().map(|(index, layer)| (layer.id, index)).collect();
+        let id_to_index: HashMap<Uuid, usize> = layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| (layer.id, index))
+            .collect();
         let mut base_for_parent: HashMap<Option<Uuid>, Option<Uuid>> = HashMap::new();
         for record in &document.layers {
             let Some(&index) = id_to_index.get(&record.id) else {
                 continue;
             };
             if record.clipping {
-                let source = base_for_parent.get(&record.parent_id).and_then(|base| *base);
+                let source = base_for_parent
+                    .get(&record.parent_id)
+                    .and_then(|base| *base);
                 let supported = source
                     .and_then(|id| layers.iter().find(|layer| layer.id == id))
                     .map(|layer| !layer.is_group && layer.adjustment.is_none())

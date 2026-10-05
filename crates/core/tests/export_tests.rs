@@ -14,7 +14,7 @@
 //! `public.jpeg` magic bytes.
 
 use compositor_core::document::{CanvasDocument, ImageLayer};
-use compositor_core::export::{check_export_size, jpeg_data, png_data, JpegOptions};
+use compositor_core::export::{JpegOptions, check_export_size, jpeg_data, png_data};
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render::draw_live_composite;
@@ -47,7 +47,9 @@ fn red_strip_document(rotation: f64, flip: bool) -> CanvasDocument {
 
 fn export_png(document: &CanvasDocument) -> image::RgbaImage {
     let png = png_data(&draw_live_composite(document)).expect("png encodes");
-    image::load_from_memory(&png).expect("png decodes").to_rgba8()
+    image::load_from_memory(&png)
+        .expect("png decodes")
+        .to_rgba8()
 }
 
 /// A pixel as straight (unpremultiplied) components 0–1, as
@@ -75,14 +77,21 @@ fn png_preserves_dimensions_alpha_orientation_and_transforms() {
         (90.0, false, 1, 1, 1, 4),
     ] {
         let image = export_png(&red_strip_document(rotation, flip));
-        assert_eq!((image.width(), image.height()), (6, 6), "canvas size {rotation} {flip}");
+        assert_eq!(
+            (image.width(), image.height()),
+            (6, 6),
+            "canvas size {rotation} {flip}"
+        );
 
         let red = straight_at(&image, red_x, red_y);
         assert!(red[0] > 0.99, "red at ({red_x}, {red_y}): {red:?}");
         assert_eq!(red[3], 1.0, "red is opaque at ({red_x}, {red_y}): {red:?}");
 
         let clear = straight_at(&image, clear_x, clear_y);
-        assert_eq!(clear[3], 0.0, "transparent at ({clear_x}, {clear_y}): {clear:?}");
+        assert_eq!(
+            clear[3], 0.0,
+            "transparent at ({clear_x}, {clear_y}): {clear:?}"
+        );
 
         let corner = straight_at(&image, 0, 0);
         assert_eq!(corner[3], 0.0, "corner stays transparent: {corner:?}");
@@ -117,7 +126,9 @@ fn order_visibility_and_overwrite() {
         let png = png_data(&draw_live_composite(&document)).expect("png encodes");
         std::fs::write(&url, &png).expect("export writes");
         let stored = std::fs::read(&url).expect("overwritten file reads back");
-        let image = image::load_from_memory(&stored).expect("decodes").to_rgba8();
+        let image = image::load_from_memory(&stored)
+            .expect("decodes")
+            .to_rgba8();
         let pixel = straight_at(&image, 1, 1);
         if visible {
             assert!(pixel[2] > 0.99, "visible blue wins: {pixel:?}");
@@ -135,7 +146,10 @@ fn blank_canvas_and_oversized_canvas() {
     let blank = CanvasDocument::new(2, 2);
     let image = export_png(&blank);
     let pixel = straight_at(&image, 1, 1);
-    assert_eq!(pixel[3], 0.0, "a blank canvas exports transparent: {pixel:?}");
+    assert_eq!(
+        pixel[3], 0.0,
+        "a blank canvas exports transparent: {pixel:?}"
+    );
 
     // A 30,000 × 30,000 canvas breaches the 100-megapixel guard
     // (`ExportError.tooLarge` ← `check_export_size`).
@@ -163,9 +177,18 @@ fn jpeg_transparency_uses_chosen_matte_and_produces_opaque_pixels() {
         assert_eq!((decoded.width(), decoded.height()), (20, 12));
         let pixel = decoded.get_pixel(0, 0);
         assert_eq!(pixel[3], 255, "the matte makes it opaque: {pixel:?}");
-        assert!((pixel[0] as f64 / 255.0 - options.red).abs() < 0.03, "{pixel:?}");
-        assert!((pixel[1] as f64 / 255.0 - options.green).abs() < 0.03, "{pixel:?}");
-        assert!((pixel[2] as f64 / 255.0 - options.blue).abs() < 0.03, "{pixel:?}");
+        assert!(
+            (pixel[0] as f64 / 255.0 - options.red).abs() < 0.03,
+            "{pixel:?}"
+        );
+        assert!(
+            (pixel[1] as f64 / 255.0 - options.green).abs() < 0.03,
+            "{pixel:?}"
+        );
+        assert!(
+            (pixel[2] as f64 / 255.0 - options.blue).abs() < 0.03,
+            "{pixel:?}"
+        );
     }
 }
 
@@ -209,10 +232,17 @@ fn jpeg_quality_changes_bytes_and_decoded_pixels() {
             difference += (a[0] as f64 - b[0] as f64).abs();
         }
     }
-    assert!(difference > 1.0, "quality changes decoded pixels: {difference}");
+    assert!(
+        difference > 1.0,
+        "quality changes decoded pixels: {difference}"
+    );
 
     let url = std::env::temp_dir().join(format!("JPEG-{}.jpg", uuid::Uuid::new_v4()));
     std::fs::write(&url, &high).expect("write");
-    assert_eq!(std::fs::read(&url).expect("read back"), high, "the bytes round-trip");
+    assert_eq!(
+        std::fs::read(&url).expect("read back"),
+        high,
+        "the bytes round-trip"
+    );
     let _ = std::fs::remove_file(&url);
 }

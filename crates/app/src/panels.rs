@@ -16,13 +16,13 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui_kit::{
-    anchored, canvas, div, px, point, AnyElement, ClickEvent, Context, Global,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, SharedString, Styled, WeakEntity, Window,
-};
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::Sizable;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::{
+    AnyElement, ClickEvent, Context, Global, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
+    Styled, WeakEntity, Window, anchored, canvas, div, point, px,
+};
 
 use crate::ui::text_label;
 
@@ -95,7 +95,11 @@ impl FloatingPanels {
             self.open.push(entry);
             return;
         }
-        self.open.push(PanelState { name, title, placement });
+        self.open.push(PanelState {
+            name,
+            title,
+            placement,
+        });
     }
 
     /// `close()` hides the panel. Returns whether it was visible, so the
@@ -115,7 +119,10 @@ impl FloatingPanels {
 
     /// The panel's placement while open; `None` when not open.
     pub fn placement(&self, name: &str) -> Option<PanelPlacement> {
-        self.open.iter().find(|p| p.name == name).map(|p| p.placement)
+        self.open
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.placement)
     }
 
     /// Whether the open panel is docked (the renderer picks the right frame
@@ -169,7 +176,10 @@ impl FloatingPanels {
             return Some((x, y));
         }
         // Center the panel on the canvas center, then remember it.
-        let origin = (canvas_center.0 - panel_size.0 / 2.0, canvas_center.1 - panel_size.1 / 2.0);
+        let origin = (
+            canvas_center.0 - panel_size.0 / 2.0,
+            canvas_center.1 - panel_size.1 / 2.0,
+        );
         self.positions.insert(panel.name, origin);
         Some(origin)
     }
@@ -200,7 +210,9 @@ impl FloatingPanels {
             return false;
         }
         let title = self.title(name);
-        let placement = self.placement(name).expect("just checked the panel is open");
+        let placement = self
+            .placement(name)
+            .expect("just checked the panel is open");
         self.show(name, title, placement);
         true
     }
@@ -292,14 +304,17 @@ pub fn render_panel<E: 'static>(
         .py_2()
         .border_b_1()
         .border_color(gpui_kit::rgb(0x4a4a4a))
-        .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _window, cx| {
-            let state = cx.default_global::<PanelDragState>();
-            state.drag = Some(PanelDrag {
-                cookie,
-                origin: top_left,
-                grab: event.position,
-            });
-        })
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, _window, cx| {
+                let state = cx.default_global::<PanelDragState>();
+                state.drag = Some(PanelDrag {
+                    cookie,
+                    origin: top_left,
+                    grab: event.position,
+                });
+            },
+        )
         .child(
             div()
                 .flex_1()
@@ -357,29 +372,27 @@ fn drag_events_canvas<E: 'static>(
         |_bounds, _window, _cx| {},
         move |_bounds, _prepaint, window, _cx| {
             let app_move = app.clone();
-            window.on_mouse_event(
-                move |event: &MouseMoveEvent, _phase, window, cx| {
-                    let dragging = cx
-                        .try_global::<PanelDragState>()
-                        .and_then(|state| state.drag.as_ref())
-                        .map(|drag| drag.cookie);
-                    if dragging != Some(cookie) {
-                        return;
-                    }
-                    let drag = cx
-                        .global::<PanelDragState>()
-                        .drag
-                        .as_ref()
-                        .expect("checked above");
-                    let moved = drag
-                        .origin
-                        .add(event.position - drag.grab)
-                        .clamp_to_window(window);
-                    app_move
-                        .update(cx, |state, cx| on_moved(state, moved, window, cx))
-                        .ok();
-                },
-            );
+            window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
+                let dragging = cx
+                    .try_global::<PanelDragState>()
+                    .and_then(|state| state.drag.as_ref())
+                    .map(|drag| drag.cookie);
+                if dragging != Some(cookie) {
+                    return;
+                }
+                let drag = cx
+                    .global::<PanelDragState>()
+                    .drag
+                    .as_ref()
+                    .expect("checked above");
+                let moved = drag
+                    .origin
+                    .add(event.position - drag.grab)
+                    .clamp_to_window(window);
+                app_move
+                    .update(cx, |state, cx| on_moved(state, moved, window, cx))
+                    .ok();
+            });
             window.on_mouse_event(move |_event: &MouseUpEvent, _phase, _window, cx| {
                 let state = cx.default_global::<PanelDragState>();
                 if state.drag.as_ref().map(|drag| drag.cookie) == Some(cookie) {
@@ -506,7 +519,10 @@ mod tests {
         assert_eq!(origin.0, CANVAS_CENTER.0 - PANEL_SIZE.0 / 2.0);
         assert_eq!(origin.1, CANVAS_CENTER.1 - PANEL_SIZE.1 / 2.0);
         // The computed origin becomes the memory.
-        assert_eq!(panels.saved_position(panel_names::LEVELS_PANEL), Some(origin));
+        assert_eq!(
+            panels.saved_position(panel_names::LEVELS_PANEL),
+            Some(origin)
+        );
     }
 
     /// A remembered panel reopens at the last top-left.

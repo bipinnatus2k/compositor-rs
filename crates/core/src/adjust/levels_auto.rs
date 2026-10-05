@@ -36,9 +36,17 @@ impl LevelsAuto {
         let mut result = LevelsSettings::default();
         if *self == LevelsAuto::Contrast {
             // A shared interval preserves channel relationships.
-            let limits: Vec<(f64, f64)> = (1..4).filter_map(|c| endpoints(channel_bins(histogram, c))).collect();
-            let low = limits.iter().map(|limit| limit.0).fold(f64::INFINITY, f64::min);
-            let high = limits.iter().map(|limit| limit.1).fold(f64::NEG_INFINITY, f64::max);
+            let limits: Vec<(f64, f64)> = (1..4)
+                .filter_map(|c| endpoints(channel_bins(histogram, c)))
+                .collect();
+            let low = limits
+                .iter()
+                .map(|limit| limit.0)
+                .fold(f64::INFINITY, f64::min);
+            let high = limits
+                .iter()
+                .map(|limit| limit.1)
+                .fold(f64::NEG_INFINITY, f64::max);
             if low < high {
                 result.ranges[0] = LevelRange {
                     black: low,
@@ -134,7 +142,11 @@ mod tests {
         assert_eq!(linked.ranges[0].black, 20.0);
         assert_eq!(linked.ranges[0].white, 230.0);
         // The channel ranges stay at their defaults.
-        assert!(linked.ranges[1..4].iter().all(|r| *r == LevelRange::default()));
+        assert!(
+            linked.ranges[1..4]
+                .iter()
+                .all(|r| *r == LevelRange::default())
+        );
     }
 
     #[test]
@@ -281,7 +293,12 @@ mod tests {
             let mut bins = [0.0; 1024];
             levels_histogram(&bitmap, None, &mut bins);
             for mode in LevelsAuto::ALL {
-                assert!(mode.settings(&bins).is_identity(), "{:?} on {}", mode, value);
+                assert!(
+                    mode.settings(&bins).is_identity(),
+                    "{:?} on {}",
+                    mode,
+                    value
+                );
             }
         }
         // Mid-gray: every count lands in one bin, so the interval collapses.
@@ -303,6 +320,9 @@ mod tests {
         bitmap.set_pixel(1, 0, [255, 255, 255, 255]);
         let mut bins = [0.0; 1024];
         levels_histogram(&bitmap, None, &mut bins);
-        assert_eq!(LevelsAuto::Contrast.settings(&bins), LevelsSettings::default());
+        assert_eq!(
+            LevelsAuto::Contrast.settings(&bins),
+            LevelsSettings::default()
+        );
     }
 }

@@ -11,7 +11,7 @@
 //! Optional fields are omitted when nil, matching Swift's synthesized
 //! `encodeIfPresent`.
 
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
 use crate::blend::LayerBlendMode;
@@ -49,7 +49,7 @@ fn uuid_string(id: Uuid) -> String {
 pub(crate) mod serde_upper_uuid {
     //! UUIDs as uppercase hyphenated strings (Swift's `uuidString`); parsing is
     //! case-insensitive, exactly like `UUID(uuidString:)`.
-    use super::{de, Deserialize, Deserializer, Serializer, Uuid};
+    use super::{Deserialize, Deserializer, Serializer, Uuid, de};
 
     pub fn serialize<S: Serializer>(id: &Uuid, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&super::uuid_string(*id))
@@ -63,7 +63,7 @@ pub(crate) mod serde_upper_uuid {
 
 pub(crate) mod serde_upper_uuid_option {
     //! Optional UUIDs: JSON null (or a missing key) decodes to None.
-    use super::{de, Deserialize, Deserializer, Serializer, Uuid};
+    use super::{Deserialize, Deserializer, Serializer, Uuid, de};
 
     pub fn serialize<S: Serializer>(id: &Option<Uuid>, s: S) -> Result<S::Ok, S::Error> {
         match id {
@@ -107,7 +107,12 @@ pub struct ProjectManifest {
     pub document_id: Uuid,
     pub width: i64,
     pub height: i64,
-    #[serde(rename = "activeLayerID", with = "serde_upper_uuid_option", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "activeLayerID",
+        with = "serde_upper_uuid_option",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub active_layer_id: Option<Uuid>,
     /// Bottom to top.
     #[serde(default)]
@@ -147,7 +152,12 @@ pub struct ProjectLayerRecord {
     #[serde(rename = "imageFile", default, skip_serializing_if = "Option::is_none")]
     pub image_file: Option<String>,
     /// Version 2+; root nodes have no parent.
-    #[serde(rename = "parentID", with = "serde_upper_uuid_option", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "parentID",
+        with = "serde_upper_uuid_option",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub parent_id: Option<Uuid>,
     /// Version 2+.
     #[serde(rename = "isGroup", default, skip_serializing_if = "Option::is_none")]
@@ -162,19 +172,36 @@ pub struct ProjectLayerRecord {
     #[serde(rename = "maskFile", default, skip_serializing_if = "Option::is_none")]
     pub mask_file: Option<String>,
     /// Version 4+; defaults to true when a mask exists.
-    #[serde(rename = "maskEnabled", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maskEnabled",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mask_enabled: Option<bool>,
     /// Version 5+: a non-group layer supplying live alpha.
-    #[serde(rename = "maskSourceID", with = "serde_upper_uuid_option", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maskSourceID",
+        with = "serde_upper_uuid_option",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mask_source_id: Option<Uuid>,
     /// Version 7+; adjustment layers carry no image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjustment: Option<crate::adjustment::LayerAdjustment>,
     /// A mask moved apart from its layer: where it sits on the document.
-    #[serde(rename = "maskPlacement", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maskPlacement",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mask_placement: Option<ManifestTransform>,
     /// Nil (older projects) is linked.
-    #[serde(rename = "maskLinked", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maskLinked",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mask_linked: Option<bool>,
     /// A shape layer's shape, drawn again when the layer is scaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,9 +238,15 @@ impl ManifestTransform {
     /// `LayerTransform.isValid`: finite values, size 1...300,000, origin within
     /// a million pixels.
     pub fn is_valid(&self) -> bool {
-        [self.origin.x, self.origin.y, self.size.width, self.size.height, self.rotation]
-            .iter()
-            .all(|v| v.is_finite())
+        [
+            self.origin.x,
+            self.origin.y,
+            self.size.width,
+            self.size.height,
+            self.rotation,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
             && (1.0..=300_000.0).contains(&self.size.width)
             && (1.0..=300_000.0).contains(&self.size.height)
             && self.origin.x.abs() <= 1_000_000.0
@@ -401,9 +434,17 @@ pub struct ManifestEffects {
     pub stroke: Option<StrokeEffect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<ShadowEffect>,
-    #[serde(rename = "colorOverlay", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "colorOverlay",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub color_overlay: Option<ColorOverlayEffect>,
-    #[serde(rename = "innerShadow", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "innerShadow",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub inner_shadow: Option<InnerShadowEffect>,
     #[serde(rename = "outerGlow", default, skip_serializing_if = "Option::is_none")]
     pub outer_glow: Option<OuterGlowEffect>,
@@ -512,7 +553,10 @@ mod tests {
         }
         // UUIDs are uppercase, image files uppercase .png, and omitted
         // optionals stay out of the JSON.
-        assert!(json.contains(&format!("\"documentID\": \"{}\"", uuid_string(manifest.document_id))));
+        assert!(json.contains(&format!(
+            "\"documentID\": \"{}\"",
+            uuid_string(manifest.document_id)
+        )));
         assert!(json.contains(&format!("\"id\": \"{}\"", uuid_string(id))));
         assert!(!json.contains("maskFile"));
         assert!(!json.contains("parentID"));
@@ -555,7 +599,13 @@ mod tests {
     #[test]
     fn mask_file_names_are_uppercase() {
         let id = Uuid::parse_str("aabbccdd-1122-3344-5566-778899aabbcc").unwrap();
-        assert_eq!(image_file_name(id), "AABBCCDD-1122-3344-5566-778899AABBCC.png");
-        assert_eq!(mask_file_name(id), "AABBCCDD-1122-3344-5566-778899AABBCC.mask.png");
+        assert_eq!(
+            image_file_name(id),
+            "AABBCCDD-1122-3344-5566-778899AABBCC.png"
+        );
+        assert_eq!(
+            mask_file_name(id),
+            "AABBCCDD-1122-3344-5566-778899AABBCC.mask.png"
+        );
     }
 }

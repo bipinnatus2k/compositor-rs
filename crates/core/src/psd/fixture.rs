@@ -58,7 +58,11 @@ impl PsdFixture {
 }
 
 /// File order is bottom-to-top. Photoshop groups are type 3, children, then type 1/2.
-fn emit(document: &PsdDocument, parent: Option<Uuid>, prepared: &mut Vec<Prepared>) -> Result<(), PsdError> {
+fn emit(
+    document: &PsdDocument,
+    parent: Option<Uuid>,
+    prepared: &mut Vec<Prepared>,
+) -> Result<(), PsdError> {
     for record in &document.layers {
         if record.parent_id != parent {
             continue;
@@ -78,7 +82,11 @@ fn emit(document: &PsdDocument, parent: Option<Uuid>, prepared: &mut Vec<Prepare
             emit(document, Some(record.id), prepared)?;
             prepared.push(empty_layer(
                 &record.name,
-                if record.blend_key == "pass" { "pass" } else { &record.blend_key },
+                if record.blend_key == "pass" {
+                    "pass"
+                } else {
+                    &record.blend_key
+                },
                 1,
                 record.is_visible,
                 record.opacity,
@@ -253,7 +261,8 @@ fn write_record(buffer: &mut PsdBuffer, item: &Prepared) {
 fn extra_data(item: &Prepared) -> Vec<u8> {
     let mut extra = PsdBuffer::default();
     let record = &item.record;
-    if record.mask.is_some() && item.mask_right > item.mask_left && item.mask_bottom > item.mask_top {
+    if record.mask.is_some() && item.mask_right > item.mask_left && item.mask_bottom > item.mask_top
+    {
         extra.u32(20);
         extra.i32(clamp_i32(item.mask_top));
         extra.i32(clamp_i32(item.mask_left));
@@ -284,10 +293,18 @@ fn extra_data(item: &Prepared) -> Vec<u8> {
         let blend = if item.is_divider {
             "norm".to_string()
         } else {
-            let base = if record.blend_key == "pass" { "pass" } else { record.blend_key.as_str() };
+            let base = if record.blend_key == "pass" {
+                "pass"
+            } else {
+                record.blend_key.as_str()
+            };
             format!("{base}    ")
         };
-        blend.as_bytes().iter().take(4).for_each(|&b| payload.push(b));
+        blend
+            .as_bytes()
+            .iter()
+            .take(4)
+            .for_each(|&b| payload.push(b));
         write_additional(&mut extra, "lsct", &payload);
     }
     extra.data
@@ -330,7 +347,12 @@ fn resolution_resource(resolution: f64) -> Vec<u8> {
     resource.data
 }
 
-fn append_composite(file: &mut PsdBuffer, composite: &Bitmap, width: usize, height: usize) -> Result<(), PsdError> {
+fn append_composite(
+    file: &mut PsdBuffer,
+    composite: &Bitmap,
+    width: usize,
+    height: usize,
+) -> Result<(), PsdError> {
     // Swift redraws the image into a width×height context; tests pass matching
     // bitmaps, so a resample covers the general case.
     let flattened = if composite.width == width && composite.height == height {

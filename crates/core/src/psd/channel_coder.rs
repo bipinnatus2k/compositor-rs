@@ -12,7 +12,12 @@ pub struct PsdChannelCoder;
 
 impl PsdChannelCoder {
     /// Decodes one channel plane to `width * height` gray bytes.
-    pub fn decode(compression: i64, width: usize, height: usize, data: &[u8]) -> Result<Vec<u8>, PsdError> {
+    pub fn decode(
+        compression: i64,
+        width: usize,
+        height: usize,
+        data: &[u8],
+    ) -> Result<Vec<u8>, PsdError> {
         if width == 0 || height == 0 {
             return Ok(Vec::new());
         }
@@ -60,7 +65,11 @@ impl PsdChannelCoder {
     }
 
     /// The Swift `maskImage(width:height:gray:)` — an 8-bit gray plane.
-    pub fn mask_image(width: usize, height: usize, gray: Vec<u8>) -> Result<crate::raster::GrayMask, PsdError> {
+    pub fn mask_image(
+        width: usize,
+        height: usize,
+        gray: Vec<u8>,
+    ) -> Result<crate::raster::GrayMask, PsdError> {
         if gray.len() != width * height {
             return Err(PsdError::Truncated);
         }

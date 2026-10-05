@@ -12,16 +12,15 @@ pub mod pixel;
 
 pub use curves::{CurvePoint, CurvesSettings};
 pub use hue_saturation::{
-    adjust_hsl, apply_cube_rgba8, hue_response, ColorCube, ColorRange, HueBand, HueSampleMode,
-    HueSaturationSettings, RangeAdjustment, CUBE_DIMENSION,
+    CUBE_DIMENSION, ColorCube, ColorRange, HueBand, HueSampleMode, HueSaturationSettings,
+    RangeAdjustment, adjust_hsl, apply_cube_rgba8, hue_response,
 };
 pub use image_adjustments::{
-    adjust_black_white, adjust_color_balance, adjust_gradient_map, adjust_grain, AdjustmentColor,
-    BlackWhiteSettings, ColorBalanceSettings, ExposureSettings, GradientMapSettings, GrainSettings,
+    AdjustmentColor, BlackWhiteSettings, ColorBalanceSettings, ExposureSettings,
+    GradientMapSettings, GrainSettings, adjust_black_white, adjust_color_balance,
+    adjust_gradient_map, adjust_grain,
 };
-pub use levels::{
-    levels_apply, levels_histogram, LevelRange, LevelsChannel, LevelsSettings,
-};
+pub use levels::{LevelRange, LevelsChannel, LevelsSettings, levels_apply, levels_histogram};
 
 /// Applies `HueSaturationSettings` to a whole bitmap (adjustment layers do
 /// this on their layer's pixels).
@@ -46,7 +45,11 @@ pub fn levels_apply_settings(bitmap: &mut crate::raster::Bitmap, settings: &Leve
         return;
     }
     let mut tables = [0.0f32; 768];
-    for channel in [LevelsChannel::Red, LevelsChannel::Green, LevelsChannel::Blue] {
+    for channel in [
+        LevelsChannel::Red,
+        LevelsChannel::Green,
+        LevelsChannel::Blue,
+    ] {
         for v in 0..256usize {
             tables[(channel.index() - 1) * 256 + v] =
                 settings.apply(v as f64 / 255.0, channel) as f32;
@@ -66,7 +69,9 @@ mod tests {
         let mut bitmap = crate::raster::Bitmap {
             width: 4,
             height: 1,
-            data: vec![200, 100, 50, 255, 0, 0, 0, 0, 30, 60, 90, 128, 255, 255, 0, 170],
+            data: vec![
+                200, 100, 50, 255, 0, 0, 0, 0, 30, 60, 90, 128, 255, 255, 0, 170,
+            ],
         };
         let before = bitmap.data.clone();
         hue_saturation_apply(&mut bitmap, &HueSaturationSettings::default());
@@ -85,7 +90,9 @@ mod tests {
         let mut bitmap = crate::raster::Bitmap {
             width: 4,
             height: 1,
-            data: vec![200, 100, 50, 255, 10, 8, 6, 128, 255, 255, 255, 255, 90, 30, 200, 255],
+            data: vec![
+                200, 100, 50, 255, 10, 8, 6, 128, 255, 255, 255, 255, 90, 30, 200, 255,
+            ],
         };
 
         // Exact per-pixel reference.

@@ -115,7 +115,10 @@ impl ToolDefaults {
     /// [`load`]: Self::load
     /// [`load_or_default`]: Self::load_or_default
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
-        ToolDefaults { path: Some(path.into()), ..Self::default() }
+        ToolDefaults {
+            path: Some(path.into()),
+            ..Self::default()
+        }
     }
 
     /// The table's persistence target, if any.
@@ -168,9 +171,15 @@ impl ToolDefaults {
     }
 
     fn load_from(&mut self, path: Option<&Path>) {
-        let Some(path) = path.or(self.path.as_deref()) else { return };
-        let Ok(text) = fs::read_to_string(path) else { return };
-        let Ok(stored) = serde_json::from_str::<StoredToolDefaults>(&text) else { return };
+        let Some(path) = path.or(self.path.as_deref()) else {
+            return;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(stored) = serde_json::from_str::<StoredToolDefaults>(&text) else {
+            return;
+        };
         if stored.version != STORAGE_VERSION {
             return;
         }
@@ -191,7 +200,9 @@ impl ToolDefaults {
     /// MOVEFILE_REPLACE_EXISTING on Windows), so a crash mid-write can never
     /// leave a half file behind. Creates the parent directories on demand.
     pub fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let stored = StoredToolDefaults {
             version: STORAGE_VERSION,
             values: self.values.clone(),
@@ -213,10 +224,16 @@ impl ToolDefaults {
 
 /// Snapshots every persisted toggle off a session and the app-level Auto
 /// Select flag into a table (the values Swift's `didSet`s write through).
-pub fn capture_session(session: &EditorSession, transform_auto_select: bool) -> BTreeMap<String, bool> {
+pub fn capture_session(
+    session: &EditorSession,
+    transform_auto_select: bool,
+) -> BTreeMap<String, bool> {
     BTreeMap::from([
         (AUTO_SELECT.to_string(), transform_auto_select),
-        (TRANSFORM_CONTROLS.to_string(), session.shows_transform_controls),
+        (
+            TRANSFORM_CONTROLS.to_string(),
+            session.shows_transform_controls,
+        ),
         (PIXEL_GRID.to_string(), session.shows_pixel_grid),
         (GRID.to_string(), session.shows_grid),
         (GUIDES.to_string(), session.shows_guides),
@@ -526,7 +543,11 @@ mod tests {
         // A fresh session picks the table up wholesale.
         let mut restored = EditorSession::new();
         let mut auto_select = false;
-        let defaults = ToolDefaults { path: None, values: values.clone(), numbers: BTreeMap::new() };
+        let defaults = ToolDefaults {
+            path: None,
+            values: values.clone(),
+            numbers: BTreeMap::new(),
+        };
         apply_to_session(&defaults, &mut restored, &mut auto_select);
         assert!(auto_select);
         assert!(!restored.shows_transform_controls);

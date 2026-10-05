@@ -91,7 +91,12 @@ impl ExposureSettings {
 
     pub fn normalized(&self) -> Self {
         ExposureSettings {
-            exposure: clamp_double(self.exposure, Self::EXPOSURE_RANGE.0, Self::EXPOSURE_RANGE.1, 0.0),
+            exposure: clamp_double(
+                self.exposure,
+                Self::EXPOSURE_RANGE.0,
+                Self::EXPOSURE_RANGE.1,
+                0.0,
+            ),
             offset: clamp_double(self.offset, Self::OFFSET_RANGE.0, Self::OFFSET_RANGE.1, 0.0),
             gamma: clamp_double(self.gamma, Self::GAMMA_RANGE.0, Self::GAMMA_RANGE.1, 1.0),
         }
@@ -109,7 +114,9 @@ impl ExposureSettings {
             } else {
                 ((encoded + 0.055) / 1.055).powf(2.4)
             };
-            linear = (linear * scale + self.offset).max(0.0).powf(1.0 / self.gamma);
+            linear = (linear * scale + self.offset)
+                .max(0.0)
+                .powf(1.0 / self.gamma);
             let output = if linear <= 0.0031308 {
                 linear * 12.92
             } else {
@@ -305,9 +312,16 @@ impl BlackWhiteSettings {
     pub const RANGE: (f64, f64) = (-200.0, 300.0);
 
     pub fn is_valid(&self) -> bool {
-        [self.reds, self.yellows, self.greens, self.cyans, self.blues, self.magentas]
-            .iter()
-            .all(|v| v.is_finite() && (Self::RANGE.0..=Self::RANGE.1).contains(v))
+        [
+            self.reds,
+            self.yellows,
+            self.greens,
+            self.cyans,
+            self.blues,
+            self.magentas,
+        ]
+        .iter()
+        .all(|v| v.is_finite() && (Self::RANGE.0..=Self::RANGE.1).contains(v))
             && self.tint_hue.is_finite()
             && (0.0..=360.0).contains(&self.tint_hue)
             && self.tint_saturation.is_finite()
@@ -339,15 +353,21 @@ impl BlackWhiteSettings {
 }
 
 /// `adjust_black_white` (AdjustPixels.c).
-pub fn adjust_black_white(bitmap: &mut Bitmap, weights: &[f32; 6], tint: bool, tint_hue: f64, tint_saturation: f64) {
+pub fn adjust_black_white(
+    bitmap: &mut Bitmap,
+    weights: &[f32; 6],
+    tint: bool,
+    tint_hue: f64,
+    tint_saturation: f64,
+) {
     for p in bitmap.data.chunks_exact_mut(4) {
         let alpha = p[3] as f32;
         if alpha == 0.0 {
             continue;
         }
-        let mut r = (p[0] as f32 * 255.0 / alpha).min(255.0) / 255.0;
-        let mut g = (p[1] as f32 * 255.0 / alpha).min(255.0) / 255.0;
-        let mut b = (p[2] as f32 * 255.0 / alpha).min(255.0) / 255.0;
+        let r = (p[0] as f32 * 255.0 / alpha).min(255.0) / 255.0;
+        let g = (p[1] as f32 * 255.0 / alpha).min(255.0) / 255.0;
+        let b = (p[2] as f32 * 255.0 / alpha).min(255.0) / 255.0;
         let mx = r.max(g).max(b);
         let mn = r.min(g).min(b);
         let md = r + g + b - mx - mn;
@@ -458,7 +478,9 @@ impl ColorBalanceSettings {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.all().iter().all(|v| v.is_finite() && (Self::RANGE.0..=Self::RANGE.1).contains(v))
+        self.all()
+            .iter()
+            .all(|v| v.is_finite() && (Self::RANGE.0..=Self::RANGE.1).contains(v))
     }
 
     pub fn is_identity(&self) -> bool {
@@ -488,7 +510,13 @@ impl ColorBalanceSettings {
             (self.highlight_magenta_green / 100.0) as f32,
             (self.highlight_yellow_blue / 100.0) as f32,
         ];
-        adjust_color_balance(&mut result, &shadows, &midtones, &highlights, self.preserve_luminosity);
+        adjust_color_balance(
+            &mut result,
+            &shadows,
+            &midtones,
+            &highlights,
+            self.preserve_luminosity,
+        );
         result
     }
 }
@@ -508,7 +536,13 @@ fn tonal_weights(v: f32) -> (f32, f32, f32) {
 }
 
 /// `adjust_color_balance` (AdjustPixels.c).
-pub fn adjust_color_balance(bitmap: &mut Bitmap, shadows: &[f32; 3], midtones: &[f32; 3], highlights: &[f32; 3], preserve_luminosity: bool) {
+pub fn adjust_color_balance(
+    bitmap: &mut Bitmap,
+    shadows: &[f32; 3],
+    midtones: &[f32; 3],
+    highlights: &[f32; 3],
+    preserve_luminosity: bool,
+) {
     for p in bitmap.data.chunks_exact_mut(4) {
         let alpha = p[3] as f32;
         if alpha == 0.0 {
@@ -590,14 +624,30 @@ impl GrainSettings {
 
     pub fn normalized(&self) -> Self {
         GrainSettings {
-            amount: clamp_double(self.amount, Self::AMOUNT_RANGE.0, Self::AMOUNT_RANGE.1, 25.0),
+            amount: clamp_double(
+                self.amount,
+                Self::AMOUNT_RANGE.0,
+                Self::AMOUNT_RANGE.1,
+                25.0,
+            ),
             size: clamp_double(self.size, Self::SIZE_RANGE.0, Self::SIZE_RANGE.1, 1.5),
-            roughness: clamp_double(self.roughness, Self::ROUGHNESS_RANGE.0, Self::ROUGHNESS_RANGE.1, 50.0),
+            roughness: clamp_double(
+                self.roughness,
+                Self::ROUGHNESS_RANGE.0,
+                Self::ROUGHNESS_RANGE.1,
+                50.0,
+            ),
             seed: self.seed,
         }
     }
 
-    pub fn apply(&self, image: &Bitmap, origin: crate::geometry::CGPoint, units_per_pixel: f64, seed: Option<u32>) -> Bitmap {
+    pub fn apply(
+        &self,
+        image: &Bitmap,
+        origin: crate::geometry::CGPoint,
+        units_per_pixel: f64,
+        seed: Option<u32>,
+    ) -> Bitmap {
         let mut result = image.clone();
         if !self.is_valid() || !units_per_pixel.is_finite() || units_per_pixel <= 0.0 {
             return result;
@@ -634,7 +684,9 @@ fn mix32(x: u32) -> u32 {
 /// A value in −1…1 for an integer lattice point, fixed by the point and the seed.
 #[inline]
 fn lattice(ix: i64, iy: i64, seed: u32) -> f32 {
-    let h = mix32((ix as u32).wrapping_mul(0x9E3779B1) ^ mix32((iy as u32).wrapping_mul(0x85EBCA77) ^ seed));
+    let h = mix32(
+        (ix as u32).wrapping_mul(0x9E3779B1) ^ mix32((iy as u32).wrapping_mul(0x85EBCA77) ^ seed),
+    );
     (h & 0xFFFF) as f32 / 65535.0 + (h >> 16) as f32 / 65535.0 - 1.0
 }
 
@@ -908,7 +960,10 @@ mod tests {
             amount: 0.0,
             ..Default::default()
         };
-        assert_eq!(z.apply(&img, crate::geometry::CGPoint::ZERO, 1.0, None), img);
+        assert_eq!(
+            z.apply(&img, crate::geometry::CGPoint::ZERO, 1.0, None),
+            img
+        );
     }
 
     #[test]
@@ -921,7 +976,12 @@ mod tests {
         }
         let g = GrainSettings::default();
         let at_origin = g.apply(&img, crate::geometry::CGPoint::new(0.0, 0.0), 1.0, Some(1));
-        let shifted = g.apply(&img, crate::geometry::CGPoint::new(100.0, 0.0), 1.0, Some(1));
+        let shifted = g.apply(
+            &img,
+            crate::geometry::CGPoint::new(100.0, 0.0),
+            1.0,
+            Some(1),
+        );
         assert_ne!(at_origin, shifted);
     }
 
@@ -929,6 +989,9 @@ mod tests {
     fn adjustment_color_validation() {
         assert!(AdjustmentColor::new(0.0, 0.5, 1.0).is_valid());
         assert!(!AdjustmentColor::new(0.0, 0.5, 1.1).is_valid());
-        assert_eq!(AdjustmentColor::from_palette(PaletteColor::WHITE), AdjustmentColor::new(1.0, 1.0, 1.0));
+        assert_eq!(
+            AdjustmentColor::from_palette(PaletteColor::WHITE),
+            AdjustmentColor::new(1.0, 1.0, 1.0)
+        );
     }
 }

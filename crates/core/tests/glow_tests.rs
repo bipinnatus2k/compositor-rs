@@ -13,8 +13,8 @@
 
 use compositor_core::document::{CanvasDocument, ImageLayer, LayerTextStyle};
 use compositor_core::effects::{
-    effect_margin, render_effects, InnerGlowEffect, LayerEffectKind, LayerEffects, OuterGlowEffect,
-    ShadowEffect, StrokeEffect,
+    InnerGlowEffect, LayerEffectKind, LayerEffects, OuterGlowEffect, ShadowEffect, StrokeEffect,
+    effect_margin, render_effects,
 };
 use compositor_core::export::png_data;
 use compositor_core::geometry::{CGPoint, CGSize};
@@ -62,7 +62,10 @@ fn inner_glow_defaults_and_validation() {
     let effect = InnerGlowEffect::default();
     assert_eq!(effect.size, 10.0);
     assert_eq!(effect.opacity, 0.75);
-    assert_eq!(effect.color(), compositor_core::document::PaletteColor::new(1.0, 1.0, 1.0));
+    assert_eq!(
+        effect.color(),
+        compositor_core::document::PaletteColor::new(1.0, 1.0, 1.0)
+    );
     assert!(effect.is_enabled());
     assert!(effect.is_valid());
 
@@ -96,7 +99,10 @@ fn inner_glow_codable_round_trip() {
     assert_eq!(decoded, effect);
     assert_eq!(decoded.size, 25.0);
     assert_eq!(decoded.opacity, 0.85);
-    assert_eq!(decoded.color(), compositor_core::document::PaletteColor::new(1.0, 0.5, 0.2));
+    assert_eq!(
+        decoded.color(),
+        compositor_core::document::PaletteColor::new(1.0, 0.5, 0.2)
+    );
     assert!(decoded.is_enabled());
 }
 
@@ -185,11 +191,19 @@ fn inner_glow_renders_inside_source_without_bounds_expansion() {
     // Near the edge inside the square, inner glow should tint the pixel yellow
     let edge = straight(&rendered, inset + 2, inset + 20);
     assert!(edge[3] > 0.9, "edge alpha {:?}", edge);
-    assert!(edge[0] > 0.3 && edge[1] > 0.3, "edge is yellow-tinted {:?}", edge);
+    assert!(
+        edge[0] > 0.3 && edge[1] > 0.3,
+        "edge is yellow-tinted {:?}",
+        edge
+    );
 
     // In the deep center, the black source dominates
     let center = straight(&rendered, inset + 20, inset + 20);
-    assert!(center[0] < 0.2 && center[1] < 0.2, "center stays black {:?}", center);
+    assert!(
+        center[0] < 0.2 && center[1] < 0.2,
+        "center stays black {:?}",
+        center
+    );
 }
 
 /// Swift `innerGlowRendersAroundTextGlyphs`.
@@ -267,7 +281,9 @@ fn inner_glow_preserved_in_export() {
 
     let composite = draw_live_composite(&document);
     let png = png_data(&composite).expect("png encodes");
-    let decoded = image::load_from_memory(&png).expect("png decodes").to_rgba8();
+    let decoded = image::load_from_memory(&png)
+        .expect("png decodes")
+        .to_rgba8();
 
     // Search for an edge pixel inside the 30x30 square placed at (20, 20)
     // with inner glow
@@ -464,9 +480,24 @@ fn outer_glow_renders_omnidirectionally() {
     // (box-approximated) Gaussian; this port's exact discrete Gaussian lands
     // the 5px-out samples at a 0.051 spread for an even-width square, so the
     // symmetry band is 0.06 here — see the porting report.
-    assert!((left_glow[3] - right_glow[3]).abs() < 0.06, "left {:?} right {:?}", left_glow, right_glow);
-    assert!((top_glow[3] - bottom_glow[3]).abs() < 0.06, "top {:?} bottom {:?}", top_glow, bottom_glow);
-    assert!((left_glow[3] - top_glow[3]).abs() < 0.06, "left {:?} top {:?}", left_glow, top_glow);
+    assert!(
+        (left_glow[3] - right_glow[3]).abs() < 0.06,
+        "left {:?} right {:?}",
+        left_glow,
+        right_glow
+    );
+    assert!(
+        (top_glow[3] - bottom_glow[3]).abs() < 0.06,
+        "top {:?} bottom {:?}",
+        top_glow,
+        bottom_glow
+    );
+    assert!(
+        (left_glow[3] - top_glow[3]).abs() < 0.06,
+        "left {:?} top {:?}",
+        left_glow,
+        top_glow
+    );
 }
 
 /// Swift `outerGlowSizeAndOpacityVariations`.
@@ -504,8 +535,16 @@ fn outer_glow_size_and_opacity_variations() {
     assert!(large_inset > small_inset);
 
     // Sample point 8px outside square (square starts at inset + 10)
-    let small_far = straight(&small_rendered, small_inset as usize + 2, small_inset as usize + 20);
-    let large_far = straight(&large_rendered, large_inset as usize + 2, large_inset as usize + 20);
+    let small_far = straight(
+        &small_rendered,
+        small_inset as usize + 2,
+        small_inset as usize + 20,
+    );
+    let large_far = straight(
+        &large_rendered,
+        large_inset as usize + 2,
+        large_inset as usize + 20,
+    );
 
     // Larger glow reaches further out
     assert!(
@@ -542,8 +581,16 @@ fn outer_glow_size_and_opacity_variations() {
     let (low_rendered, low_inset) = render_effects(&image, None, &low_opacity);
     let (high_rendered, high_inset) = render_effects(&image, None, &high_opacity);
 
-    let low_sample = straight(&low_rendered, low_inset as usize + 5, low_inset as usize + 20);
-    let high_sample = straight(&high_rendered, high_inset as usize + 5, high_inset as usize + 20);
+    let low_sample = straight(
+        &low_rendered,
+        low_inset as usize + 5,
+        low_inset as usize + 20,
+    );
+    let high_sample = straight(
+        &high_rendered,
+        high_inset as usize + 5,
+        high_inset as usize + 20,
+    );
 
     assert!(
         high_sample[3] > low_sample[3],
@@ -650,7 +697,10 @@ fn outer_glow_combined_with_stroke_and_drop_shadow() {
 
     // Center source is still white
     let center = straight(&rendered, center_x, center_y);
-    assert!(center[0] > 0.9 && center[1] > 0.9 && center[2] > 0.9, "{center:?}");
+    assert!(
+        center[0] > 0.9 && center[1] > 0.9 && center[2] > 0.9,
+        "{center:?}"
+    );
 
     // Stroke at 2px outside the 20x20 square border
     let stroke_pixel = straight(&rendered, inset + 13, center_y);
@@ -700,7 +750,9 @@ fn outer_glow_preserved_in_export() {
 
     let composite = draw_live_composite(&document);
     let png = png_data(&composite).expect("png encodes");
-    let decoded = image::load_from_memory(&png).expect("png decodes").to_rgba8();
+    let decoded = image::load_from_memory(&png)
+        .expect("png decodes")
+        .to_rgba8();
 
     // Center pixel (35, 35) must be white
     let center_pixel = decoded.get_pixel(35, 35);
@@ -709,7 +761,11 @@ fn outer_glow_preserved_in_export() {
     // Glow pixel 3px outside the 10x10 square (e.g. at 27, 35)
     let glow_pixel = decoded.get_pixel(27, 35);
     let alpha = glow_pixel[3] as f64 / 255.0;
-    let red = if alpha > 0.0 { glow_pixel[0] as f64 / 255.0 / alpha } else { 0.0 };
+    let red = if alpha > 0.0 {
+        glow_pixel[0] as f64 / 255.0 / alpha
+    } else {
+        0.0
+    };
     assert!(alpha > 0.1, "{glow_pixel:?}");
     assert!(red > 0.6, "{glow_pixel:?}");
 }

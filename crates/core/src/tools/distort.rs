@@ -15,10 +15,9 @@ pub fn corners_of(transform: &LayerTransform) -> [CGPoint; 4] {
 
 /// Four finite corners with some area to them (`DistortWarp.isUsable`).
 pub fn is_usable(corners: &[CGPoint; 4]) -> bool {
-    if corners
-        .iter()
-        .any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1_000_000.0 || p.y.abs() > 1e6 as f64)
-    {
+    if corners.iter().any(|p| {
+        !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1_000_000.0 || p.y.abs() > 1e6_f64
+    }) {
         return false;
     }
     // Both halves need area, or one of them has nothing to draw.
@@ -187,15 +186,24 @@ pub fn warp(
     }
     let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
     let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    let max_x = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    let max_y = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    let max_x = corners
+        .iter()
+        .map(|p| p.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = corners
+        .iter()
+        .map(|p| p.y)
+        .fold(f64::NEG_INFINITY, f64::max);
     let min_x = min_x.floor();
     let min_y = min_y.floor();
     let bounds = CGRect::new(min_x, min_y, max_x.ceil() - min_x, max_y.ceil() - min_y);
     if bounds.width() < 1.0 || bounds.height() < 1.0 {
         return Err("invalid distortion".to_string());
     }
-    if bounds.width() > 30_000.0 || bounds.height() > 30_000.0 || bounds.width() * bounds.height() > 100_000_000.0 {
+    if bounds.width() > 30_000.0
+        || bounds.height() > 30_000.0
+        || bounds.width() * bounds.height() > 100_000_000.0
+    {
         return Err("the distorted shape is too large".to_string());
     }
     let placed = LayerTransform {
@@ -215,7 +223,12 @@ pub fn warp(
     let target = image_corners(corners, transform.flip_x, transform.flip_y);
     // Output-space corners: the shape over the warp's own pixel grid.
     let place = |p: CGPoint| CGPoint::new((p.x - min_x) * factor, (p.y - min_y) * factor);
-    let dst = (place(target.0), place(target.1), place(target.2), place(target.3));
+    let dst = (
+        place(target.0),
+        place(target.1),
+        place(target.2),
+        place(target.3),
+    );
     // The source's own pixel corners, in the same order.
     let (sw, sh) = (image.width as f64, image.height as f64);
     let src = (
@@ -284,12 +297,24 @@ pub fn warp(
 
 /// Writes one output pixel: samples `image` at `source` (bilinear), fading by
 /// `coverage`.
-fn sample_into(image: &Bitmap, source: CGPoint, is_mask: bool, out: &mut Bitmap, x: usize, y: usize, coverage: f64) {
+fn sample_into(
+    image: &Bitmap,
+    source: CGPoint,
+    is_mask: bool,
+    out: &mut Bitmap,
+    x: usize,
+    y: usize,
+    coverage: f64,
+) {
     if coverage <= 0.0 {
         return;
     }
     let o = (y * out.width + x) * 4;
-    if source.x < -1.0 || source.y < -1.0 || source.x > image.width as f64 || source.y > image.height as f64 {
+    if source.x < -1.0
+        || source.y < -1.0
+        || source.x > image.width as f64
+        || source.y > image.height as f64
+    {
         return;
     }
     let sample = crate::raster::sample_bitmap(
@@ -322,7 +347,6 @@ fn point_in_triangle(p: CGPoint, a: CGPoint, b: CGPoint, c: CGPoint) -> bool {
     !(has_neg && has_pos)
 }
 
-
 /// The fraction of pixel (x, y) covered by the convex quad: the quad clipped
 /// to the pixel square (Sutherland–Hodgman against the square's four
 /// half-planes), area of what survives. Interior pixels clip to the full
@@ -342,7 +366,12 @@ fn quad_pixel_coverage(quad: (CGPoint, CGPoint, CGPoint, CGPoint), x: usize, y: 
     }
     let mut poly = [quad.0, quad.1, quad.2, quad.3].to_vec();
     // Half-planes: keep the inside of x >= px, x <= px+1, y >= py, y <= py+1.
-    for (nx, ny, nd) in [(1.0, 0.0, -px), (-1.0, 0.0, px + 1.0), (0.0, 1.0, -py), (0.0, -1.0, py + 1.0)] {
+    for (nx, ny, nd) in [
+        (1.0, 0.0, -px),
+        (-1.0, 0.0, px + 1.0),
+        (0.0, 1.0, -py),
+        (0.0, -1.0, py + 1.0),
+    ] {
         let mut next = Vec::with_capacity(poly.len() + 1);
         let n = poly.len();
         for i in 0..n {
@@ -380,9 +409,7 @@ fn point_in_quad(quad: (CGPoint, CGPoint, CGPoint, CGPoint), p: CGPoint) -> bool
     let mut j = 3;
     for i in 0..4 {
         let (a, b) = (pts[i], pts[j]);
-        if ((a.y > p.y) != (b.y > p.y))
-            && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x)
-        {
+        if ((a.y > p.y) != (b.y > p.y)) && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) {
             inside = !inside;
         }
         j = i;
@@ -406,7 +433,10 @@ pub fn warp_trimmed(
     }
     let cropped = crate::filters::crop_bitmap(&warped, &crop);
     let mut placed = placed;
-    placed.origin = CGPoint::new(placed.origin.x + crop.min_x(), placed.origin.y + crop.min_y());
+    placed.origin = CGPoint::new(
+        placed.origin.x + crop.min_x(),
+        placed.origin.y + crop.min_y(),
+    );
     placed.size = CGSize::new(crop.width(), crop.height());
     Ok((cropped, placed, crop))
 }
@@ -422,9 +452,7 @@ pub fn carried(placement: &LayerTransform, by: &LayerTransform, to: &[CGPoint; 4
         .concat(&CGAffineTransform::translation(-0.5, -0.5))
         .inverted();
     let map = Homography::new(to);
-    placement
-        .corners()
-        .map(|p| map.apply(p.applying(&to_unit)))
+    placement.corners().map(|p| map.apply(p.applying(&to_unit)))
 }
 
 /// `DistortWarp.warpMask`: a mask warped like `warp`, but `background` (its
@@ -450,12 +478,7 @@ pub fn warp_mask(
             let sx = (placed.size.width / out.width as f64).max(f64::EPSILON);
             let sy = (placed.size.height / out.height as f64).max(f64::EPSILON);
             let doc = CGPoint::new(min_x + p.x * sx, min_y + p.y * sy);
-            let quad = (
-                corners[0],
-                corners[1],
-                corners[2],
-                corners[3],
-            );
+            let quad = (corners[0], corners[1], corners[2], corners[3]);
             if !point_in_quad(quad, doc) {
                 out.data[o] = fill;
                 out.data[o + 1] = fill;
@@ -629,7 +652,8 @@ mod tests {
                 sparse.set_pixel(x, y, [255, 0, 0, 255]);
             }
         }
-        let (cropped, placed, crop) = warp_trimmed(&sparse, &unit_transform(), &corners_of(&unit_transform())).unwrap();
+        let (cropped, placed, crop) =
+            warp_trimmed(&sparse, &unit_transform(), &corners_of(&unit_transform())).unwrap();
         assert!((18..=22).contains(&cropped.width), "{}", cropped.width);
         assert!((8..=12).contains(&cropped.height), "{}", cropped.height);
         assert!((placed.origin.x - 10.0).abs() <= 1.5, "{:?}", placed.origin);
@@ -655,7 +679,14 @@ mod tests {
         let transform = unit_transform();
         let to_doc = crate::raster::pixel_to_document(&transform, 40.0, 40.0);
         let corners = moved_corners(10.0, 0.0, 0.0);
-        let carried = map_path(&path, &to_doc, CGSize::new(40.0, 40.0), &transform, &corners).unwrap();
+        let carried = map_path(
+            &path,
+            &to_doc,
+            CGSize::new(40.0, 40.0),
+            &transform,
+            &corners,
+        )
+        .unwrap();
         let bounds = carried.bounds().unwrap();
         assert!((bounds.min_x() - 20.0).abs() < 1.0, "{bounds:?}");
         assert!((bounds.min_y() - 10.0).abs() < 1.0, "{bounds:?}");

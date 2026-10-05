@@ -86,7 +86,10 @@ mod tests {
         std::fs::write(&path, minimal_cfa_dng()).expect("writes fixture");
         let failures = session.import_images(&[path.clone()], None);
         assert!(failures.is_empty(), "{failures:?}");
-        let document = session.document.as_ref().expect("import created the canvas");
+        let document = session
+            .document
+            .as_ref()
+            .expect("import created the canvas");
         assert_eq!(document.layers.len(), 1);
         let image = document.layers[0]
             .asset

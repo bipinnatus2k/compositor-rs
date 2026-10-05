@@ -183,13 +183,21 @@ impl CanvasGuide {
 
     pub fn offset(&self, x: CGFloat, y: CGFloat) -> CanvasGuide {
         let mut guide = *self;
-        guide.position += if guide.axis == GuideAxis::Vertical { x } else { y };
+        guide.position += if guide.axis == GuideAxis::Vertical {
+            x
+        } else {
+            y
+        };
         guide
     }
 
     pub fn scaled(&self, x: CGFloat, y: CGFloat) -> CanvasGuide {
         let mut guide = *self;
-        guide.position *= if guide.axis == GuideAxis::Vertical { x } else { y };
+        guide.position *= if guide.axis == GuideAxis::Vertical {
+            x
+        } else {
+            y
+        };
         guide
     }
 
@@ -232,7 +240,7 @@ impl LayoutGrid {
     }
 
     pub fn is_major(value: CGFloat) -> bool {
-        (value.round() % Self::SPACING as f64).abs() < 0.001
+        (value.round() % Self::SPACING).abs() < 0.001
     }
 }
 
@@ -262,12 +270,16 @@ impl PartialEq for LayerMask {
 
 impl LayerMask {
     pub fn solid(revealing: bool) -> LayerMask {
-        let image = Bitmap::new_clearing(1, 1, [
-            if revealing { 255 } else { 0 },
-            if revealing { 255 } else { 0 },
-            if revealing { 255 } else { 0 },
-            255,
-        ]);
+        let image = Bitmap::new_clearing(
+            1,
+            1,
+            [
+                if revealing { 255 } else { 0 },
+                if revealing { 255 } else { 0 },
+                if revealing { 255 } else { 0 },
+                255,
+            ],
+        );
         LayerMask {
             asset: ImportedImage::new(image, "Layer Mask"),
             is_enabled: true,
@@ -287,7 +299,11 @@ impl LayerMask {
     }
 
     /// Where the mask sits once its layer moves from `old` to `new`.
-    pub fn placement_moving_layer(&self, old: &LayerTransform, new: &LayerTransform) -> Option<LayerTransform> {
+    pub fn placement_moving_layer(
+        &self,
+        old: &LayerTransform,
+        new: &LayerTransform,
+    ) -> Option<LayerTransform> {
         // A uniform mask looks the same wherever it sits.
         if self.asset.image.width <= 1 && self.asset.image.height <= 1 {
             return None;
@@ -313,11 +329,7 @@ impl LayerMask {
                 }
             }
         }
-        if total * 2 >= count * 255 {
-            1.0
-        } else {
-            0.0
-        }
+        if total * 2 >= count * 255 { 1.0 } else { 0.0 }
     }
 }
 
@@ -334,7 +346,6 @@ impl PartialEq for LayerText {
         self.style == other.style && std::sync::Arc::ptr_eq(&self.image, &other.image)
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TextAlignment {
@@ -747,7 +758,7 @@ impl CanvasDocument {
             let Some(siblings) = children.get(&parent) else {
                 continue;
             };
-            let mut ordered: Vec<&ImageLayer> = siblings.iter().copied().collect();
+            let mut ordered: Vec<&ImageLayer> = siblings.to_vec();
             if top_first {
                 ordered.reverse();
             }
@@ -789,10 +800,11 @@ impl CanvasDocument {
         loop {
             let mut grew = false;
             for layer in &self.layers {
-                if let Some(parent) = layer.parent_id {
-                    if result.contains(&parent) && result.insert(layer.id) {
-                        grew = true;
-                    }
+                if let Some(parent) = layer.parent_id
+                    && result.contains(&parent)
+                    && result.insert(layer.id)
+                {
+                    grew = true;
                 }
             }
             if !grew {
@@ -947,7 +959,10 @@ mod tests {
         assert_eq!(hex, "FF8000");
         let back = PaletteColor::from_hex(&hex).unwrap();
         assert_eq!(back.quantized(), c.quantized());
-        assert_eq!(PaletteColor::from_hex("#F0B").unwrap(), PaletteColor::from_hex("FF00BB").unwrap());
+        assert_eq!(
+            PaletteColor::from_hex("#F0B").unwrap(),
+            PaletteColor::from_hex("FF00BB").unwrap()
+        );
         assert!(PaletteColor::from_hex("zzzzzz").is_none());
     }
 
@@ -1044,13 +1059,18 @@ mod tests {
         let mut mask = LayerMask::solid(true);
         mask.asset = ImportedImage::new(big_image, "Layer Mask");
         // Linked with no placement: stays nil (covering the layer).
-        assert_eq!(mask.placement_moving_layer(&layer.transform, &layer.transform), None);
+        assert_eq!(
+            mask.placement_moving_layer(&layer.transform, &layer.transform),
+            None
+        );
         let mut new_t = layer.transform;
         new_t.origin = CGPoint::new(20.0, 20.0);
         assert_eq!(mask.placement_moving_layer(&layer.transform, &new_t), None);
         // Unlinked: stays where it was (the layer's old transform).
         mask.is_linked = false;
-        let placed = mask.placement_moving_layer(&layer.transform, &new_t).unwrap();
+        let placed = mask
+            .placement_moving_layer(&layer.transform, &new_t)
+            .unwrap();
         assert_eq!(placed, layer.transform);
     }
 
@@ -1077,7 +1097,11 @@ mod tests {
     fn live_text_requires_matching_image() {
         let mut layer = ImageLayer::blank("T", CGSize::new(10.0, 10.0));
         let image = std::sync::Arc::new(Bitmap::new(4, 4));
-        layer.asset = Some(ImportedImage { image: image.clone(), thumbnail: std::sync::Arc::new(Bitmap::new(1, 1)), name: "T".to_string() });
+        layer.asset = Some(ImportedImage {
+            image: image.clone(),
+            thumbnail: std::sync::Arc::new(Bitmap::new(1, 1)),
+            name: "T".to_string(),
+        });
         layer.text = Some(LayerText {
             style: LayerTextStyle::default(),
             image: image.clone(),

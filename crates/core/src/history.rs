@@ -52,8 +52,8 @@ impl DocumentHistory {
             pending: None,
             pending_name: "Edit".to_string(),
             depth: 0,
-            entry_limit: entry_limit.max(0),
-            retained_byte_limit: retained_byte_limit.max(0),
+            entry_limit,
+            retained_byte_limit,
         }
     }
 
@@ -95,7 +95,12 @@ impl DocumentHistory {
     }
 
     /// Nestable transaction boundary.
-    pub fn begin(&mut self, name: &str, document: &Option<CanvasDocument>, selection: Option<Uuid>) {
+    pub fn begin(
+        &mut self,
+        name: &str,
+        document: &Option<CanvasDocument>,
+        selection: Option<Uuid>,
+    ) {
         if self.depth == 0 {
             self.pending = Some(Snapshot {
                 document: document.clone(),
@@ -170,7 +175,11 @@ impl DocumentHistory {
         let mut seen: HashSet<ArcPtr> = HashSet::new();
         if let Some(document) = current {
             for layer in &document.layers {
-                for asset in layer.asset.iter().chain(layer.mask.as_ref().map(|m| &m.asset)) {
+                for asset in layer
+                    .asset
+                    .iter()
+                    .chain(layer.mask.as_ref().map(|m| &m.asset))
+                {
                     seen.insert(arc_ptr(&asset.image));
                     seen.insert(arc_ptr(&asset.thumbnail));
                 }
@@ -362,12 +371,28 @@ mod tests {
         history.end(&Some(current.clone()), None);
 
         let snapshot = history.undo().unwrap();
-        assert_eq!(snapshot.document.as_ref().unwrap().layers[0].asset.as_ref().unwrap().image.data[0], 0);
+        assert_eq!(
+            snapshot.document.as_ref().unwrap().layers[0]
+                .asset
+                .as_ref()
+                .unwrap()
+                .image
+                .data[0],
+            0
+        );
         assert!(history.can_redo());
         assert_eq!(history.redo_name(), "Paint");
 
         let snapshot = history.redo().unwrap();
-        assert_eq!(snapshot.document.as_ref().unwrap().layers[0].asset.as_ref().unwrap().image.data[0], 1);
+        assert_eq!(
+            snapshot.document.as_ref().unwrap().layers[0]
+                .asset
+                .as_ref()
+                .unwrap()
+                .image
+                .data[0],
+            1
+        );
         assert!(history.can_undo());
         assert!(!history.can_redo());
     }

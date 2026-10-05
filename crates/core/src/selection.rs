@@ -11,7 +11,7 @@
 //! samples (`CIImage.clampedToExtent`, not zero padding), exactly as the
 //! Swift `DocumentSelection.coverage` does.
 
-use crate::geometry::{CGFloat, CGAffineTransform, CGPoint, CGRect, CGSize};
+use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use crate::raster::GrayMask;
 use geo::{BooleanOps, Coord, LineString, MultiPolygon, Polygon as GeoPolygon};
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,9 @@ pub struct SelectionPath {
 
 impl SelectionPath {
     pub fn from_polygon(points: Vec<CGPoint>) -> Self {
-        SelectionPath { rings: vec![points] }
+        SelectionPath {
+            rings: vec![points],
+        }
     }
 
     /// A rectangle outline.
@@ -113,7 +115,9 @@ impl SelectionPath {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bounds().map(|b| b.is_empty() || b.is_null()).unwrap_or(true)
+        self.bounds()
+            .map(|b| b.is_empty() || b.is_null())
+            .unwrap_or(true)
     }
 
     /// `boundingBoxOfPath`; None when there are no rings.
@@ -170,14 +174,13 @@ impl SelectionPath {
             }
             let outward = offset_ring(ring, d, true);
             let inward = offset_ring(ring, d, false);
-            let degenerate = inward.len() >= 3
-                && signed_area(&inward).abs() >= signed_area(ring).abs();
+            let degenerate =
+                inward.len() >= 3 && signed_area(&inward).abs() >= signed_area(ring).abs();
             let piece = if outward.len() < 3 {
                 continue;
             } else if inward.len() < 3 || degenerate {
                 // The ring is thinner than the band, or its inner offset
                 // flipped inside out on a tiny ring: band all the way across.
-                let mut outward = outward;
                 SelectionPath::from_polygon(outward)
             } else {
                 let outer = SelectionPath::from_polygon(outward);
@@ -197,7 +200,11 @@ impl SelectionPath {
             rings: self
                 .rings
                 .iter()
-                .map(|ring| ring.iter().map(|p| CGPoint::new(p.x + dx, p.y + dy)).collect())
+                .map(|ring| {
+                    ring.iter()
+                        .map(|p| CGPoint::new(p.x + dx, p.y + dy))
+                        .collect()
+                })
                 .collect(),
         }
     }
@@ -229,6 +236,8 @@ fn signed_area(ring: &[CGPoint]) -> f64 {
 /// Offsets a closed ring by `d` pixels outward from (or inward into) the area
 /// it encloses. Convex corners get round joins (as CGPath stroking does);
 /// reflex corners join at the offset lines' intersection.
+// `.max(2).min(64)` keeps the Swift source's min/max shape (AGENTS.md porting rule).
+#[allow(clippy::manual_clamp)]
 fn offset_ring(ring: &[CGPoint], d: f64, outward: bool) -> Vec<CGPoint> {
     let n = ring.len();
     if n < 3 || d <= 0.0 {
@@ -279,7 +288,9 @@ fn offset_ring(ring: &[CGPoint], d: f64, outward: bool) -> Vec<CGPoint> {
             while delta < -std::f64::consts::PI {
                 delta += std::f64::consts::TAU;
             }
-            let steps = ((delta.abs() / (std::f64::consts::PI / 16.0)).ceil() as usize).max(2).min(64);
+            let steps = ((delta.abs() / (std::f64::consts::PI / 16.0)).ceil() as usize)
+                .max(2)
+                .min(64);
             for s in 0..=steps {
                 let t = a0 + delta * (s as f64 / steps as f64);
                 result.push(CGPoint::new(cur.x + d * t.cos(), cur.y + d * t.sin()));
@@ -302,10 +313,7 @@ fn offset_ring(ring: &[CGPoint], d: f64, outward: bool) -> Vec<CGPoint> {
 }
 
 fn line_to_points(line: &LineString<f64>) -> Vec<CGPoint> {
-    let mut pts: Vec<CGPoint> = line
-        .coords()
-        .map(|c| CGPoint::new(c.x, c.y))
-        .collect();
+    let mut pts: Vec<CGPoint> = line.coords().map(|c| CGPoint::new(c.x, c.y)).collect();
     // Drop the closing duplicate point geo adds.
     if pts.len() > 1 {
         let first = pts[0];
@@ -358,10 +366,10 @@ fn polygons_from_rings(rings: &[Vec<CGPoint>]) -> MultiPolygon<f64> {
     };
     let to_line = |ring: &Vec<CGPoint>| -> LineString<f64> {
         let mut coords: Vec<Coord<f64>> = ring.iter().map(|p| Coord { x: p.x, y: p.y }).collect();
-        if let (Some(first), Some(last)) = (coords.first().copied(), coords.last().copied()) {
-            if (first.x - last.x).abs() > 1e-9 || (first.y - last.y).abs() > 1e-9 {
-                coords.push(first);
-            }
+        if let (Some(first), Some(last)) = (coords.first().copied(), coords.last().copied())
+            && ((first.x - last.x).abs() > 1e-9 || (first.y - last.y).abs() > 1e-9)
+        {
+            coords.push(first);
         }
         LineString::from(coords)
     };
@@ -432,7 +440,10 @@ struct RingBounds {
 
 impl RingBounds {
     fn contains_rect(&self, other: &RingBounds) -> bool {
-        self.min_x <= other.min_x && self.min_y <= other.min_y && self.max_x >= other.max_x && self.max_y >= other.max_y
+        self.min_x <= other.min_x
+            && self.min_y <= other.min_y
+            && self.max_x >= other.max_x
+            && self.max_y >= other.max_y
     }
 }
 
@@ -502,7 +513,12 @@ impl DocumentSelection {
 
     /// Grayscale coverage at document resolution (white = selected), top-left origin.
     pub fn coverage(&self, width: usize, height: usize) -> GrayMask {
-        let mut mask = rasterize(&self.path, width, height, self.antialiased || self.feather > 0.0);
+        let mut mask = rasterize(
+            &self.path,
+            width,
+            height,
+            self.antialiased || self.feather > 0.0,
+        );
         if self.feather > 0.0 {
             // A feathered edge fades either side of the outline, as Photoshop's
             // does. `gaussian_blur_gray` takes the standard deviation — σ =
@@ -773,9 +789,8 @@ fn fill_row_coverage(edges: &[RowEdge], y0: f64, acc: &mut [f64]) {
                 }
                 for (col, slot) in acc[first..last].iter_mut().enumerate() {
                     let cx = (first + col) as f64;
-                    *slot += span_column_overlap(
-                        xl_ca, slope_l, xr_ca, slope_r, cx, cx + 1.0, ca, cb,
-                    );
+                    *slot +=
+                        span_column_overlap(xl_ca, slope_l, xr_ca, slope_r, cx, cx + 1.0, ca, cb);
                 }
             }
         }
@@ -788,6 +803,9 @@ fn fill_row_coverage(edges: &[RowEdge], y0: f64, acc: &mut [f64]) {
 /// linear in y and every corner — either edge meeting either column side —
 /// is a breakpoint, so the trapezoid rule over those breakpoints integrates
 /// it exactly.
+// The eight parameters are the integral's direct inputs; a struct would only
+// obscure the math.
+#[allow(clippy::too_many_arguments)]
 fn span_column_overlap(
     xl0: f64,
     sxl: f64,
@@ -1072,7 +1090,10 @@ mod tests {
             feather: 4.0,
         };
         let mask = sel.coverage(16, 16);
-        assert!(mask.data.iter().all(|v| *v == 255), "a clamped blur keeps a full mask full");
+        assert!(
+            mask.data.iter().all(|v| *v == 255),
+            "a clamped blur keeps a full mask full"
+        );
     }
 
     #[test]
@@ -1087,13 +1108,25 @@ mod tests {
             feather: 2.0,
         };
         let mask = sel.coverage(12, 8);
-        assert!(mask.value(6, 4) >= 248, "interior settles: {}", mask.value(6, 4));
+        assert!(
+            mask.value(6, 4) >= 248,
+            "interior settles: {}",
+            mask.value(6, 4)
+        );
         let left = mask.value(3, 4);
         let right = mask.value(4, 4);
         assert!(left > 55 && left < 100, "left={left}");
         assert!(right > 155 && right < 200, "right={right}");
-        assert!(mask.value(2, 4) < 30, "outer flank decays: {}", mask.value(2, 4));
-        assert!(mask.value(5, 4) > 220, "inner flank recovers: {}", mask.value(5, 4));
+        assert!(
+            mask.value(2, 4) < 30,
+            "outer flank decays: {}",
+            mask.value(2, 4)
+        );
+        assert!(
+            mask.value(5, 4) > 220,
+            "inner flank recovers: {}",
+            mask.value(5, 4)
+        );
     }
 
     #[test]
@@ -1134,7 +1167,10 @@ mod tests {
         let band = a.stroke_band(2.0);
         let grown = a.union(&band);
         let b = grown.bounds().unwrap();
-        assert!((b.min_x() - 3.0).abs() < 0.2 && (b.max_x() - 7.0).abs() < 0.2, "{b:?}");
+        assert!(
+            (b.min_x() - 3.0).abs() < 0.2 && (b.max_x() - 7.0).abs() < 0.2,
+            "{b:?}"
+        );
     }
 
     #[test]
@@ -1219,9 +1255,17 @@ mod tests {
             ],
         };
         let multi = path.to_geo();
-        assert_eq!(multi.iter().count(), 2, "the island is a polygon of its own");
+        assert_eq!(
+            multi.iter().count(),
+            2,
+            "the island is a polygon of its own"
+        );
         let polygons: Vec<_> = multi.iter().collect();
-        assert_eq!(polygons[0].interiors().len(), 1, "only the middle ring is the outer's hole");
+        assert_eq!(
+            polygons[0].interiors().len(),
+            1,
+            "only the middle ring is the outer's hole"
+        );
         assert_eq!(polygons[1].interiors().len(), 0);
         // Round-tripped back through the rings, the winding fill shows outer
         // and island solid with the middle ring empty.
@@ -1288,7 +1332,11 @@ mod tests {
         let mask = rasterize(&clipped, 40, 40, false);
         assert_eq!(mask.value(2, 2), 0, "the subtracted strip is gone");
         assert_eq!(mask.value(2, 7), 255, "the rest of the rim stays");
-        assert_eq!(mask.value(17, 17), 255, "the island survives the re-grouping");
+        assert_eq!(
+            mask.value(17, 17),
+            255,
+            "the island survives the re-grouping"
+        );
         assert_eq!(mask.value(12, 12), 0);
     }
 
@@ -1343,7 +1391,10 @@ mod tests {
             CGPoint::new(10.0, 12.0),
         ]);
         let band = tiny.stroke_band(6.0);
-        assert!(band.contains(CGPoint::new(11.0, 11.0)), "the tiny ring bands");
+        assert!(
+            band.contains(CGPoint::new(11.0, 11.0)),
+            "the tiny ring bands"
+        );
     }
 
     #[test]

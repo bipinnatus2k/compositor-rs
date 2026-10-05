@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use crate::document::{PaletteColor, ShapeKind};
-use crate::geometry::{CGPoint, CGSize, CGRect};
-use crate::raster::{source_over_u8, Bitmap};
+use crate::geometry::{CGPoint, CGRect, CGSize};
+use crate::raster::{Bitmap, source_over_u8};
 
-use super::types::{ascii_at, f64_at, find_offset, i16_at, i32_at, LayerShapeStyle, PsdError};
+use super::types::{LayerShapeStyle, PsdError, ascii_at, f64_at, find_offset, i16_at, i32_at};
 
 /// `EditorSession.maxShapePixels`.
 pub const MAX_SHAPE_PIXELS: i64 = 100_000_000;
@@ -61,16 +61,25 @@ impl PsdVector {
         if !fill_enabled {
             return Ok(None);
         }
-        let Some(soco) = extra.get("SoCo") else { return Ok(None) };
-        let Some(fill) = rgb(soco) else { return Ok(None) };
+        let Some(soco) = extra.get("SoCo") else {
+            return Ok(None);
+        };
+        let Some(fill) = rgb(soco) else {
+            return Ok(None);
+        };
         let origin = match origination(extra.get("vogk")) {
             Some(found) => Some(found),
             None => sharp_rect(
-                extra.get("vmsk").or_else(|| extra.get("vsms")).map(|d| d.as_slice()),
+                extra
+                    .get("vmsk")
+                    .or_else(|| extra.get("vsms"))
+                    .map(|d| d.as_slice()),
                 canvas,
             ),
         };
-        let Some(origin) = origin else { return Ok(None) };
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
         let mut box_ = origin.bounds.integral();
         if !box_.origin.x.is_finite() || !box_.origin.y.is_finite() {
             return Ok(None);
@@ -83,7 +92,10 @@ impl PsdVector {
         let image = shape_image(style.kind, box_.size, style.color(), style.corner_radius);
         let mut notes: Vec<String> = Vec::new();
         if stroke_enabled {
-            notes.push("The Photoshop stroke isn\u{2019}t supported on shape layers and was omitted.".to_string());
+            notes.push(
+                "The Photoshop stroke isn\u{2019}t supported on shape layers and was omitted."
+                    .to_string(),
+            );
         }
         notes.extend(origin.notes);
         Ok(Some(Live {
@@ -152,24 +164,24 @@ impl PsdVector {
             })
             .collect();
         let closed: Vec<bool> = subpaths.iter().map(|(_, closed)| *closed).collect();
-        if fill_enabled {
-            if let Some(fill_color) = fill {
-                let color = PaletteColor::new(fill_color.0, fill_color.1, fill_color.2);
-                fill_polygons(&mut image, &shifted, color);
-            }
+        if fill_enabled && let Some(fill_color) = fill {
+            let color = PaletteColor::new(fill_color.0, fill_color.1, fill_color.2);
+            fill_polygons(&mut image, &shifted, color);
         }
-        if stroke_enabled {
-            if let Some(stroke_rgb) = stroke_color {
-                // CG strokes a closed subpath with the same miter join at the
-                // closing corner (`closeSubpath`, `setLineJoin(.miter)`,
-                // `setMiterLimit(10)`, bevel past the limit) as at every other
-                // vertex; pass `closed` so the last-to-first corner is joined
-                // rather than butt-capped the way an open polyline ends.
-                for (points, closed) in shifted.iter().zip(&closed) {
-                    let outline = stroke_outline(points, *closed, stroke_width, 10.0);
-                    if !outline.is_empty() {
-                        fill_polygons(&mut image, &[outline], PaletteColor::new(stroke_rgb.0, stroke_rgb.1, stroke_rgb.2));
-                    }
+        if stroke_enabled && let Some(stroke_rgb) = stroke_color {
+            // CG strokes a closed subpath with the same miter join at the
+            // closing corner (`closeSubpath`, `setLineJoin(.miter)`,
+            // `setMiterLimit(10)`, bevel past the limit) as at every other
+            // vertex; pass `closed` so the last-to-first corner is joined
+            // rather than butt-capped the way an open polyline ends.
+            for (points, closed) in shifted.iter().zip(&closed) {
+                let outline = stroke_outline(points, *closed, stroke_width, 10.0);
+                if !outline.is_empty() {
+                    fill_polygons(
+                        &mut image,
+                        &[outline],
+                        PaletteColor::new(stroke_rgb.0, stroke_rgb.1, stroke_rgb.2),
+                    );
                 }
             }
         }
@@ -232,18 +244,21 @@ fn origination(data: Option<&Vec<u8>>) -> Option<Origination> {
         corner_radius: 0.0,
         notes: Vec::new(),
     };
-    if kind == ShapeKind::Rectangle {
-        if let Some(radii_at) = find_offset(data, b"keyOriginRRectRadii", 0) {
-            let keys = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
-            let radii: Vec<f64> = keys.iter().filter_map(|key| unit_field(data, key, radii_at)).collect();
-            if radii.len() == 4 {
-                let lo = radii.iter().cloned().fold(f64::INFINITY, f64::min);
-                let hi = radii.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                if hi - lo > 0.5 {
-                    return None;
-                }
-                origin.corner_radius = hi;
+    if kind == ShapeKind::Rectangle
+        && let Some(radii_at) = find_offset(data, b"keyOriginRRectRadii", 0)
+    {
+        let keys = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+        let radii: Vec<f64> = keys
+            .iter()
+            .filter_map(|key| unit_field(data, key, radii_at))
+            .collect();
+        if radii.len() == 4 {
+            let lo = radii.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = radii.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if hi - lo > 0.5 {
+                return None;
             }
+            origin.corner_radius = hi;
         }
     }
     Some(origin)
@@ -370,7 +385,11 @@ fn distance(a: CGPoint, b: CGPoint) -> f64 {
 #[derive(Debug, Clone)]
 enum PathElement {
     Move(CGPoint),
-    Curve { to: CGPoint, c1: CGPoint, c2: CGPoint },
+    Curve {
+        to: CGPoint,
+        c1: CGPoint,
+        c2: CGPoint,
+    },
     Close,
 }
 
@@ -466,12 +485,7 @@ impl PsdPath {
         if !any {
             return None;
         }
-        Some(CGRect::new(
-            min_x,
-            min_y,
-            max_x - min_x,
-            max_y - min_y,
-        ))
+        Some(CGRect::new(min_x, min_y, max_x - min_x, max_y - min_y))
     }
 
     /// Subpaths as polylines; closed subpaths repeat their first point so both
@@ -517,7 +531,12 @@ const KAPPA: f64 = 0.5522847498307936;
 
 /// `EditorSession.shapeImage`: the shape filling its box, anti-aliased where
 /// it curves.
-pub fn shape_image(kind: ShapeKind, size: CGSize, color: PaletteColor, corner_radius: f64) -> Bitmap {
+pub fn shape_image(
+    kind: ShapeKind,
+    size: CGSize,
+    color: PaletteColor,
+    corner_radius: f64,
+) -> Bitmap {
     let width = (size.width.max(0.0) as usize).max(1);
     let height = (size.height.max(0.0) as usize).max(1);
     let mut image = Bitmap::new(width, height);
@@ -596,14 +615,44 @@ fn ellipse_poly(w: f64, h: f64) -> Vec<CGPoint> {
     let left = CGPoint::new(cx - w / 2.0, cy);
     let top = CGPoint::new(cx, cy - h / 2.0);
     let mut pts: Vec<CGPoint> = vec![right];
-    flatten_cubic_into(&mut pts, right, CGPoint::new(cx + w / 2.0, cy + ky), CGPoint::new(cx + kx, cy + h / 2.0), bottom);
-    flatten_cubic_into(&mut pts, bottom, CGPoint::new(cx - kx, cy + h / 2.0), CGPoint::new(cx - w / 2.0, cy + ky), left);
-    flatten_cubic_into(&mut pts, left, CGPoint::new(cx - w / 2.0, cy - ky), CGPoint::new(cx - kx, cy - h / 2.0), top);
-    flatten_cubic_into(&mut pts, top, CGPoint::new(cx + kx, cy - h / 2.0), CGPoint::new(cx + w / 2.0, cy - ky), right);
+    flatten_cubic_into(
+        &mut pts,
+        right,
+        CGPoint::new(cx + w / 2.0, cy + ky),
+        CGPoint::new(cx + kx, cy + h / 2.0),
+        bottom,
+    );
+    flatten_cubic_into(
+        &mut pts,
+        bottom,
+        CGPoint::new(cx - kx, cy + h / 2.0),
+        CGPoint::new(cx - w / 2.0, cy + ky),
+        left,
+    );
+    flatten_cubic_into(
+        &mut pts,
+        left,
+        CGPoint::new(cx - w / 2.0, cy - ky),
+        CGPoint::new(cx - kx, cy - h / 2.0),
+        top,
+    );
+    flatten_cubic_into(
+        &mut pts,
+        top,
+        CGPoint::new(cx + kx, cy - h / 2.0),
+        CGPoint::new(cx + w / 2.0, cy - ky),
+        right,
+    );
     pts
 }
 
-fn flatten_cubic_into(out: &mut Vec<CGPoint>, from: CGPoint, c1: CGPoint, c2: CGPoint, to: CGPoint) {
+fn flatten_cubic_into(
+    out: &mut Vec<CGPoint>,
+    from: CGPoint,
+    c1: CGPoint,
+    c2: CGPoint,
+    to: CGPoint,
+) {
     let approx = distance(c1, from) + distance(c2, c1) + distance(to, c2);
     let steps = ((approx / 2.0).ceil() as usize).clamp(4, 48);
     for i in 1..=steps {
@@ -655,8 +704,14 @@ fn stroke_outline(poly: &[CGPoint], closed: bool, width: f64, miter_limit: f64) 
     let (first_index, first_dir) = dirs[0];
     let start = poly[first_index];
     let first_normal = CGPoint::new(-first_dir.y * half, first_dir.x * half);
-    right.push(CGPoint::new(start.x - first_normal.x, start.y - first_normal.y));
-    left.push(CGPoint::new(start.x + first_normal.x, start.y + first_normal.y));
+    right.push(CGPoint::new(
+        start.x - first_normal.x,
+        start.y - first_normal.y,
+    ));
+    left.push(CGPoint::new(
+        start.x + first_normal.x,
+        start.y + first_normal.y,
+    ));
     for side_index in 0..dirs.len() {
         let (i, d1) = dirs[side_index];
         let end = poly[(i + 1) % n];
@@ -933,7 +988,12 @@ mod tests {
 
     #[test]
     fn shape_image_fills_the_box() {
-        let image = shape_image(ShapeKind::Ellipse, CGSize::new(10.0, 6.0), PaletteColor::new(1.0, 0.0, 0.0), 0.0);
+        let image = shape_image(
+            ShapeKind::Ellipse,
+            CGSize::new(10.0, 6.0),
+            PaletteColor::new(1.0, 0.0, 0.0),
+            0.0,
+        );
         // Center is solid red; a corner stays transparent.
         assert_eq!(image.pixel(5, 3)[0], 255);
         assert_eq!(image.pixel(5, 3)[3], 255);
@@ -1001,7 +1061,9 @@ mod tests {
     }
 
     fn has_point(outline: &[CGPoint], x: f64, y: f64) -> bool {
-        outline.iter().any(|p| (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9)
+        outline
+            .iter()
+            .any(|p| (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9)
     }
 
     /// Right triangle (2,2)-(10,2)-(2,10) with `flatten`'s repeated first
@@ -1020,7 +1082,10 @@ mod tests {
         // The closing joint at (2,2) sits where the left edge's offset line
         // (x = 2 + 1) crosses the bottom edge's offset line (y = 2 + 1).
         let outline = stroke_outline(&triangle_with_repeated_point(), true, 2.0, 10.0);
-        assert!(has_point(&outline, 3.0, 3.0), "outline {outline:?} lacks the closing miter point (3, 3)");
+        assert!(
+            has_point(&outline, 3.0, 3.0),
+            "outline {outline:?} lacks the closing miter point (3, 3)"
+        );
         // The offset feet (3,2) are replaced by the miter point, unlike the
         // old open-polyline behavior.
         assert!(!has_point(&outline, 3.0, 2.0));
@@ -1036,7 +1101,10 @@ mod tests {
         // The closing miter is sqrt(2) long, so 0.7071x the width; limit 0.5
         // falls back to the bevel feet instead of the intersection point.
         let outline = stroke_outline(&triangle_with_repeated_point(), true, 2.0, 0.5);
-        assert!(has_point(&outline, 3.0, 2.0), "outline {outline:?} lacks the bevel foot (3, 2)");
+        assert!(
+            has_point(&outline, 3.0, 2.0),
+            "outline {outline:?} lacks the bevel foot (3, 2)"
+        );
         assert!(has_point(&outline, 2.0, 3.0));
         assert!(!has_point(&outline, 3.0, 3.0));
     }
@@ -1085,13 +1153,19 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert("vmsk".to_string(), mask);
         extra.insert("vstk".to_string(), stroke);
-        let out = PsdVector::raster(&extra, canvas, MAX_SHAPE_PIXELS).unwrap().unwrap();
+        let out = PsdVector::raster(&extra, canvas, MAX_SHAPE_PIXELS)
+            .unwrap()
+            .unwrap();
         assert_eq!(out.bounds.origin.x, 0.0);
         assert_eq!(out.bounds.size.width, 10.0);
         // The 2px ring covers [1,9]x[1,9]. The closing corner pixel is painted
         // now that the ring closes with a join (butt caps left it empty; a
         // bevel still covers half of it, a miter all of it).
-        assert!(out.image.pixel(1, 1)[3] >= 100, "closing corner alpha {}", out.image.pixel(1, 1)[3]);
+        assert!(
+            out.image.pixel(1, 1)[3] >= 100,
+            "closing corner alpha {}",
+            out.image.pixel(1, 1)[3]
+        );
         assert_eq!(out.image.pixel(5, 1)[3], 255);
         assert_eq!(out.image.pixel(5, 5)[3], 0);
     }
@@ -1165,7 +1239,11 @@ mod tests {
         }
         assert_eq!(image.pixel(2, 2)[3], 255, "interior pixel must stay solid");
         assert_eq!(image.pixel(9, 9)[3], 0, "outside pixel must stay empty");
-        assert_eq!(image.pixel(9, 0)[3], 128, "half-covered pixel must be exactly half");
+        assert_eq!(
+            image.pixel(9, 0)[3],
+            128,
+            "half-covered pixel must be exactly half"
+        );
         let covered = total as f64 / 255.0;
         let area = 10.0 * 10.0 / 2.0;
         let error = (covered - area).abs() / area;

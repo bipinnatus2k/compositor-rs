@@ -18,7 +18,7 @@ use crate::geometry::{CGRect, CGSize};
 use crate::raster::{Bitmap, GrayMask};
 
 use super::channel_coder::PsdChannelCoder;
-use super::types::{i16_at, u16_at, u32_at, PsdDocument, PsdError, PsdLayerKind, PsdRecord};
+use super::types::{PsdDocument, PsdError, PsdLayerKind, PsdRecord, i16_at, u16_at, u32_at};
 use super::vector::PsdVector;
 
 pub struct PsdReader;
@@ -207,18 +207,18 @@ impl PsdReader {
             if length % 2 == 1 {
                 cursor.skip(1)?;
             }
-            if key == "luni" {
-                if let Some(unicode) = unicode_name(&payload) {
-                    layer.name = unicode;
-                }
+            if key == "luni"
+                && let Some(unicode) = unicode_name(payload)
+            {
+                layer.name = unicode;
             }
-            if key == "iOpa" {
-                if let Some(&fill) = payload.first() {
-                    layer.fill = fill;
-                }
+            if key == "iOpa"
+                && let Some(&fill) = payload.first()
+            {
+                layer.fill = fill;
             }
             if (key == "lsct" || key == "lsdk") && payload.len() >= 4 {
-                layer.section = Some(u32_at(&payload, 0) as i64);
+                layer.section = Some(u32_at(payload, 0) as i64);
             }
             layer.extra.insert(key, payload.to_vec());
         }
@@ -229,22 +229,31 @@ impl PsdReader {
     /// Transparency, R, G, B, and the user mask. Spot and other extra IDs are skipped before decode.
     const UNPACKED_CHANNEL_IDS: [i64; 5] = [-1, 0, 1, 2, -2];
 
-    fn decode_channels(cursor: &mut PsdCursor, layer: &mut RawLayer, remaining_pixels: i64) -> Result<(), PsdError> {
+    fn decode_channels(
+        cursor: &mut PsdCursor,
+        layer: &mut RawLayer,
+        remaining_pixels: i64,
+    ) -> Result<(), PsdError> {
         let mut planes: HashMap<i64, Vec<u8>> = HashMap::new();
         let width = (layer.right as i64 - layer.left as i64).max(0) as usize;
         let height = (layer.bottom as i64 - layer.top as i64).max(0) as usize;
         let mask_width = (layer.mask_right as i64 - layer.mask_left as i64).max(0) as usize;
         let mask_height = (layer.mask_bottom as i64 - layer.mask_top as i64).max(0) as usize;
         let budget = remaining_pixels.max(0);
-        if width > 0 && height > 0 {
-            if width > 30_000 || height > 30_000 || (width * height) as i64 > budget {
-                return Err(PsdError::TooLarge);
-            }
+        if width > 0
+            && height > 0
+            && (width > 30_000 || height > 30_000 || (width * height) as i64 > budget)
+        {
+            return Err(PsdError::TooLarge);
         }
-        if layer.has_mask && mask_width > 0 && mask_height > 0 {
-            if mask_width > 30_000 || mask_height > 30_000 || (mask_width * mask_height) as i64 > budget {
-                return Err(PsdError::TooLarge);
-            }
+        if layer.has_mask
+            && mask_width > 0
+            && mask_height > 0
+            && (mask_width > 30_000
+                || mask_height > 30_000
+                || (mask_width * mask_height) as i64 > budget)
+        {
+            return Err(PsdError::TooLarge);
         }
         for &(id, length) in &layer.channels {
             let start = cursor.offset;
@@ -255,18 +264,19 @@ impl PsdReader {
                 let w = if is_mask { mask_width } else { width };
                 let h = if is_mask { mask_height } else { height };
                 if w > 0 && h > 0 {
-                    planes.insert(id, PsdChannelCoder::decode(compression, w, h, &payload)?);
+                    planes.insert(id, PsdChannelCoder::decode(compression, w, h, payload)?);
                 }
             }
             // The Swift `defer` advances past the channel even when skipped.
             cursor.offset = start + length.max(0) as usize;
         }
-        if layer.has_mask && mask_width > 0 && mask_height > 0 {
-            if let Some(gray) = planes.get(&-2) {
-                if gray.len() >= mask_width * mask_height {
-                    layer.mask_image = Some(GrayMask::from_raw(mask_width, mask_height, gray.clone()));
-                }
-            }
+        if layer.has_mask
+            && mask_width > 0
+            && mask_height > 0
+            && let Some(gray) = planes.get(&-2)
+            && gray.len() >= mask_width * mask_height
+        {
+            layer.mask_image = Some(GrayMask::from_raw(mask_width, mask_height, gray.clone()));
         }
         if width == 0 || height == 0 {
             return Ok(());
@@ -284,7 +294,9 @@ impl PsdReader {
         {
             return Err(PsdError::Truncated);
         }
-        layer.image = Some(PsdChannelCoder::rgba_bitmap(width, height, red, green, blue, alpha)?);
+        layer.image = Some(PsdChannelCoder::rgba_bitmap(
+            width, height, red, green, blue, alpha,
+        )?);
         Ok(())
     }
 
@@ -309,19 +321,30 @@ impl PsdReader {
             } else {
                 Uuid::new_v4()
             };
-            let mut record = PsdRecord::new(id, if layer.name.is_empty() { "Layer" } else { layer.name.as_str() });
+            let mut record = PsdRecord::new(
+                id,
+                if layer.name.is_empty() {
+                    "Layer"
+                } else {
+                    layer.name.as_str()
+                },
+            );
             record.parent_id = groups.last().copied();
             record.is_group = is_group;
             record.is_visible = !layer.hidden;
-            record.blend_key = if is_group && (layer.blend_key == "pass" || layer.blend_key == "norm") {
-                "pass".to_string()
-            } else {
-                layer.blend_key.clone()
-            };
+            record.blend_key =
+                if is_group && (layer.blend_key == "pass" || layer.blend_key == "norm") {
+                    "pass".to_string()
+                } else {
+                    layer.blend_key.clone()
+                };
             record.clipping = layer.clipping;
             record.kind = Self::kind(&layer, is_group);
             let has_effects = record.kind == PsdLayerKind::Effects
-                || layer.extra.keys().any(|k| k == "lfx2" || k == "lrFX" || k == "lmfx");
+                || layer
+                    .extra
+                    .keys()
+                    .any(|k| k == "lfx2" || k == "lrFX" || k == "lmfx");
             if has_effects && layer.fill != 255 {
                 record.opacity = layer.opacity as f64 / 255.0;
             } else {
@@ -345,17 +368,26 @@ impl PsdReader {
                     record.shape = Some(live.style);
                     record.shape_notes = live.notes;
                     record.kind = PsdLayerKind::Vector;
-                    remaining = (remaining - (record.image.as_ref().unwrap().width * record.image.as_ref().unwrap().height) as i64).max(0);
-                } else if record.image.is_none() {
-                    if let Some(raster) = PsdVector::raster(&layer.extra, canvas, remaining)? {
-                        remaining = (remaining - (raster.image.width * raster.image.height) as i64).max(0);
-                        record.image = Some(raster.image);
-                        record.bounds = raster.bounds;
-                        record.kind = PsdLayerKind::Vector;
-                    }
+                    remaining = (remaining
+                        - (record.image.as_ref().unwrap().width
+                            * record.image.as_ref().unwrap().height)
+                            as i64)
+                        .max(0);
+                } else if record.image.is_none()
+                    && let Some(raster) = PsdVector::raster(&layer.extra, canvas, remaining)?
+                {
+                    remaining =
+                        (remaining - (raster.image.width * raster.image.height) as i64).max(0);
+                    record.image = Some(raster.image);
+                    record.bounds = raster.bounds;
+                    record.kind = PsdLayerKind::Vector;
                 }
             }
-            record.mask = if layer.mask_from_render { None } else { layer.mask_image.take() };
+            record.mask = if layer.mask_from_render {
+                None
+            } else {
+                layer.mask_image.take()
+            };
             record.mask_enabled = !layer.mask_disabled;
             record.mask_linked = layer.mask_linked;
             if !is_group {
@@ -381,19 +413,35 @@ impl PsdReader {
         if is_group {
             return PsdLayerKind::Group;
         }
-        if layer.extra.keys().any(|k| k == "TySh" || k == "tySh" || k == "txt2") {
+        if layer
+            .extra
+            .keys()
+            .any(|k| k == "TySh" || k == "tySh" || k == "txt2")
+        {
             return PsdLayerKind::Text;
         }
-        if layer.extra.keys().any(|k| k == "vmsk" || k == "vsms" || k == "vogk") {
+        if layer
+            .extra
+            .keys()
+            .any(|k| k == "vmsk" || k == "vsms" || k == "vogk")
+        {
             return PsdLayerKind::Vector;
         }
         if layer.extra.keys().any(|k| k == "SoLd" || k == "SoLE") {
             return PsdLayerKind::SmartObject;
         }
-        if layer.extra.keys().any(|k| k == "lfx2" || k == "lrFX" || k == "lmfx") {
+        if layer
+            .extra
+            .keys()
+            .any(|k| k == "lfx2" || k == "lrFX" || k == "lmfx")
+        {
             return PsdLayerKind::Effects;
         }
-        if layer.extra.keys().any(|k| Self::ADJUSTMENT_KEYS.contains(&k.as_str())) {
+        if layer
+            .extra
+            .keys()
+            .any(|k| Self::ADJUSTMENT_KEYS.contains(&k.as_str()))
+        {
             return PsdLayerKind::Adjustment;
         }
         PsdLayerKind::Raster
@@ -515,7 +563,11 @@ fn unicode_name(data: &[u8]) -> Option<String> {
         let lo = data[5 + i * 2];
         units.push((hi as u16) << 8 | lo as u16);
     }
-    Some(String::from_utf16_lossy(&units).trim_matches('\0').to_string())
+    Some(
+        String::from_utf16_lossy(&units)
+            .trim_matches('\0')
+            .to_string(),
+    )
 }
 
 /// `PSDAdjustments`: the three adjustment layers Compositor imports.
@@ -740,7 +792,10 @@ mod tests {
     #[test]
     fn cursor_reads_big_endian_and_truncates() {
         let data = [0x01, 0x02, 0x00, 0x00, 0x00, 0x7F];
-        let mut cursor = PsdCursor { data: &data, offset: 0 };
+        let mut cursor = PsdCursor {
+            data: &data,
+            offset: 0,
+        };
         assert_eq!(cursor.u16().unwrap(), 0x0102);
         assert_eq!(cursor.i32().unwrap(), 0x7F);
         assert_eq!(cursor.u8().unwrap_err(), PsdError::Truncated);
@@ -808,7 +863,10 @@ mod tests {
         data.push(name.len() as u8);
         data.extend_from_slice(name);
         data.extend(std::iter::repeat(0u8).take(name_pad));
-        let mut cursor = PsdCursor { data: &data, offset: 0 };
+        let mut cursor = PsdCursor {
+            data: &data,
+            offset: 0,
+        };
         let layer = PsdReader::read_record(&mut cursor).unwrap();
         assert_eq!(layer.name, "Caf\u{00E9}");
     }

@@ -85,10 +85,16 @@ pub fn wand_mask(
         }
         let mut left = x;
         let mut right = x;
-        while left > 0 && mask[y * width + left - 1] == 0 && wand_matches(&rgba.pixel(left - 1, y), &reference, tolerance) {
+        while left > 0
+            && mask[y * width + left - 1] == 0
+            && wand_matches(&rgba.pixel(left - 1, y), &reference, tolerance)
+        {
             left -= 1;
         }
-        while right + 1 < width && mask[y * width + right + 1] == 0 && wand_matches(&rgba.pixel(right + 1, y), &reference, tolerance) {
+        while right + 1 < width
+            && mask[y * width + right + 1] == 0
+            && wand_matches(&rgba.pixel(right + 1, y), &reference, tolerance)
+        {
             right += 1;
         }
         for v in &mut mask[y * width + left..y * width + right + 1] {
@@ -105,8 +111,8 @@ pub fn wand_mask(
             let ny = if side == 0 { y - 1 } else { y + 1 };
             let mut in_run = false;
             for nx in left..=right {
-                let candidate =
-                    mask[ny * width + nx] == 0 && wand_matches(&rgba.pixel(nx, ny), &reference, tolerance);
+                let candidate = mask[ny * width + nx] == 0
+                    && wand_matches(&rgba.pixel(nx, ny), &reference, tolerance);
                 if candidate && !in_run {
                     stack.push((nx, ny));
                 }
@@ -120,7 +126,11 @@ pub fn wand_mask(
 /// `wand_trace`: walks the boundary of a mask into loops of grid-corner
 /// points. Returns (points, loop lengths) or an error kind (1 = too many
 /// edges, 2 = out of memory — collapsed to None/false here).
-pub fn wand_trace(mask: &[u8], width: usize, height: usize) -> Result<(Vec<(i32, i32)>, Vec<i32>), TraceError> {
+pub fn wand_trace(
+    mask: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(Vec<(i32, i32)>, Vec<i32>), TraceError> {
     const EAST: u8 = 1;
     const SOUTH: u8 = 2;
     const WEST: u8 = 4;
@@ -128,19 +138,11 @@ pub fn wand_trace(mask: &[u8], width: usize, height: usize) -> Result<(Vec<(i32,
 
     #[inline]
     fn turn_right(d: u8) -> u8 {
-        if d == NORTH {
-            EAST
-        } else {
-            d << 1
-        }
+        if d == NORTH { EAST } else { d << 1 }
     }
     #[inline]
     fn turn_left(d: u8) -> u8 {
-        if d == EAST {
-            NORTH
-        } else {
-            d >> 1
-        }
+        if d == EAST { NORTH } else { d >> 1 }
     }
 
     if width == 0 || height == 0 {
@@ -155,7 +157,7 @@ pub fn wand_trace(mask: &[u8], width: usize, height: usize) -> Result<(Vec<(i32,
             if mask[y * width + x] == 0 {
                 continue;
             }
-            let mut add = |v: usize, d: u8, out: &mut Vec<u8>, edges: &mut usize| {
+            let add = |v: usize, d: u8, out: &mut Vec<u8>, edges: &mut usize| {
                 if out[v] & d == 0 {
                     out[v] |= d;
                     *edges += 1;

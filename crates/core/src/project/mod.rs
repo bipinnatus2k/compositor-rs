@@ -31,13 +31,13 @@ use uuid::Uuid;
 use crate::raster::{Bitmap, GrayMask};
 
 pub use convert::{document_from_project, project_from_document};
-pub use workspace::copy_layers_between;
 pub use manifest::{
-    image_file_name, mask_file_name, ManifestEffects, ManifestGuide, ManifestShape,
-    ManifestTextStyle, ManifestTransform, ProjectLayerRecord, ProjectManifest, CURRENT_VERSION,
-    FORMAT, MAX_VERSION, MIN_VERSION,
+    CURRENT_VERSION, FORMAT, MAX_VERSION, MIN_VERSION, ManifestEffects, ManifestGuide,
+    ManifestShape, ManifestTextStyle, ManifestTransform, ProjectLayerRecord, ProjectManifest,
+    image_file_name, mask_file_name,
 };
 pub use store::{load, save};
+pub use workspace::copy_layers_between;
 
 /// `ProjectSnapshot`: a validated manifest plus its decoded assets. Image
 /// pixels are premultiplied RGBA8 `Bitmap`s keyed by layer id; masks are

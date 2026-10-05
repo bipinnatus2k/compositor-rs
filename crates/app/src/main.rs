@@ -4,17 +4,15 @@
 //! target (`lib.rs`), so the binary only wires up the window.
 
 use compositor_app::{keys, state};
-use gpui_kit::{px, point, size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
-use gpui_kit::component::theme::{Theme, ThemeMode};
-use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::AppContext;
 use gpui_kit::assets::AllAssets;
+use gpui_kit::component::theme::{Theme, ThemeMode};
+use gpui_kit::component::{Root, TitleBar};
+use gpui_kit::{Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use state::AppState;
 
 fn main() {
-    gpui_kit::application()
-        .with_assets(AllAssets)
-        .run(|cx| {
+    gpui_kit::application().with_assets(AllAssets).run(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(keys::bindings());
         Theme::change(ThemeMode::Dark, None, cx);

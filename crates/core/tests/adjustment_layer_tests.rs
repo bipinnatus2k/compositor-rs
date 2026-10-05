@@ -15,17 +15,19 @@
 //! - `curvesIdentityAndImageCommandPreserveAlpha`'s filter-command half
 //!   (`beginFilter`/`commitFilter`) is not ported; the curves-identity half is.
 
+use compositor_core::adjust::hue_saturation::HueSaturationSettings;
+use compositor_core::adjust::image_adjustments::{BlackWhiteSettings, ColorBalanceSettings};
 use compositor_core::adjustment::{
     AdjustmentKind, CurvePoint, CurvesSettings, LayerAdjustment, LevelsSettings,
 };
 use compositor_core::document::PaletteColor;
 use compositor_core::filters::FilterSettings;
-use compositor_core::project::{document_from_project, project_from_document, save as save_project};
+use compositor_core::project::{
+    document_from_project, project_from_document, save as save_project,
+};
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render::draw_live_composite;
 use compositor_core::session::EditorSession;
-use compositor_core::adjust::hue_saturation::HueSaturationSettings;
-use compositor_core::adjust::image_adjustments::{BlackWhiteSettings, ColorBalanceSettings};
 
 const WHITE: PaletteColor = PaletteColor {
     red: 1.0,
@@ -83,7 +85,10 @@ fn global_adjustment_affects_below_but_not_above_and_remains_live() {
         vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
     );
     // A new layer lands above the adjustment and stays untouched.
-    s.insert_image(fixture(PaletteColor::new(1.0, 0.0, 0.0), [255, 0, 0, 0]), None);
+    s.insert_image(
+        fixture(PaletteColor::new(1.0, 0.0, 0.0), [255, 0, 0, 0]),
+        None,
+    );
     assert_eq!(rendered(&s)[0..4], [255, 0, 0, 255]);
     // The adjustment stays live: swapping the pixels under it re-renders.
     let base_id = {
@@ -96,7 +101,10 @@ fn global_adjustment_affects_below_but_not_above_and_remains_live() {
     s.select_layer(Some(adjustment));
     s.toggle_layer_visibility(adjustment);
     assert_eq!(rendered(&s)[4..8], [0, 0, 255, 255]);
-    assert_ne!(base_id, adjustment, "the base layer is distinct from the adjustment");
+    assert_ne!(
+        base_id, adjustment,
+        "the base layer is distinct from the adjustment"
+    );
 }
 
 /// Swift `clippedCurveChangesOnlyItsBaseAndCopyMergedMatchesExport` — the
@@ -121,7 +129,11 @@ fn curve_changes_everything_below_and_copy_merged_matches_export() {
     ];
     s.update_adjustment(adjustment, settings);
     // Unclipped, the curve inverts everything below it.
-    assert_eq!(rendered(&s)[4..8], [255, 255, 0, 255], "blue inverts to yellow");
+    assert_eq!(
+        rendered(&s)[4..8],
+        [255, 255, 0, 255],
+        "blue inverts to yellow"
+    );
     // Copy Merged exports exactly what the canvas shows.
     let (merged, _) = s.render_merged_pixels().expect("merged pixels");
     assert_eq!(merged.data.as_slice(), rendered(&s).as_slice());
@@ -147,13 +159,17 @@ fn hue_opacity_and_mask_preserve_original_pixels() {
     value.hue = 120.0;
     s.update_adjustment(id, value);
     let result = rendered(&s);
-    assert!(result[1] > 250 && result[0] < 5 && result[2] < 5, "red → green: {result:?}");
+    assert!(
+        result[1] > 250 && result[0] < 5 && result[2] < 5,
+        "red → green: {result:?}"
+    );
     // Opacity 0 and a hide-all mask both silence the adjustment; the base
     // pixels never move.
     s.document.as_mut().unwrap().layers[1].opacity = 0.0;
     assert_eq!(rendered(&s)[0..4], [255, 0, 0, 255]);
     s.document.as_mut().unwrap().layers[1].opacity = 1.0;
-    s.document.as_mut().unwrap().layers[1].mask = Some(compositor_core::document::LayerMask::solid(false));
+    s.document.as_mut().unwrap().layers[1].mask =
+        Some(compositor_core::document::LayerMask::solid(false));
     assert_eq!(rendered(&s)[0..4], [255, 0, 0, 255]);
     assert_eq!(
         s.document.as_ref().unwrap().layers[0]
@@ -179,13 +195,7 @@ fn adjustment_persists_duplicates_and_undo_restores_settings() {
         .clone()
         .expect("created adjustment");
     let mut value = LayerAdjustment::new(AdjustmentKind::Curves);
-    value.curves.channels[0].insert(
-        1,
-        CurvePoint {
-            x: 128.0,
-            y: 190.0,
-        },
-    );
+    value.curves.channels[0].insert(1, CurvePoint { x: 128.0, y: 190.0 });
     // The folded edit: open, push the settings through the editor field,
     // commit — one undo step named for the editor.
     assert!(s.begin_adjustment_editing(id));
@@ -196,7 +206,10 @@ fn adjustment_persists_duplicates_and_undo_restores_settings() {
     assert!(s.finish_adjustment_editing(true));
     assert_eq!(s.history.undo_name(), "Edit Curves Adjustment");
     s.undo();
-    assert_eq!(s.active_layer().unwrap().adjustment.as_ref(), Some(&created));
+    assert_eq!(
+        s.active_layer().unwrap().adjustment.as_ref(),
+        Some(&created)
+    );
     s.redo();
     assert_eq!(s.active_layer().unwrap().adjustment.as_ref(), Some(&value));
     s.duplicate_active_layer();
@@ -206,7 +219,10 @@ fn adjustment_persists_duplicates_and_undo_restores_settings() {
     let dir = std::env::temp_dir().join(format!("Adjustment-{}", uuid::Uuid::new_v4()));
     save_project(&dir, &data).expect("project saves");
     let loaded = compositor_core::project::load(&dir).expect("project loads");
-    assert_eq!(loaded.manifest.layers.last().unwrap().adjustment, Some(value.clone()));
+    assert_eq!(
+        loaded.manifest.layers.last().unwrap().adjustment,
+        Some(value.clone())
+    );
     let (document, active) = document_from_project(&loaded).expect("decodes");
     let mut restored = EditorSession::new();
     restored.document = Some(document);
@@ -219,12 +235,13 @@ fn adjustment_persists_duplicates_and_undo_restores_settings() {
 /// `beginFilter`/`commitFilter` command half is not ported (module notes).
 #[test]
 fn curves_identity_preserves_alpha() {
-    let asset = fixture(
-        PaletteColor::new(0.4, 0.7, 0.1),
-        [255, 128, 32, 0],
-    );
+    let asset = fixture(PaletteColor::new(0.4, 0.7, 0.1), [255, 128, 32, 0]);
     let applied = CurvesSettings::default().apply(asset.image.as_ref());
-    assert_eq!(applied.data, asset.image.as_ref().data, "an identity curve is a no-op");
+    assert_eq!(
+        applied.data,
+        asset.image.as_ref().data,
+        "an identity curve is a no-op"
+    );
 }
 
 /// Swift `adjustmentBlendAndSoftMaskPreserveCoverage` — the live-adjustment
@@ -261,7 +278,10 @@ fn invert_applies_without_an_editor() {
     session.create_document(2, 2, false);
     session.insert_image(opaque(WHITE), None);
     session.add_adjustment(AdjustmentKind::Invert);
-    assert!(session.adjustment_editing_id.is_none(), "nothing to edit, so no editor opens");
+    assert!(
+        session.adjustment_editing_id.is_none(),
+        "nothing to edit, so no editor opens"
+    );
     let adjustment = session
         .active_layer()
         .unwrap()
@@ -317,9 +337,17 @@ fn shared_editors_keep_pixels_dynamic_and_support_cancel() {
                     CurvePoint { x: 255.0, y: 0.0 },
                 ]
             }
-            AdjustmentKind::BlackWhite => filter.black_white = BlackWhiteSettings { reds: 100.0, ..Default::default() },
+            AdjustmentKind::BlackWhite => {
+                filter.black_white = BlackWhiteSettings {
+                    reds: 100.0,
+                    ..Default::default()
+                }
+            }
             AdjustmentKind::ColorBalance => {
-                filter.color_balance = ColorBalanceSettings { mid_cyan_red: 50.0, ..Default::default() }
+                filter.color_balance = ColorBalanceSettings {
+                    mid_cyan_red: 50.0,
+                    ..Default::default()
+                }
             }
             AdjustmentKind::Exposure => filter.exposure.exposure = 1.0,
             AdjustmentKind::GradientMap => filter.gradient_map.reversed = true,
@@ -359,7 +387,9 @@ fn shared_editors_keep_pixels_dynamic_and_support_cancel() {
                 AdjustmentKind::Curves => assert_eq!(live.curves, filter.curves),
                 AdjustmentKind::Hsv => assert_eq!(live.resolved_hsv(), hsv),
                 AdjustmentKind::BlackWhite => assert_eq!(live.black_white(), filter.black_white),
-                AdjustmentKind::ColorBalance => assert_eq!(live.color_balance(), filter.color_balance),
+                AdjustmentKind::ColorBalance => {
+                    assert_eq!(live.color_balance(), filter.color_balance)
+                }
                 AdjustmentKind::Exposure => assert_eq!(live.exposure(), filter.exposure),
                 AdjustmentKind::GradientMap => assert_eq!(live.gradient_map(), filter.gradient_map),
                 AdjustmentKind::Grain => assert_eq!(live.grain(), filter.grain),
@@ -407,7 +437,11 @@ fn shared_editors_keep_pixels_dynamic_and_support_cancel() {
             .clone()
             .unwrap();
         assert!(session.adjustment_editing_id.is_none());
-        assert!(session.levels.is_none() && session.filter_edit.is_none() && session.hue_saturation.is_none());
+        assert!(
+            session.levels.is_none()
+                && session.filter_edit.is_none()
+                && session.hue_saturation.is_none()
+        );
         // The pixels stay dynamic: the base keeps its own asset, the
         // adjustment layer carries none.
         assert_eq!(
@@ -423,7 +457,13 @@ fn shared_editors_keep_pixels_dynamic_and_support_cancel() {
                 .image,
             asset.image
         );
-        assert!(session.active_layer().map(|l| l.asset.is_none()).unwrap_or(false) || id != base_id);
+        assert!(
+            session
+                .active_layer()
+                .map(|l| l.asset.is_none())
+                .unwrap_or(false)
+                || id != base_id
+        );
         // The saved settings round-trip through the manifest coding.
         let encoded = serde_json::to_vec(&saved).expect("encodes");
         let decoded: LayerAdjustment = serde_json::from_slice(&encoded).expect("decodes");

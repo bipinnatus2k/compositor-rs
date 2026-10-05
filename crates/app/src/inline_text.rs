@@ -64,14 +64,16 @@ impl ScreenSize {
     }
 }
 
-use gpui_kit::component::input::Textarea;
-use gpui_kit::{px, relative, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
 use gpui_kit::MouseButton;
+use gpui_kit::component::input::Textarea;
 use gpui_kit::{Context, Window};
+use gpui_kit::{
+    Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px, relative,
+};
 
 use compositor_core::document::LayerTextStyle;
 use compositor_core::geometry::{CGPoint, CGSize};
-use compositor_core::transform::{LayerTransform, HANDLES};
+use compositor_core::transform::{HANDLES, LayerTransform};
 
 use crate::state::{AppState, CanvasDrag};
 
@@ -145,7 +147,8 @@ pub fn inline_text_box(
     pan: (f64, f64),
 ) -> ((f32, f32), (f32, f32)) {
     let transform = inline_text_shown_transform(origin, transform, box_size, measured, asset_width);
-    let (sx, sy) = crate::state::doc_to_screen_at(zoom, pan, transform.origin.x, transform.origin.y);
+    let (sx, sy) =
+        crate::state::doc_to_screen_at(zoom, pan, transform.origin.x, transform.origin.y);
     (
         (sx, sy),
         (
@@ -175,11 +178,7 @@ pub fn inline_text_measured_size(style: &LayerTextStyle) -> CGSize {
 /// scale, matching the axis-aligned text this port draws (see the module
 /// note on `render_inline_text_overlay`). A degenerate logical size falls
 /// back to the plain zoom.
-pub fn inline_text_content_inset(
-    box_screen: ScreenSize,
-    logical: CGSize,
-    zoom: f64,
-) -> ScreenSize {
+pub fn inline_text_content_inset(box_screen: ScreenSize, logical: CGSize, zoom: f64) -> ScreenSize {
     let scale_x = if logical.width > 0.0 {
         box_screen.width as f64 / logical.width
     } else {
@@ -292,7 +291,12 @@ pub fn inline_text_box_corners(
     let (hw, hh) = (size.0 / 2.0, size.1 / 2.0);
     // Clockwise on the y-down screen, like a layer's own rotation.
     let corner = |ox: f32, oy: f32| (cx + ox * cr - oy * sr, cy + ox * sr + oy * cr);
-    [corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)]
+    [
+        corner(-hw, -hh),
+        corner(hw, -hh),
+        corner(hw, hh),
+        corner(-hw, hh),
+    ]
 }
 
 /// A press's point in the editor's own logical units: out of the document,
@@ -487,7 +491,10 @@ impl AppState {
     /// The editor's shown geometry for a draft (`synchronize`): the logical
     /// size the text lays out at and the transform displayed — for point text
     /// on a layer, the growth-compensated one (`inline_text_shown_transform`).
-    pub fn inline_text_shown(&self, draft: &compositor_core::session::TextDraft) -> (CGSize, LayerTransform) {
+    pub fn inline_text_shown(
+        &self,
+        draft: &compositor_core::session::TextDraft,
+    ) -> (CGSize, LayerTransform) {
         let measured = inline_text_measured_size(&draft.style);
         let logical = draft.style.box_size.unwrap_or(measured);
         let asset_width = self.inline_text_asset_width(draft);
@@ -585,15 +592,16 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             loop {
                 smol::Timer::after(std::time::Duration::from_millis(530)).await;
-                let ok = this.update(cx, |this, cx| {
-                    if !this.inline_text_open {
-                        return false;
-                    }
-                    this.inline_text_caret_phase = std::time::Instant::now();
-                    cx.notify();
-                    true
-                })
-                .ok();
+                let ok = this
+                    .update(cx, |this, cx| {
+                        if !this.inline_text_open {
+                            return false;
+                        }
+                        this.inline_text_caret_phase = std::time::Instant::now();
+                        cx.notify();
+                        true
+                    })
+                    .ok();
                 if ok == Some(false) {
                     break;
                 }
@@ -654,7 +662,9 @@ impl AppState {
             inset: inline_text_content_inset(size, logical, self.zoom),
             line_ratio: inline_text_line_ratio(&draft.style),
             font_px: (draft.style.font_size * self.zoom).max(6.0) as f32,
-            color: (rgb(draft.style.red) << 16) | (rgb(draft.style.green) << 8) | rgb(draft.style.blue),
+            color: (rgb(draft.style.red) << 16)
+                | (rgb(draft.style.green) << 8)
+                | rgb(draft.style.blue),
             font_family: draft.style.font_name.clone(),
         })
     }
@@ -700,18 +710,16 @@ impl AppState {
     ) -> Option<gpui_kit::AnyElement> {
         let overlay = self.inline_text_overlay()?;
         let input = self.inline_text_input.clone();
-        let on_press = cx.listener(
-            |this, event: &gpui_kit::MouseDownEvent, _window, cx| {
-                let local = this.local_position(event.position);
-                let doc = this.screen_to_doc(local.0, local.1);
-                if this.tab().session.text_draft.is_some() {
-                    if let Some(handle) = this.inline_text_handle_hit(doc) {
-                        this.begin_inline_text_resize(doc, handle, cx);
-                    }
-                }
-                cx.stop_propagation();
-            },
-        );
+        let on_press = cx.listener(|this, event: &gpui_kit::MouseDownEvent, _window, cx| {
+            let local = this.local_position(event.position);
+            let doc = this.screen_to_doc(local.0, local.1);
+            if this.tab().session.text_draft.is_some()
+                && let Some(handle) = this.inline_text_handle_hit(doc)
+            {
+                this.begin_inline_text_resize(doc, handle, cx);
+            }
+            cx.stop_propagation();
+        });
         // Option-arrow spacing while the input owns the keyboard
         // (`CanvasTextView.keyDown`): the chords are bound to these actions
         // (`keys::inline_text_bindings`) so they outrank the text system's
@@ -932,15 +940,15 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_text_box, inline_text_box_corners, inline_text_content_inset, inline_text_handle_at,
-        inline_text_handle_size, inline_text_key, inline_text_line_ratio, inline_text_local_point,
-        inline_text_measured_size, inline_text_overflows, inline_text_resize,
-        inline_text_shown_transform, InlineTextKey, ScreenSize,
+        InlineTextKey, ScreenSize, inline_text_box, inline_text_box_corners,
+        inline_text_content_inset, inline_text_handle_at, inline_text_handle_size, inline_text_key,
+        inline_text_line_ratio, inline_text_local_point, inline_text_measured_size,
+        inline_text_overflows, inline_text_resize, inline_text_shown_transform,
     };
     use crate::state::doc_to_screen_at;
     use compositor_core::document::{LayerTextStyle, TextAlignment};
     use compositor_core::geometry::{CGPoint, CGSize};
-    use compositor_core::transform::{LayerTransform, HANDLES};
+    use compositor_core::transform::{HANDLES, LayerTransform};
 
     #[test]
     fn boxed_text_uses_the_draft_transform_through_the_view_transform() {
@@ -1203,7 +1211,8 @@ mod tests {
         // A rotated layer turns about its center, so growing it swings its
         // corner away — the anchor correction puts the corner back
         // (InlineTextEditor.swift:112-117).
-        let mut transform = LayerTransform::new(CGPoint::new(100.0, 50.0), CGSize::new(300.0, 120.0));
+        let mut transform =
+            LayerTransform::new(CGPoint::new(100.0, 50.0), CGSize::new(300.0, 120.0));
         transform.rotation = 30.0;
         let shown = inline_text_shown_transform(
             transform.origin,
@@ -1336,7 +1345,8 @@ mod tests {
         // mapped to the screen (Swift pins the rotated top-left to the
         // anchor; InlineTextEditor.swift:124-134). Try a few angles.
         for rotation in [0.0, 90.0, -37.5, 415.0] {
-            let mut transform = LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
+            let mut transform =
+                LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
             transform.rotation = rotation;
             let zoom = 2.0;
             let pan = (5.0, 7.0);
@@ -1395,25 +1405,64 @@ mod tests {
         let handle_size = 6.0;
         let reach = handle_size * 10.0 / 6.0; // 10
         // Corners.
-        assert_eq!(inline_text_handle_at(CGPoint::new(2.0, 3.0), bounds, handle_size), Some(0));
-        assert_eq!(inline_text_handle_at(CGPoint::new(295.0, 1.0), bounds, handle_size), Some(2));
-        assert_eq!(inline_text_handle_at(CGPoint::new(298.0, 198.0), bounds, handle_size), Some(4));
-        assert_eq!(inline_text_handle_at(CGPoint::new(1.0, 195.0), bounds, handle_size), Some(6));
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(2.0, 3.0), bounds, handle_size),
+            Some(0)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(295.0, 1.0), bounds, handle_size),
+            Some(2)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(298.0, 198.0), bounds, handle_size),
+            Some(4)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(1.0, 195.0), bounds, handle_size),
+            Some(6)
+        );
         // Edge midpoints.
-        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 5.0), bounds, handle_size), Some(1));
-        assert_eq!(inline_text_handle_at(CGPoint::new(295.0, 100.0), bounds, handle_size), Some(3));
-        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 195.0), bounds, handle_size), Some(5));
-        assert_eq!(inline_text_handle_at(CGPoint::new(5.0, 100.0), bounds, handle_size), Some(7));
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(150.0, 5.0), bounds, handle_size),
+            Some(1)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(295.0, 100.0), bounds, handle_size),
+            Some(3)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(150.0, 195.0), bounds, handle_size),
+            Some(5)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(5.0, 100.0), bounds, handle_size),
+            Some(7)
+        );
         // The middle is the text, not a handle.
-        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 100.0), bounds, handle_size), None);
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(150.0, 100.0), bounds, handle_size),
+            None
+        );
         // Beyond the bands — even outside the box — nothing hits.
-        assert_eq!(inline_text_handle_at(CGPoint::new(150.0, 50.0), bounds, handle_size), None);
-        assert_eq!(inline_text_handle_at(CGPoint::new(320.0, 100.0), bounds, handle_size), None);
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(150.0, 50.0), bounds, handle_size),
+            None
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(320.0, 100.0), bounds, handle_size),
+            None
+        );
         // A small box caps the reach at a third of the shorter side, so the
         // middle stays typable.
         let small = CGSize::new(24.0, 24.0);
-        assert_eq!(inline_text_handle_at(CGPoint::new(12.0, 1.0), small, handle_size), Some(1));
-        assert_eq!(inline_text_handle_at(CGPoint::new(12.0, 12.0), small, handle_size), None);
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(12.0, 1.0), small, handle_size),
+            Some(1)
+        );
+        assert_eq!(
+            inline_text_handle_at(CGPoint::new(12.0, 12.0), small, handle_size),
+            None
+        );
     }
 
     #[test]
@@ -1492,14 +1541,16 @@ mod tests {
         assert_eq!(resized.transform.size, CGSize::new(16.0, 16.0));
         // A degenerate box size (a zero-size source poisons the math) fails
         // `boxIsValid` and leaves the draft alone.
-        assert!(inline_text_resize(
-            &old,
-            CGSize::new(0.0, 80.0),
-            0,
-            CGPoint::ZERO,
-            CGPoint::new(10.0, 0.0)
-        )
-        .is_none());
+        assert!(
+            inline_text_resize(
+                &old,
+                CGSize::new(0.0, 80.0),
+                0,
+                CGPoint::ZERO,
+                CGPoint::new(10.0, 0.0)
+            )
+            .is_none()
+        );
     }
 
     #[test]

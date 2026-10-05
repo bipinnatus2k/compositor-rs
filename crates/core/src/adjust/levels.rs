@@ -84,7 +84,9 @@ impl LevelRange {
     /// Input 0–1 → output 0–1.
     pub fn apply(&self, value: f64) -> f64 {
         let s = self.normalized();
-        let input = ((value * 255.0 - s.black) / (s.white - s.black)).min(1.0).max(0.0);
+        let input = ((value * 255.0 - s.black) / (s.white - s.black))
+            .min(1.0)
+            .max(0.0);
         (s.output_black + input.powf(1.0 / s.gamma) * (s.output_white - s.output_black)) / 255.0
     }
 }
@@ -111,7 +113,9 @@ impl LevelsSettings {
     }
 
     pub fn is_identity(&self) -> bool {
-        self.ranges.iter().all(|r| r.normalized() == LevelRange::default())
+        self.ranges
+            .iter()
+            .all(|r| r.normalized() == LevelRange::default())
     }
 
     /// Individual channels, followed by the composite RGB adjustment.
@@ -142,13 +146,17 @@ pub fn levels_apply(pixels: &mut [u8], tables: &[f32; 768]) {
 /// `levels_histogram` (LevelsPixels.c): fills 1024 bins — bin `[0..256]` is RGB
 /// (the mean of the three channel histograms, not a luminance histogram), then
 /// red, green, blue. `coverage` weights each pixel when a selection clips it.
-pub fn levels_histogram(pixels: &crate::raster::Bitmap, coverage: Option<&crate::raster::GrayMask>, bins: &mut [f64; 1024]) {
+pub fn levels_histogram(
+    pixels: &crate::raster::Bitmap,
+    coverage: Option<&crate::raster::GrayMask>,
+    bins: &mut [f64; 1024],
+) {
     for (i, px) in pixels.data.chunks_exact(4).enumerate() {
         if px[3] == 0 {
             continue;
         }
-        let weight = px[3] as f64 / 255.0
-            * coverage.map(|c| c.data[i] as f64 / 255.0).unwrap_or(1.0);
+        let weight =
+            px[3] as f64 / 255.0 * coverage.map(|c| c.data[i] as f64 / 255.0).unwrap_or(1.0);
         for channel in 0..3 {
             let value = ((px[channel] as f64 * 255.0 / px[3] as f64).round() as usize).min(255);
             bins[(channel + 1) * 256 + value] += weight;
@@ -163,7 +171,11 @@ pub struct LevelsHistogramDisplay;
 
 impl LevelsHistogramDisplay {
     pub fn scale(bins: &[f64]) -> f64 {
-        let peak = bins.iter().copied().filter(|b| b.is_finite() && *b > 0.0).fold(0.0, f64::max);
+        let peak = bins
+            .iter()
+            .copied()
+            .filter(|b| b.is_finite() && *b > 0.0)
+            .fold(0.0, f64::max);
         if peak <= 0.0 {
             return 0.0;
         }
@@ -196,6 +208,8 @@ mod tests {
     }
 
     #[test]
+    // `0.70710678` is the ported XCTest's assertion literal, kept verbatim.
+    #[allow(clippy::approx_constant)]
     fn level_range_gamma_brightens_midtones() {
         let r = LevelRange {
             gamma: 2.0,

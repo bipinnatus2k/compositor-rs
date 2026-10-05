@@ -16,8 +16,10 @@ pub use channel_coder::PsdChannelCoder;
 pub use document_builder::{PsdDocumentBuilder, PsdImport};
 pub use fixture::PsdFixture;
 pub use reader::{PsdAdjustments, PsdReader};
-pub use types::{blend_mode_from_psd, PsdConversion, PsdDocument, PsdError, PsdLayerKind, PsdRecord};
-pub use vector::{PsdVector, MAX_SHAPE_PIXELS};
+pub use types::{
+    PsdConversion, PsdDocument, PsdError, PsdLayerKind, PsdRecord, blend_mode_from_psd,
+};
+pub use vector::{MAX_SHAPE_PIXELS, PsdVector};
 
 #[cfg(test)]
 mod tests {
@@ -31,7 +33,14 @@ mod tests {
     const DEFAULT_PIXEL_BUDGET: i64 = 100_000_000;
 
     /// A solid-color premultiplied bitmap (`colorImage` in the Swift tests).
-    fn color_image(width: usize, height: usize, red: f64, green: f64, blue: f64, alpha: f64) -> Bitmap {
+    fn color_image(
+        width: usize,
+        height: usize,
+        red: f64,
+        green: f64,
+        blue: f64,
+        alpha: f64,
+    ) -> Bitmap {
         Bitmap::new_clearing(
             width,
             height,
@@ -45,7 +54,11 @@ mod tests {
     }
 
     fn gray_image(width: usize, height: usize, value: f64) -> GrayMask {
-        GrayMask::from_raw(width, height, vec![(value * 255.0 + 0.5) as u8; width * height])
+        GrayMask::from_raw(
+            width,
+            height,
+            vec![(value * 255.0 + 0.5) as u8; width * height],
+        )
     }
 
     fn push16(data: &mut Vec<u8>, value: u16) {
@@ -146,10 +159,19 @@ mod tests {
         let data = PsdFixture::data(&document, &composite).unwrap();
         let imported = PsdDocumentBuilder::make_import(&PsdReader::read(&data).unwrap());
         assert!(imported.conversions.is_empty());
-        assert!(imported.layers.iter().any(|l| l.is_group && l.name == "Stack"));
+        assert!(
+            imported
+                .layers
+                .iter()
+                .any(|l| l.is_group && l.name == "Stack")
+        );
         let folder = imported.layers.iter().find(|l| l.is_group).unwrap();
         let imported_base = imported.layers.iter().find(|l| l.name == "Base").unwrap();
-        let imported_child = imported.layers.iter().find(|l| l.name == "Clipped").unwrap();
+        let imported_child = imported
+            .layers
+            .iter()
+            .find(|l| l.name == "Clipped")
+            .unwrap();
         assert_eq!(imported_base.parent_id, Some(folder.id));
         assert_eq!(imported_child.parent_id, Some(folder.id));
         assert!(imported_base.mask.is_some());
@@ -178,12 +200,14 @@ mod tests {
         let imported = PsdDocumentBuilder::make_import(&PsdReader::read(&data).unwrap());
         let folder = imported.layers.iter().find(|l| l.is_group).unwrap();
         assert_eq!(folder.name, "Stack");
-        assert!(imported
-            .layers
-            .iter()
-            .find(|l| l.name == "Base")
-            .map(|l| l.parent_id == Some(folder.id))
-            .unwrap_or(false));
+        assert!(
+            imported
+                .layers
+                .iter()
+                .find(|l| l.name == "Base")
+                .map(|l| l.parent_id == Some(folder.id))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -268,11 +292,16 @@ mod tests {
         let data = PsdFixture::data(&document, &fill).unwrap();
         let imported = PsdDocumentBuilder::make_import(&PsdReader::read(&data).unwrap());
         assert!(!imported.conversions.is_empty());
-        assert!(imported
-            .conversions
-            .iter()
-            .any(|c| c.layer_name == "Dissolved" && c.message.contains("diss")));
-        assert_eq!(imported.layers.first().unwrap().blend_mode, LayerBlendMode::Normal);
+        assert!(
+            imported
+                .conversions
+                .iter()
+                .any(|c| c.layer_name == "Dissolved" && c.message.contains("diss"))
+        );
+        assert_eq!(
+            imported.layers.first().unwrap().blend_mode,
+            LayerBlendMode::Normal
+        );
     }
 
     #[test]
@@ -291,7 +320,10 @@ mod tests {
         let data = PsdFixture::data(&document, &fill).unwrap();
         let imported = PsdDocumentBuilder::make_import(&PsdReader::read(&data).unwrap());
         assert!(imported.conversions.is_empty());
-        assert_eq!(imported.layers.first().unwrap().blend_mode, LayerBlendMode::SoftLight);
+        assert_eq!(
+            imported.layers.first().unwrap().blend_mode,
+            LayerBlendMode::SoftLight
+        );
     }
 
     /// Folders took an opacity of their own in 1.1.6, so it imports onto the folder.
@@ -318,10 +350,12 @@ mod tests {
         let folder = imported.layers.iter().find(|l| l.is_group).unwrap();
         // Photoshop stores opacity in one byte, so a half-opaque group comes back as 128/255.
         assert!((folder.opacity - 0.5).abs() < 0.01);
-        assert!(!imported
-            .conversions
-            .iter()
-            .any(|c| c.layer_name == "Stack" && c.message.contains("opacity")));
+        assert!(
+            !imported
+                .conversions
+                .iter()
+                .any(|c| c.layer_name == "Stack" && c.message.contains("opacity"))
+        );
     }
 
     #[test]
@@ -389,15 +423,21 @@ mod tests {
             HashMap::from([
                 (
                     "vmsk".to_string(),
-                    base64_decode("AAAAAwAAAAAABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAQDHWSAAXn4FAMdZIABSZmYAx1kgAEZOxwABALX4sAA8iIgAoHlcADyIiACK+gkAPIiIAAEAeZmZAEZOxwB5mZkAUmZmAHmZmQBefgUAAQCK+gkAaEREAKB5XABoREQAtfiwAGhERAAA"),
+                    base64_decode(
+                        "AAAAAwAAAAAABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAQDHWSAAXn4FAMdZIABSZmYAx1kgAEZOxwABALX4sAA8iIgAoHlcADyIiACK+gkAPIiIAAEAeZmZAEZOxwB5mZkAUmZmAHmZmQBefgUAAQCK+gkAaEREAKB5XABoREQAtfiwAGhERAAA",
+                    ),
                 ),
                 (
                     "SoCo".to_string(),
-                    base64_decode("AAAAEAAAAAEAAAAAAABudWxsAAAAAQAAAABDbHIgT2JqYwAAAAEAAAAAAABSR0JDAAAAAwAAAABSZCAgZG91YgAAAAAAAAAAAAAAAEdybiBkb3ViQFuAAAAAAAAAAAAAQmwgIGRvdWJAb+AAAAAAAA=="),
+                    base64_decode(
+                        "AAAAEAAAAAEAAAAAAABudWxsAAAAAQAAAABDbHIgT2JqYwAAAAEAAAAAAABSR0JDAAAAAwAAAABSZCAgZG91YgAAAAAAAAAAAAAAAEdybiBkb3ViQFuAAAAAAAAAAAAAQmwgIGRvdWJAb+AAAAAAAA==",
+                    ),
                 ),
                 (
                     "vstk".to_string(),
-                    base64_decode("AAAAEAAAAAEAAAAAAAtzdHJva2VTdHlsZQAAABAAAAASc3Ryb2tlU3R5bGVWZXJzaW9ubG9uZwAAAAIAAAANc3Ryb2tlRW5hYmxlZGJvb2wAAAAAC2ZpbGxFbmFibGVkYm9vbAEAAAAUc3Ryb2tlU3R5bGVMaW5lV2lkdGhVbnRGI1B4bEAjvQfpGNNeAAAAGXN0cm9rZVN0eWxlTGluZURhc2hPZmZzZXRVbnRGI1BudAAAAAAAAAAAAAAAFXN0cm9rZVN0eWxlTWl0ZXJMaW1pdGRvdWJAWQAAAAAAAAAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlZW51bQAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlAAAAEnN0cm9rZVN0eWxlQnV0dENhcAAAABdzdHJva2VTdHlsZUxpbmVKb2luVHlwZWVudW0AAAAXc3Ryb2tlU3R5bGVMaW5lSm9pblR5cGUAAAAUc3Ryb2tlU3R5bGVNaXRlckpvaW4AAAAYc3Ryb2tlU3R5bGVMaW5lQWxpZ25tZW50ZW51bQAAABhzdHJva2VTdHlsZUxpbmVBbGlnbm1lbnQAAAAWc3Ryb2tlU3R5bGVBbGlnbkNlbnRlcgAAABRzdHJva2VTdHlsZVNjYWxlTG9ja2Jvb2wAAAAAF3N0cm9rZVN0eWxlU3Ryb2tlQWRqdXN0Ym9vbAAAAAAWc3Ryb2tlU3R5bGVMaW5lRGFzaFNldFZsTHMAAAAAAAAAFHN0cm9rZVN0eWxlQmxlbmRNb2RlZW51bQAAAABCbG5NAAAAAE5ybWwAAAASc3Ryb2tlU3R5bGVPcGFjaXR5VW50RiNQcmNAWQAAAAAAAAAAABJzdHJva2VTdHlsZUNvbnRlbnRPYmpjAAAAAQAAAAAAD3NvbGlkQ29sb3JMYXllcgAAAAEAAAAAQ2xyIE9iamMAAAABAAAAAAAAUkdCQwAAAAMAAAAAUmQgIGRvdWJAb+AAAAAAAAAAAABHcm4gZG91YkBv4AAAAAAAAAAAAEJsICBkb3ViAAAAAAAAAAAAAAAVc3Ryb2tlU3R5bGVSZXNvbHV0aW9uZG91YkBSAAAAAAAA"),
+                    base64_decode(
+                        "AAAAEAAAAAEAAAAAAAtzdHJva2VTdHlsZQAAABAAAAASc3Ryb2tlU3R5bGVWZXJzaW9ubG9uZwAAAAIAAAANc3Ryb2tlRW5hYmxlZGJvb2wAAAAAC2ZpbGxFbmFibGVkYm9vbAEAAAAUc3Ryb2tlU3R5bGVMaW5lV2lkdGhVbnRGI1B4bEAjvQfpGNNeAAAAGXN0cm9rZVN0eWxlTGluZURhc2hPZmZzZXRVbnRGI1BudAAAAAAAAAAAAAAAFXN0cm9rZVN0eWxlTWl0ZXJMaW1pdGRvdWJAWQAAAAAAAAAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlZW51bQAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlAAAAEnN0cm9rZVN0eWxlQnV0dENhcAAAABdzdHJva2VTdHlsZUxpbmVKb2luVHlwZWVudW0AAAAXc3Ryb2tlU3R5bGVMaW5lSm9pblR5cGUAAAAUc3Ryb2tlU3R5bGVNaXRlckpvaW4AAAAYc3Ryb2tlU3R5bGVMaW5lQWxpZ25tZW50ZW51bQAAABhzdHJva2VTdHlsZUxpbmVBbGlnbm1lbnQAAAAWc3Ryb2tlU3R5bGVBbGlnbkNlbnRlcgAAABRzdHJva2VTdHlsZVNjYWxlTG9ja2Jvb2wAAAAAF3N0cm9rZVN0eWxlU3Ryb2tlQWRqdXN0Ym9vbAAAAAAWc3Ryb2tlU3R5bGVMaW5lRGFzaFNldFZsTHMAAAAAAAAAFHN0cm9rZVN0eWxlQmxlbmRNb2RlZW51bQAAAABCbG5NAAAAAE5ybWwAAAASc3Ryb2tlU3R5bGVPcGFjaXR5VW50RiNQcmNAWQAAAAAAAAAAABJzdHJva2VTdHlsZUNvbnRlbnRPYmpjAAAAAQAAAAAAD3NvbGlkQ29sb3JMYXllcgAAAAEAAAAAQ2xyIE9iamMAAAABAAAAAAAAUkdCQwAAAAMAAAAAUmQgIGRvdWJAb+AAAAAAAAAAAABHcm4gZG91YkBv4AAAAAAAAAAAAEJsICBkb3ViAAAAAAAAAAAAAAAVc3Ryb2tlU3R5bGVSZXNvbHV0aW9uZG91YkBSAAAAAAAA",
+                    ),
                 ),
             ])
         }
@@ -406,15 +446,21 @@ mod tests {
             HashMap::from([
                 (
                     "vmsk".to_string(),
-                    base64_decode("AAAAAwAAAAAABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAQAkREQA1CIiACRERADUIiIAJEREANQiIgABAE9oSwDUIiIAT2hLANQiIgBPaEsA1CIiAAEAT2hLAH4AAABPaEsAfgAAAE9oSwB+AAAAAQAkREQAfgAAACRERAB+AAAAJEREAH4AAAAA"),
+                    base64_decode(
+                        "AAAAAwAAAAAABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAABAAEAAAAAAAAAAAAAAAAAAAAAAAAAAQAkREQA1CIiACRERADUIiIAJEREANQiIgABAE9oSwDUIiIAT2hLANQiIgBPaEsA1CIiAAEAT2hLAH4AAABPaEsAfgAAAE9oSwB+AAAAAQAkREQAfgAAACRERAB+AAAAJEREAH4AAAAA",
+                    ),
                 ),
                 (
                     "SoCo".to_string(),
-                    base64_decode("AAAAEAAAAAEAAAAAAABudWxsAAAAAQAAAABDbHIgT2JqYwAAAAEAAAAAAABSR0JDAAAAAwAAAABSZCAgZG91YgAAAAAAAAAAAAAAAEdybiBkb3ViAAAAAAAAAAAAAAAAQmwgIGRvdWIAAAAAAAAAAA=="),
+                    base64_decode(
+                        "AAAAEAAAAAEAAAAAAABudWxsAAAAAQAAAABDbHIgT2JqYwAAAAEAAAAAAABSR0JDAAAAAwAAAABSZCAgZG91YgAAAAAAAAAAAAAAAEdybiBkb3ViAAAAAAAAAAAAAAAAQmwgIGRvdWIAAAAAAAAAAA==",
+                    ),
                 ),
                 (
                     "vstk".to_string(),
-                    base64_decode("AAAAEAAAAAEAAAAAAAtzdHJva2VTdHlsZQAAABAAAAASc3Ryb2tlU3R5bGVWZXJzaW9ubG9uZwAAAAIAAAANc3Ryb2tlRW5hYmxlZGJvb2wBAAAAC2ZpbGxFbmFibGVkYm9vbAEAAAAUc3Ryb2tlU3R5bGVMaW5lV2lkdGhVbnRGI1B4bEAjvQfpGNNeAAAAGXN0cm9rZVN0eWxlTGluZURhc2hPZmZzZXRVbnRGI1BudAAAAAAAAAAAAAAAFXN0cm9rZVN0eWxlTWl0ZXJMaW1pdGRvdWJAWQAAAAAAAAAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlZW51bQAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlAAAAEnN0cm9rZVN0eWxlQnV0dENhcAAAABdzdHJva2VTdHlsZUxpbmVKb2luVHlwZWVudW0AAAAXc3Ryb2tlU3R5bGVMaW5lSm9pblR5cGUAAAAUc3Ryb2tlU3R5bGVNaXRlckpvaW4AAAAYc3Ryb2tlU3R5bGVMaW5lQWxpZ25tZW50ZW51bQAAABhzdHJva2VTdHlsZUxpbmVBbGlnbm1lbnQAAAAWc3Ryb2tlU3R5bGVBbGlnbkNlbnRlcgAAABRzdHJva2VTdHlsZVNjYWxlTG9ja2Jvb2wAAAAAF3N0cm9rZVN0eWxlU3Ryb2tlQWRqdXN0Ym9vbAAAAAAWc3Ryb2tlU3R5bGVMaW5lRGFzaFNldFZsTHMAAAAAAAAAFHN0cm9rZVN0eWxlQmxlbmRNb2RlZW51bQAAAABCbG5NAAAAAE5ybWwAAAASc3Ryb2tlU3R5bGVPcGFjaXR5VW50RiNQcmNAWQAAAAAAAAAAABJzdHJva2VTdHlsZUNvbnRlbnRPYmpjAAAAAQAAAAAAD3NvbGlkQ29sb3JMYXllcgAAAAEAAAAAQ2xyIE9iamMAAAABAAAAAAAAUkdCQwAAAAMAAAAAUmQgIGRvdWJAb+AAAAAAAAAAAABHcm4gZG91YkBv4AAAAAAAAAAAAEJsICBkb3ViAAAAAAAAAAAAAAAVc3Ryb2tlU3R5bGVSZXNvbHV0aW9uZG91YkBSAAAAAAAA"),
+                    base64_decode(
+                        "AAAAEAAAAAEAAAAAAAtzdHJva2VTdHlsZQAAABAAAAASc3Ryb2tlU3R5bGVWZXJzaW9ubG9uZwAAAAIAAAANc3Ryb2tlRW5hYmxlZGJvb2wBAAAAC2ZpbGxFbmFibGVkYm9vbAEAAAAUc3Ryb2tlU3R5bGVMaW5lV2lkdGhVbnRGI1B4bEAjvQfpGNNeAAAAGXN0cm9rZVN0eWxlTGluZURhc2hPZmZzZXRVbnRGI1BudAAAAAAAAAAAAAAAFXN0cm9rZVN0eWxlTWl0ZXJMaW1pdGRvdWJAWQAAAAAAAAAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlZW51bQAAABZzdHJva2VTdHlsZUxpbmVDYXBUeXBlAAAAEnN0cm9rZVN0eWxlQnV0dENhcAAAABdzdHJva2VTdHlsZUxpbmVKb2luVHlwZWVudW0AAAAXc3Ryb2tlU3R5bGVMaW5lSm9pblR5cGUAAAAUc3Ryb2tlU3R5bGVNaXRlckpvaW4AAAAYc3Ryb2tlU3R5bGVMaW5lQWxpZ25tZW50ZW51bQAAABhzdHJva2VTdHlsZUxpbmVBbGlnbm1lbnQAAAAWc3Ryb2tlU3R5bGVBbGlnbkNlbnRlcgAAABRzdHJva2VTdHlsZVNjYWxlTG9ja2Jvb2wAAAAAF3N0cm9rZVN0eWxlU3Ryb2tlQWRqdXN0Ym9vbAAAAAAWc3Ryb2tlU3R5bGVMaW5lRGFzaFNldFZsTHMAAAAAAAAAFHN0cm9rZVN0eWxlQmxlbmRNb2RlZW51bQAAAABCbG5NAAAAAE5ybWwAAAASc3Ryb2tlU3R5bGVPcGFjaXR5VW50RiNQcmNAWQAAAAAAAAAAABJzdHJva2VTdHlsZUNvbnRlbnRPYmpjAAAAAQAAAAAAD3NvbGlkQ29sb3JMYXllcgAAAAEAAAAAQ2xyIE9iamMAAAABAAAAAAAAUkdCQwAAAAMAAAAAUmQgIGRvdWJAb+AAAAAAAAAAAABHcm4gZG91YkBv4AAAAAAAAAAAAEJsICBkb3ViAAAAAAAAAAAAAAAVc3Ryb2tlU3R5bGVSZXNvbHV0aW9uZG91YkBSAAAAAAAA",
+                    ),
                 ),
             ])
         }
@@ -457,7 +503,14 @@ mod tests {
         color_descriptor(red, green, blue)
     }
 
-    fn stroke_style(fill: bool, stroke: bool, width: f64, red: f64, green: f64, blue: f64) -> Vec<u8> {
+    fn stroke_style(
+        fill: bool,
+        stroke: bool,
+        width: f64,
+        red: f64,
+        green: f64,
+        blue: f64,
+    ) -> Vec<u8> {
         let mut data = Vec::new();
         for (key, value) in [("strokeEnabled", stroke), ("fillEnabled", fill)] {
             data.extend_from_slice(key.as_bytes());
@@ -545,9 +598,10 @@ mod tests {
         assert!((circle.bounds.mid_y() - 677.0).abs() < 8.0);
         assert!((circle.bounds.size.width - 328.0).abs() < 12.0);
         assert!((circle.bounds.size.height - 328.0).abs() < 12.0);
-        let rectangle = PsdVector::raster(&vector_fixtures::rectangle(), canvas, DEFAULT_PIXEL_BUDGET)
-            .unwrap()
-            .unwrap();
+        let rectangle =
+            PsdVector::raster(&vector_fixtures::rectangle(), canvas, DEFAULT_PIXEL_BUDGET)
+                .unwrap()
+                .unwrap();
         assert!(rectangle.bounds.size.width > 640.0);
         assert!(rectangle.bounds.size.height > 170.0);
         assert!((rectangle.bounds.mid_x() - 1268.0).abs() < 20.0);
@@ -568,7 +622,10 @@ mod tests {
         assert!((live.style.green - 110.0 / 255.0).abs() < 0.01);
         assert!((live.style.blue - 1.0).abs() < 0.01);
         assert!(live.notes.is_empty());
-        assert!((live.bounds.min_x() - 454.0).abs() < 1.0 && (live.bounds.size.width - 328.0).abs() < 1.0);
+        assert!(
+            (live.bounds.min_x() - 454.0).abs() < 1.0
+                && (live.bounds.size.width - 328.0).abs() < 1.0
+        );
         let mut record = PsdRecord::new(Uuid::new_v4(), "cercle-bleu");
         record.kind = PsdLayerKind::Vector;
         record.image = Some(live.image.clone());
@@ -621,11 +678,18 @@ mod tests {
         });
         let layer = imported.layers.first().unwrap();
         assert_eq!(layer.shape.as_ref().unwrap().kind, ShapeKind::Rectangle);
-        assert!(imported
-            .conversions
-            .iter()
-            .any(|c| c.layer_name == "rectangle-contour-jaune" && c.message.contains("stroke")));
-        assert!(!imported.conversions.iter().any(|c| c.message.contains("rasterized")));
+        assert!(
+            imported
+                .conversions
+                .iter()
+                .any(|c| c.layer_name == "rectangle-contour-jaune" && c.message.contains("stroke"))
+        );
+        assert!(
+            !imported
+                .conversions
+                .iter()
+                .any(|c| c.message.contains("rasterized"))
+        );
     }
 
     #[test]
@@ -682,9 +746,11 @@ mod tests {
             "vstk".to_string(),
             stroke_style(true, false, 1.0, 255.0, 255.0, 0.0),
         );
-        assert!(PsdVector::live(&extra, vector_fixtures::canvas(), DEFAULT_PIXEL_BUDGET)
-            .unwrap()
-            .is_none());
+        assert!(
+            PsdVector::live(&extra, vector_fixtures::canvas(), DEFAULT_PIXEL_BUDGET)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -732,7 +798,12 @@ mod tests {
         types
     }
 
-    fn oversized_layer_file(width: u32, height: u32, layer_width: i32, layer_height: i32) -> Vec<u8> {
+    fn oversized_layer_file(
+        width: u32,
+        height: u32,
+        layer_width: i32,
+        layer_height: i32,
+    ) -> Vec<u8> {
         layer_file(
             width,
             height,

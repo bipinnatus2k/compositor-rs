@@ -166,7 +166,14 @@ fn delete_clears_selected_pixels_or_deletes_the_layer() {
     // Delete without a selection takes the layer itself.
     session.deselect();
     session.delete_active_layer();
-    assert!(session.document.as_ref().expect("document").layers.is_empty());
+    assert!(
+        session
+            .document
+            .as_ref()
+            .expect("document")
+            .layers
+            .is_empty()
+    );
 }
 
 /// Swift `maskFillHidesOnlyTheSelectedArea`.
@@ -202,7 +209,10 @@ fn clip_follows_scaled_layers_and_softens_edges() {
     for chunk in image.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[0, 0, 255, 255]);
     }
-    session.insert_image(ImportedImage::with_thumbnail(image.clone(), image, "Blue"), None);
+    session.insert_image(
+        ImportedImage::with_thumbnail(image.clone(), image, "Blue"),
+        None,
+    );
     let mut transform = session.active_layer().expect("layer").transform;
     transform.origin = CGPoint::ZERO;
     transform.size = CGSize::new(100.0, 40.0);
@@ -252,7 +262,11 @@ fn mask_button_adds_white_mask_or_hides_the_selection() {
     assert!(session.is_mask_selected);
     let result = render(&session);
     assert_eq!(result.pixel(30, 20)[3], 0, "selected area: black, hidden");
-    assert_eq!(result.pixel(5, 5)[3], 255, "everything else: white, visible");
+    assert_eq!(
+        result.pixel(5, 5)[3],
+        255,
+        "everything else: white, visible"
+    );
     session.undo();
     assert!(session.active_layer().expect("layer").mask.is_none());
     assert!(session.selection().is_some());
@@ -271,7 +285,11 @@ fn layer_menu_masks_use_the_selection() {
     assert!(session.selection().is_none());
     assert!(session.is_mask_selected);
     let result = render(&session);
-    assert_eq!(result.pixel(30, 20)[3], 255, "selected area: white, visible");
+    assert_eq!(
+        result.pixel(30, 20)[3],
+        255,
+        "selected area: white, visible"
+    );
     assert_eq!(result.pixel(5, 5)[3], 0, "everything else: black, hidden");
     session.undo();
     assert!(session.active_layer().expect("layer").mask.is_none());
@@ -291,7 +309,10 @@ fn mask_from_selection_lines_up_on_scaled_layers() {
     for chunk in image.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[0, 0, 255, 255]);
     }
-    session.insert_image(ImportedImage::with_thumbnail(image.clone(), image, "Blue"), None);
+    session.insert_image(
+        ImportedImage::with_thumbnail(image.clone(), image, "Blue"),
+        None,
+    );
     let id = session.active_layer_id.expect("active layer");
     let layer = session
         .document
@@ -300,8 +321,13 @@ fn mask_from_selection_lines_up_on_scaled_layers() {
         .layer(id)
         .expect("layer")
         .clone();
-    session.document.as_mut().expect("document").layer_mut(id).expect("layer").transform =
-        LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0));
+    session
+        .document
+        .as_mut()
+        .expect("document")
+        .layer_mut(id)
+        .expect("layer")
+        .transform = LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0));
     drop(layer);
     select(&mut session, CGRect::new(0.0, 0.0, 50.0, 50.0));
     session.add_mask_from_selection(true);
@@ -349,7 +375,14 @@ fn deleting_with_the_mask_targeted_removes_only_the_mask() {
     session.add_layer_mask(true);
     session.select_layer_target(id, false);
     session.delete_active_layer();
-    assert!(session.document.as_ref().expect("document").layers.is_empty());
+    assert!(
+        session
+            .document
+            .as_ref()
+            .expect("document")
+            .layers
+            .is_empty()
+    );
 }
 
 /// Swift `invertKeepsTransparencyStaysInSelectionAndWorksOnMasks`.
@@ -372,7 +405,10 @@ fn invert_keeps_transparency_stays_in_selection_and_works_on_masks() {
     for chunk in image.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[255, 255, 255, 128]);
     }
-    blank.insert_image(ImportedImage::with_thumbnail(image.clone(), image, "Half"), None);
+    blank.insert_image(
+        ImportedImage::with_thumbnail(image.clone(), image, "Half"),
+        None,
+    );
     blank.invert_pixels();
     let half = render(&blank).pixel(50, 20);
     assert!((half[3] as i32 - 128).abs() <= 1, "alpha kept: {half:?}");
@@ -396,7 +432,10 @@ fn invert_handles_large_images_and_uniform_masks_with_a_selection() {
     for chunk in image.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[255, 0, 0, 255]);
     }
-    session.insert_image(ImportedImage::with_thumbnail(image.clone(), image, "Big"), None);
+    session.insert_image(
+        ImportedImage::with_thumbnail(image.clone(), image, "Big"),
+        None,
+    );
     session.invert_pixels();
     select(&mut session, CGRect::new(0.0, 0.0, 2000.0, 3000.0));
     session.invert_pixels();
@@ -443,7 +482,10 @@ fn invert_works_in_every_tool() {
     assert!(session.gradient_edit.is_some());
     assert!(session.can_invert());
     session.resolve_gradient();
-    assert!(session.gradient_edit.is_none(), "the pending gradient applied");
+    assert!(
+        session.gradient_edit.is_none(),
+        "the pending gradient applied"
+    );
     session.invert_pixels();
     assert_eq!(session.history.undo_name(), "Invert");
     session.undo();
@@ -478,7 +520,11 @@ fn cmd_drag_moves_selected_pixels_and_outline_as_one_undo() {
     assert_eq!(bounding_box(&session), CGRect::new(70.0, 15.0, 10.0, 10.0));
     let result = render(&session);
     assert_eq!(result.pixel(15, 15)[3], 0, "hole where the pixels were");
-    assert_eq!(result.pixel(75, 20), [255, 0, 0, 255], "red pixels now on blue");
+    assert_eq!(
+        result.pixel(75, 20),
+        [255, 0, 0, 255],
+        "red pixels now on blue"
+    );
     assert_eq!(result.pixel(85, 20), [0, 0, 255, 255], "untouched blue");
     assert_eq!(result.pixel(5, 5), [255, 0, 0, 255], "untouched red");
     session.undo();
@@ -503,8 +549,14 @@ fn duplicate_pixel_drag_preserves_source_and_undoes_together() {
     assert_eq!(session.history.undo_name(), "Duplicate Pixels");
     session.undo();
     let restored = render(&session);
-    assert!(restored.pixel(15, 15)[0] > 250, "the source survives the undo");
-    assert!(restored.pixel(75, 20)[2] > 250, "and the copy is gone (blue again)");
+    assert!(
+        restored.pixel(15, 15)[0] > 250,
+        "the source survives the undo"
+    );
+    assert!(
+        restored.pixel(75, 20)[2] > 250,
+        "and the copy is gone (blue again)"
+    );
 }
 
 /// Swift `cmdArrowNudgesPixelsAndMasksRefuse`.

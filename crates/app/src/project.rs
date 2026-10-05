@@ -252,7 +252,12 @@ impl ProjectController {
     /// `canStart` (:11-13): the session half lives in
     /// [`ProjectBusy::ready`]; `is_managing` is the workspace's flag, passed
     /// in because the controller does not hold a workspace reference.
-    pub fn can_start(&self, session: &EditorSession, busy: &ProjectBusy, is_managing: bool) -> bool {
+    pub fn can_start(
+        &self,
+        session: &EditorSession,
+        busy: &ProjectBusy,
+        is_managing: bool,
+    ) -> bool {
         busy.ready(session) && !is_managing
     }
 
@@ -574,12 +579,7 @@ impl ProjectController {
         };
         let previous_save = self.save_generation;
         match Self::request_unsaved_choice(session) {
-            None => Step::Done(self.install_open(
-                session,
-                snapshot,
-                source,
-                previous_save,
-            )),
+            None => Step::Done(self.install_open(session, snapshot, source, previous_save)),
             Some(message) => {
                 self.open_stash = Some(OpenStash {
                     source: source.to_path_buf(),
@@ -756,11 +756,7 @@ impl ProjectController {
     /// After a `finish_save` that came out of a confirmation's `Save`
     /// button: its result is the confirmation's result. The `Open` step still
     /// owes the generation check + install.
-    pub fn confirm_after_save(
-        &mut self,
-        session: &mut EditorSession,
-        saved: bool,
-    ) -> Step<bool> {
+    pub fn confirm_after_save(&mut self, session: &mut EditorSession, saved: bool) -> Step<bool> {
         // The confirmation's pending slot was consumed by `finish_save`; the
         // `Open` stash (if any) says a reload + install is still owed.
         if !saved {
@@ -796,7 +792,10 @@ impl ProjectController {
         if urls.is_empty() {
             return;
         }
-        self.incoming.push(Incoming { files: urls, point: at });
+        self.incoming.push(Incoming {
+            files: urls,
+            point: at,
+        });
         self.processing = true;
     }
 
@@ -864,16 +863,16 @@ impl ProjectController {
         busy: &ProjectBusy,
         proceed: bool,
     ) -> Drain {
-        if let Some(request) = self.opening.take() {
-            if proceed {
-                let failures = session.import_images(&request.images, None);
-                if self.incoming.is_empty() {
-                    self.processing = false;
-                }
-                // The import is its own reportable step; the next `drain`
-                // continues with the rest of the queue.
-                return Drain::Imported { failures };
+        if let Some(request) = self.opening.take()
+            && proceed
+        {
+            let failures = session.import_images(&request.images, None);
+            if self.incoming.is_empty() {
+                self.processing = false;
             }
+            // The import is its own reportable step; the next `drain`
+            // continues with the rest of the queue.
+            return Drain::Imported { failures };
         }
         self.drain(session, busy)
     }
@@ -881,7 +880,9 @@ impl ProjectController {
 
 /// `session.projectSnapshot()` (EditorSession+Projects.swift:4): a validated
 /// snapshot of the live document.
-fn project_snapshot(document: &compositor_core::document::CanvasDocument) -> compositor_core::project::ProjectData {
+fn project_snapshot(
+    document: &compositor_core::document::CanvasDocument,
+) -> compositor_core::project::ProjectData {
     compositor_core::project::project_from_document(document)
 }
 
@@ -890,9 +891,8 @@ fn export_png_bytes(snapshot: &compositor_core::project::ProjectData) -> Result<
     let (document, _) = compositor_core::project::document_from_project(snapshot)
         .map_err(|error| error.to_string())?;
     let composite = compositor_core::render::draw_live_composite(&document);
-    compositor_core::export::png_data(&composite).ok_or_else(|| {
-        "The image could not be encoded as PNG.".to_string()
-    })
+    compositor_core::export::png_data(&composite)
+        .ok_or_else(|| "The image could not be encoded as PNG.".to_string())
 }
 
 /// `$0.pathExtension.lowercased() == "comp"` (:132, :307).
@@ -904,7 +904,8 @@ pub fn is_project_file(url: &Path) -> bool {
 
 /// `resolvingSymlinksInPath` equality for the open-reload check (:212-213).
 fn same_path(session: &EditorSession, source: &Path) -> bool {
-    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     match session.project_url.as_ref() {
         Some(project_url) => canonical(project_url) == canonical(source),
         None => false,

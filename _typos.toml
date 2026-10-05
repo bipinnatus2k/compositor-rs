@@ -1,0 +1,43 @@
+[default]
+extend-ignore-re = ['\\u\{[0-9A-Fa-f]+\}']
+
+[default.extend-words]
+# Official Lucide icon name for the astroid curve.
+astroid = "astroid"
+# Correct Italian singular of "command".
+comando = "comando"
+# A deliberately misspelled manifest key: `crates/shell/src/plugin.rs` refuses
+# it by name, and the test that proves it has to contain the misspelling.
+capabilites = "capabilites"
+# Misspellings that only exist inside assertions proving a name is refused.
+backgrund = "backgrund"
+wtach = "wtach"
+netwrok = "netwrok"
+workspce = "workspce"
+# ---- compositor-rs exemptions ----
+# Photoshop PSD adjustment-layer type tag ('levl' = levels), see
+# docs/agent-reports/G-io-psd.md.
+levl = "levl"
+# Loop index variable used alongside `ix`.
+iy = "iy"
+# PSD descriptor type tag for a double ('doub'), psd/vector.rs, psd/mod.rs.
+doub = "doub"
+# Part of the plural "PNGs" in a comment.
+pn = "pn"
+# Test name spelling of "the box's screen scale" (no apostrophe).
+boxs = "boxs"
+# Valid spelling variant typos-cli does not know.
+unparseable = "unparseable"
+# Plane-equation coefficient name (a*x + b*y + nd), tools/distort.rs.
+nd = "nd"
+# German test data ("Himmel über Szene"), project/store.rs.
+szene = "szene"
+# Part of the plural "BYTEs" in a comment.
+byt = "byt"
+# Scan-line slope variable paired with `sxr`, selection.rs.
+sxl = "sxl"
+# "Café" encoded in Mac OS Roman test data (Caf + 0x8E), psd/reader.rs.
+caf = "caf"
+
+[files]
+extend-exclude = ["crates/story/src/fixtures/"]

@@ -5,7 +5,7 @@
 //! `premultipliedLast` byte order stores them. Masks are plain grayscale
 //! (white reveals) with no alpha, top-left origin.
 
-use crate::geometry::{CGFloat, CGAffineTransform, CGRect};
+use crate::geometry::{CGAffineTransform, CGFloat, CGRect};
 pub use crate::transform::LayerSampling;
 
 use std::sync::Arc;
@@ -59,7 +59,12 @@ impl Bitmap {
 
     pub fn pixel(&self, x: usize, y: usize) -> [u8; 4] {
         let i = (y * self.width + x) * 4;
-        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
+        [
+            self.data[i],
+            self.data[i + 1],
+            self.data[i + 2],
+            self.data[i + 3],
+        ]
     }
 
     /// The pixel at a byte offset (y * width + x) * 4.
@@ -263,7 +268,11 @@ pub fn thumbnail_of(image: &Bitmap) -> Bitmap {
 
 /// `BrushRaster.pixelToDocument` — the affine placing a `width` × `height` pixel
 /// grid where `transform` puts it on the document.
-pub fn pixel_to_document(transform: &crate::transform::LayerTransform, width: CGFloat, height: CGFloat) -> CGAffineTransform {
+pub fn pixel_to_document(
+    transform: &crate::transform::LayerTransform,
+    width: CGFloat,
+    height: CGFloat,
+) -> CGAffineTransform {
     CGAffineTransform::translation(transform.center().x, transform.center().y)
         .rotated_by(transform.radians())
         .scale_by(
@@ -418,8 +427,8 @@ pub fn downsample_level(factor: f64) -> usize {
 pub fn halve(src: &Bitmap) -> Bitmap {
     // vImage-scale "high quality" is a Lanczos resample (`DownsampleCache`
     // halving); the output rounds the half size up ((w + 1) / 2).
-    let w = ((src.width + 1) / 2).max(1);
-    let h = ((src.height + 1) / 2).max(1);
+    let w = src.width.div_ceil(2).max(1);
+    let h = src.height.div_ceil(2).max(1);
     lanczos_resize(src, w, h, 3)
 }
 
@@ -513,6 +522,8 @@ impl TapLine {
 /// source coordinate, so its tap indices and kernel weights are computed once
 /// into a table and reused for every pixel on that line — the pixel loop only
 /// multiplies and adds, in the same tap order as the uncached kernel.
+// The per-channel `for c in 0..4` loops keep the C kernel's loop shape.
+#[allow(clippy::needless_range_loop)]
 pub fn lanczos_resize(src: &Bitmap, w: usize, h: usize, a: i32) -> Bitmap {
     let sx = w as f64 / src.width as f64;
     let sy = h as f64 / src.height as f64;
@@ -645,9 +656,7 @@ pub fn source_over_u8(d: [u8; 4], s: [u8; 4]) -> [u8; 4] {
         return s;
     }
     let da = (d[3] as u32 * (255 - sa) + 127) / 255;
-    let mix = |dc: u32, sc: u32| -> u8 {
-        ((sc * sa + dc * (255 - sa) + 127) / 255).min(255) as u8
-    };
+    let mix = |dc: u32, sc: u32| -> u8 { ((sc * sa + dc * (255 - sa) + 127) / 255).min(255) as u8 };
     [
         mix(d[0] as u32, s[0] as u32),
         mix(d[1] as u32, s[1] as u32),
@@ -779,9 +788,9 @@ pub fn draw_affine(
             let s = if exact {
                 source.pixel(p.x as usize, p.y as usize)
             } else if sampling == LayerSampling::High && scale_x.min(scale_y) > 1.0 {
-                lanczos_sample(&source, p.x, p.y)
+                lanczos_sample(source, p.x, p.y)
             } else {
-                sample_bitmap(&source, p.x, p.y, sampling)
+                sample_bitmap(source, p.x, p.y, sampling)
             };
             let d = dst.pixel(x, y);
             dst.set_pixel(x, y, source_over_u8(d, s));
@@ -807,10 +816,13 @@ pub fn gaussian_blur_rgba(src: &Bitmap, sigma: f64) -> Bitmap {
         for x in 0..src.width {
             let mut acc = [0.0f32; 4];
             for (i, k) in kernel.iter().enumerate() {
-                let sx = clamp_edge_index(x as isize + i as isize - radius as isize, src.width as isize);
+                let sx = clamp_edge_index(
+                    x as isize + i as isize - radius as isize,
+                    src.width as isize,
+                );
                 let px = src.pixel(sx as usize, y);
                 for c in 0..4 {
-                    acc[c] += px[c] as f32 * *k as f32;
+                    acc[c] += px[c] as f32 * *k;
                 }
             }
             let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
@@ -822,10 +834,13 @@ pub fn gaussian_blur_rgba(src: &Bitmap, sigma: f64) -> Bitmap {
         for x in 0..src.width {
             let mut acc = [0.0f32; 4];
             for (i, k) in kernel.iter().enumerate() {
-                let sy = clamp_edge_index(y as isize + i as isize - radius as isize, src.height as isize);
+                let sy = clamp_edge_index(
+                    y as isize + i as isize - radius as isize,
+                    src.height as isize,
+                );
                 let px = tmp.pixel(x, sy as usize);
                 for c in 0..4 {
-                    acc[c] += px[c] as f32 * *k as f32;
+                    acc[c] += px[c] as f32 * *k;
                 }
             }
             let out: [u8; 4] = acc.map(|v| (v + 0.5) as u8);
@@ -847,8 +862,11 @@ pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
         for x in 0..src.width {
             let mut acc = 0.0f32;
             for (i, k) in kernel.iter().enumerate() {
-                let sx = clamp_edge_index(x as isize + i as isize - radius as isize, src.width as isize);
-                acc += src.value(sx as usize, y) as f32 * *k as f32;
+                let sx = clamp_edge_index(
+                    x as isize + i as isize - radius as isize,
+                    src.width as isize,
+                );
+                acc += src.value(sx as usize, y) as f32 * *k;
             }
             tmp.data[y * src.width + x] = (acc + 0.5) as u8;
         }
@@ -857,8 +875,11 @@ pub fn gaussian_blur_gray(src: &GrayMask, sigma: f64) -> GrayMask {
         for x in 0..src.width {
             let mut acc = 0.0f32;
             for (i, k) in kernel.iter().enumerate() {
-                let sy = clamp_edge_index(y as isize + i as isize - radius as isize, src.height as isize);
-                acc += tmp.value(x, sy as usize) as f32 * *k as f32;
+                let sy = clamp_edge_index(
+                    y as isize + i as isize - radius as isize,
+                    src.height as isize,
+                );
+                acc += tmp.value(x, sy as usize) as f32 * *k;
             }
             dst.data[y * src.width + x] = (acc + 0.5) as u8;
         }
@@ -904,9 +925,9 @@ pub fn coverage_bounds(mask: &GrayMask) -> Option<CGRect> {
     let mut max_x = -1isize;
     let mut max_y = -1isize;
     for y in 0..mask.height {
-        let row = &mask.data[y * mask.width..];
-        for x in 0..mask.width {
-            if row[x] != 0 {
+        let row = &mask.data[y * mask.width..(y + 1) * mask.width];
+        for (x, &cell) in row.iter().enumerate() {
+            if cell != 0 {
                 if (x as isize) < min_x {
                     min_x = x as isize;
                 }
@@ -936,8 +957,8 @@ pub fn coverage_bounds(mask: &GrayMask) -> Option<CGRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::{LayerSampling, LayerTransform};
     use crate::geometry::{CGPoint, CGSize};
+    use crate::transform::{LayerSampling, LayerTransform};
 
     #[test]
     fn halve_rounds_half_sizes_up_and_keeps_flat_colors() {
@@ -1037,7 +1058,10 @@ mod tests {
 
     #[test]
     fn source_over_u8_transparent_keeps() {
-        assert_eq!(source_over_u8([200, 100, 50, 255], [0, 0, 0, 0]), [200, 100, 50, 255]);
+        assert_eq!(
+            source_over_u8([200, 100, 50, 255], [0, 0, 0, 0]),
+            [200, 100, 50, 255]
+        );
     }
 
     #[test]
@@ -1182,7 +1206,12 @@ mod tests {
         let mut dst = Bitmap::new_clearing(2, 1, [255, 0, 0, 255]);
         let mut src = Bitmap::new(1, 1);
         src.set_pixel(0, 0, [0, 255, 0, 128]);
-        draw_over(&mut dst, &src, crate::geometry::CGRect::new(1.0, 0.0, 1.0, 1.0), LayerSampling::Nearest);
+        draw_over(
+            &mut dst,
+            &src,
+            crate::geometry::CGRect::new(1.0, 0.0, 1.0, 1.0),
+            LayerSampling::Nearest,
+        );
         assert_eq!(dst.pixel(0, 0)[0], 255);
         assert_eq!(dst.pixel(1, 0), [127, 128, 0, 255]);
     }
@@ -1289,7 +1318,14 @@ mod lanczos_opt_tests {
         // inverse-mapped loop samples: a per-pixel `lanczos_sample`.
         let src = noise_bitmap(11, 9, 0x1234);
         let mut dst = Bitmap::new(33, 25);
-        let t = CGAffineTransform { a: 2.5, b: 0.0, c: 0.0, d: 2.0, tx: 1.25, ty: -0.75 };
+        let t = CGAffineTransform {
+            a: 2.5,
+            b: 0.0,
+            c: 0.0,
+            d: 2.0,
+            tx: 1.25,
+            ty: -0.75,
+        };
         draw_affine(&mut dst, &src, &t, LayerSampling::High, None);
         let inverse = t.inverted();
         let mut reference = Bitmap::new(33, 25);
@@ -1315,7 +1351,14 @@ mod lanczos_opt_tests {
         let src = noise_bitmap(9, 7, 0xBEEF);
         let c = (30.0f64).to_radians().cos();
         let s = (30.0f64).to_radians().sin();
-        let t = CGAffineTransform { a: 2.0 * c, b: 2.0 * s, c: -2.0 * c, d: 2.0 * s, tx: 3.0, ty: 1.0 };
+        let t = CGAffineTransform {
+            a: 2.0 * c,
+            b: 2.0 * s,
+            c: -2.0 * c,
+            d: 2.0 * s,
+            tx: 3.0,
+            ty: 1.0,
+        };
         let mut dst = Bitmap::new(24, 24);
         draw_affine(&mut dst, &src, &t, LayerSampling::High, None);
         let inverse = t.inverted();

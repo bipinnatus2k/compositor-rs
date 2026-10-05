@@ -8,18 +8,18 @@
 use crate::blend::composite_pixel;
 use crate::document::{CanvasDocument, ImageLayer, LayerMask, LayerShape, ShapeKind};
 use crate::geometry::{CGPoint, CGRect, CGSize};
+use crate::raster::{Bitmap, draw_affine, pixel_to_document};
 use crate::selection::SelectionPath;
-use crate::raster::{draw_affine, pixel_to_document, Bitmap};
 use crate::transform::{LayerSampling, LayerTransform};
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 thread_local! {
     /// `EffectsPreviewCache`: per-render effects results, keyed by layer,
     /// image identity and effect settings. Cleared when it grows past a few
     /// entries — a render pass touches few layers.
     static EFFECTS_CACHE: RefCell<Vec<(uuid::Uuid, usize, crate::effects::LayerEffects, (Bitmap, f64))>> =
-        RefCell::new(Vec::new());
+        const { RefCell::new(Vec::new()) };
 }
 
 /// `LayerEffectsRenderer.cached` — renders (or reuses) the effects around a
@@ -34,7 +34,9 @@ pub fn render_effects_cached(
     let hit = EFFECTS_CACHE.with(|c| {
         c.borrow()
             .iter()
-            .find(|(id, key, cached, _)| *id == layer_id && *key == image_key && *cached == *effects)
+            .find(|(id, key, cached, _)| {
+                *id == layer_id && *key == image_key && *cached == *effects
+            })
             .map(|entry| entry.3.clone())
     });
     if let Some(result) = hit {
@@ -46,7 +48,7 @@ pub fn render_effects_cached(
         if cache.len() >= 8 {
             cache.clear();
         }
-        cache.push((layer_id, image_key, effects.clone(), (grown.clone(), inset)));
+        cache.push((layer_id, image_key, *effects, (grown.clone(), inset)));
     });
     (grown, inset)
 }
@@ -62,10 +64,10 @@ pub fn draw_layer_pixels(image: &Bitmap, transform: &LayerTransform, dst: &mut B
     draw_affine(dst, image, &mapping, transform.sampling, None);
 }
 
-/// `LayerMask.clipImage`: the mask as a layer's renderer takes it — an image
-/// stretched over the layer's `width` × `height` grid at `layer`. Covering the
-/// layer (placement None) that's the mask itself; placed apart, it is
-/// resampled into that grid.
+// `LayerMask.clipImage`: the mask as a layer's renderer takes it — an image
+// stretched over the layer's `width` × `height` grid at `layer`. Covering the
+// layer (placement None) that's the mask itself; placed apart, it is
+// resampled into that grid.
 thread_local! {
     /// `MaskPlacementCache`: masks resampled into their layers' grids, so
     /// redraws reuse them; the least recently used go beyond a few entries
@@ -205,7 +207,8 @@ pub fn mask_clip_image_limited(
     let source = mask_gray_as_bitmap(&mask.asset.image);
     // Layer-grid pixel → document → placement-grid pixel.
     let layer_to_doc = pixel_to_document(over, width as f64, height as f64);
-    let doc_to_placement = pixel_to_document(&placement, source.width as f64, source.height as f64).inverted();
+    let doc_to_placement =
+        pixel_to_document(&placement, source.width as f64, source.height as f64).inverted();
     let mapping = doc_to_placement.concat(&layer_to_doc);
     draw_affine(&mut out, &source, &mapping, LayerSampling::High, None);
     if width * height <= MASK_PLACEMENT_CACHE_PIXELS {
@@ -232,7 +235,8 @@ fn mask_gray_as_bitmap(image: &Bitmap) -> Bitmap {
 /// The alpha multiplier at one document pixel from a mask (its grid stretched
 /// by `placement`), 1 when the mask doesn't restrict.
 fn mask_alpha_at(mask_grid: &Bitmap, placement: &LayerTransform, doc: CGPoint) -> f32 {
-    let inverse = pixel_to_document(placement, mask_grid.width as f64, mask_grid.height as f64).inverted();
+    let inverse =
+        pixel_to_document(placement, mask_grid.width as f64, mask_grid.height as f64).inverted();
     let p = doc.applying(&inverse);
     if p.x < 0.0 || p.y < 0.0 || p.x >= mask_grid.width as f64 || p.y >= mask_grid.height as f64 {
         return 0.0;
@@ -299,10 +303,8 @@ pub fn composite_onto_interactive(
         // An adjustment layer reworks the composited content below it instead
         // of drawing pixels (`LiveMaskRenderer.drawComposite`).
         if let Some(adjustment) = &layer.adjustment {
-            if layer.mask_source_id.is_none() {
-                if adjustment.is_valid() {
-                    apply_adjustment_layer(canvas, &mut ctx, layer);
-                }
+            if layer.mask_source_id.is_none() && adjustment.is_valid() {
+                apply_adjustment_layer(canvas, &ctx, layer);
             }
             i += 1;
             continue;
@@ -452,7 +454,13 @@ fn draw_layer_full(
     // The layer's own mask, in its pixel grid.
     let mut own_mask = layer.mask.as_ref().and_then(|mask| {
         if ctx.interactive {
-            mask_clip_image_limited(mask, &layer.transform, pixels.width, pixels.height, Some(2048))
+            mask_clip_image_limited(
+                mask,
+                &layer.transform,
+                pixels.width,
+                pixels.height,
+                Some(2048),
+            )
         } else {
             mask_clip_image(mask, &layer.transform, pixels.width, pixels.height)
         }
@@ -461,60 +469,61 @@ fn draw_layer_full(
     // Effects grow the drawn image; the mask is baked into the effect render
     // and drawn with `mask: nil`, so it must not clip the result again.
     // Results come from the per-render cache (EffectsPreviewCache).
-    if let Some(effects) = &layer.effects {
-        if !effects.is_empty() && effects.is_valid() {
-            let mask_grid = own_mask
-                .as_ref()
-                .map(|m| gray_of(m, pixels.width, pixels.height));
-            let image_key = layer
-                .asset
-                .as_ref()
-                .map(|a| std::sync::Arc::as_ptr(&a.image) as usize)
-                .unwrap_or(0);
-            let (grown, inset) =
-                render_effects_cached(layer.id, &pixels, image_key, mask_grid.as_ref(), effects);
-            pixels = grown;
-            own_mask = None;
-            if inset > 0.0 {
-                // The grown grid lands where the layer was: the transform
-                // grows by the margin around the same center.
-                transform = crate::effects::placed_transform(&layer.transform, &pixels, inset);
-            }
+    if let Some(effects) = &layer.effects
+        && !effects.is_empty()
+        && effects.is_valid()
+    {
+        let mask_grid = own_mask
+            .as_ref()
+            .map(|m| gray_of(m, pixels.width, pixels.height));
+        let image_key = layer
+            .asset
+            .as_ref()
+            .map(|a| std::sync::Arc::as_ptr(&a.image) as usize)
+            .unwrap_or(0);
+        let (grown, inset) =
+            render_effects_cached(layer.id, &pixels, image_key, mask_grid.as_ref(), effects);
+        pixels = grown;
+        own_mask = None;
+        if inset > 0.0 {
+            // The grown grid lands where the layer was: the transform
+            // grows by the margin around the same center.
+            transform = crate::effects::placed_transform(&layer.transform, &pixels, inset);
         }
     }
 
     // Folder masks above this layer multiply coverage (pass-through folders).
     let mut folder_masks: Vec<(Bitmap, LayerTransform)> = Vec::new();
     let mut current = layer.parent_id;
-    let mut depth = 0;
+    let depth = 0;
     while let Some(id) = current {
         if depth >= 64 {
             break;
         }
         if let Some(folder) = ctx.document.layer(id) {
-            if let Some(mask) = &folder.mask {
-                if mask.is_enabled {
-                    // The folder mask covers the folder's own transform rect.
-                    let grid_w = folder
-                        .asset
-                        .as_ref()
-                        .map(|a| a.image.width)
-                        .unwrap_or(folder.transform.size.width.round() as usize)
-                        .max(1);
-                    let grid_h = folder
-                        .asset
-                        .as_ref()
-                        .map(|a| a.image.height)
-                        .unwrap_or(folder.transform.size.height.round() as usize)
-                        .max(1);
-                    let placed = if ctx.interactive {
-                        mask_clip_image_limited(mask, &folder.transform, grid_w, grid_h, Some(2048))
-                    } else {
-                        mask_clip_image(mask, &folder.transform, grid_w, grid_h)
-                    };
-                    if let Some(placed) = placed {
-                        folder_masks.push((placed, mask.placement.unwrap_or(folder.transform)));
-                    }
+            if let Some(mask) = &folder.mask
+                && mask.is_enabled
+            {
+                // The folder mask covers the folder's own transform rect.
+                let grid_w = folder
+                    .asset
+                    .as_ref()
+                    .map(|a| a.image.width)
+                    .unwrap_or(folder.transform.size.width.round() as usize)
+                    .max(1);
+                let grid_h = folder
+                    .asset
+                    .as_ref()
+                    .map(|a| a.image.height)
+                    .unwrap_or(folder.transform.size.height.round() as usize)
+                    .max(1);
+                let placed = if ctx.interactive {
+                    mask_clip_image_limited(mask, &folder.transform, grid_w, grid_h, Some(2048))
+                } else {
+                    mask_clip_image(mask, &folder.transform, grid_w, grid_h)
+                };
+                if let Some(placed) = placed {
+                    folder_masks.push((placed, mask.placement.unwrap_or(folder.transform)));
                 }
             }
             current = folder.parent_id;
@@ -530,7 +539,8 @@ fn draw_layer_full(
     // The own mask, folder masks and a live clipping source all multiply
     // coverage where the layer lands.
     if own_mask.is_some() || !folder_masks.is_empty() || clip.is_some() {
-        let doc_to_grid = pixel_to_document(&transform, pixels.width as f64, pixels.height as f64).inverted();
+        let doc_to_grid =
+            pixel_to_document(&transform, pixels.width as f64, pixels.height as f64).inverted();
         for y in 0..target.height {
             for x in 0..target.width {
                 let o = (y * target.width + x) * 4;
@@ -541,7 +551,13 @@ fn draw_layer_full(
                 let mut alpha = 1.0f32;
                 if let Some(mask_grid) = &own_mask {
                     let grid_point = doc.applying(&doc_to_grid);
-                    alpha *= sample_grid_alpha(mask_grid, grid_point, &transform, pixels.width, pixels.height);
+                    alpha *= sample_grid_alpha(
+                        mask_grid,
+                        grid_point,
+                        &transform,
+                        pixels.width,
+                        pixels.height,
+                    );
                 }
                 for (mask_grid, mask_placement) in &folder_masks {
                     alpha *= mask_alpha_at(mask_grid, mask_placement, doc);
@@ -590,7 +606,11 @@ fn apply_adjustment_layer(
             }
             let cb = crate::raster::unpremultiply_f32(original.pixel_at(o));
             let cs = crate::raster::unpremultiply_f32(adjusted.pixel_at(o));
-            let blended = crate::blend::blend_color(mode, cb[..3].try_into().unwrap(), cs[..3].try_into().unwrap());
+            let blended = crate::blend::blend_color(
+                mode,
+                cb[..3].try_into().unwrap(),
+                cs[..3].try_into().unwrap(),
+            );
             let px = crate::raster::premultiply_f32([blended[0], blended[1], blended[2], cb[3]]);
             adjusted.data[o..o + 4].copy_from_slice(&px);
         }
@@ -598,10 +618,7 @@ fn apply_adjustment_layer(
     // The adjustment's own mask scopes the effect (`adjustmentClip`).
     let scope = layer.mask.as_ref().filter(|m| m.is_enabled).map(|m| {
         let placement = m.placement.unwrap_or(layer.transform);
-        (
-            mask_gray_as_bitmap(&m.asset.image),
-            placement,
-        )
+        (mask_gray_as_bitmap(&m.asset.image), placement)
     });
     let opacity = ctx.opacity_of(layer.id) as f32;
     for y in 0..target.height {
@@ -626,7 +643,11 @@ fn apply_adjustment_layer(
             let clip = scope
                 .as_ref()
                 .map(|(grid, placement)| {
-                    mask_alpha_at(grid, placement, CGPoint::new(x as f64 + 0.5, y as f64 + 0.5))
+                    mask_alpha_at(
+                        grid,
+                        placement,
+                        CGPoint::new(x as f64 + 0.5, y as f64 + 0.5),
+                    )
                 })
                 .unwrap_or(1.0);
             for c in 0..4 {
@@ -680,7 +701,12 @@ fn draw_clipping_stack(
 
 /// Source-over of a premultiplied bitmap onto the canvas in `mode` at
 /// `opacity` (the tail of the old draw path).
-fn blend_bitmap_onto(canvas: &mut Bitmap, placed: &Bitmap, mode: crate::blend::LayerBlendMode, opacity: f32) {
+fn blend_bitmap_onto(
+    canvas: &mut Bitmap,
+    placed: &Bitmap,
+    mode: crate::blend::LayerBlendMode,
+    opacity: f32,
+) {
     for y in 0..canvas.height {
         for x in 0..canvas.width {
             let o = (y * canvas.width + x) * 4;
@@ -716,7 +742,9 @@ fn sample_grid_alpha(
     }
     // The mask grid matches the pixel grid 1:1 (own mask, no placement).
     let _ = transform;
-    crate::raster::sample_bitmap(mask_grid, grid_point.x, grid_point.y, LayerSampling::Smooth)[0] as f32 / 255.0
+    crate::raster::sample_bitmap(mask_grid, grid_point.x, grid_point.y, LayerSampling::Smooth)[0]
+        as f32
+        / 255.0
 }
 
 /// The gray grid of a placed mask bitmap (RGBA → gray), sized to the layer.
@@ -820,7 +848,10 @@ fn rounded_rect_path(w: f64, h: f64, radius: f64) -> crate::selection::Selection
 
 /// Shrinks a coverage path inward by `amount` (the complement of a stroke
 /// band), for stroke-only shapes.
-fn shrink_by(path: &crate::selection::SelectionPath, amount: f64) -> crate::selection::SelectionPath {
+fn shrink_by(
+    path: &crate::selection::SelectionPath,
+    amount: f64,
+) -> crate::selection::SelectionPath {
     let band = path.stroke_band(amount * 2.0);
     path.subtract(&band)
 }
@@ -868,8 +899,15 @@ fn paint_distance_to_segment(
 }
 
 /// The composited color under one document point (`sampleCompositeColor`).
-pub fn sample_composite_color(document: &CanvasDocument, point: CGPoint) -> Option<crate::document::PaletteColor> {
-    if point.x < 0.0 || point.y < 0.0 || point.x >= document.width as f64 || point.y >= document.height as f64 {
+pub fn sample_composite_color(
+    document: &CanvasDocument,
+    point: CGPoint,
+) -> Option<crate::document::PaletteColor> {
+    if point.x < 0.0
+        || point.y < 0.0
+        || point.x >= document.width as f64
+        || point.y >= document.height as f64
+    {
         return None;
     }
     let canvas = draw_live_composite(document);
@@ -918,13 +956,19 @@ pub fn layer_canvas_thumbnail(layer: &ImageLayer, canvas: CGSize) -> Option<Bitm
     if let Some(adjustment) = &layer.adjustment {
         pixels = adjustment.apply(&pixels, None);
     }
-    if let Some(effects) = &layer.effects {
-        if !effects.is_empty() && effects.is_valid() {
-            let (grown, _) = crate::effects::render_effects(&pixels, None, effects);
-            pixels = grown;
-        }
+    if let Some(effects) = &layer.effects
+        && !effects.is_empty()
+        && effects.is_valid()
+    {
+        let (grown, _) = crate::effects::render_effects(&pixels, None, effects);
+        pixels = grown;
     }
-    Some(canvas_thumbnail_bitmap(&pixels, &layer.transform, canvas, fill_checkerboard))
+    Some(canvas_thumbnail_bitmap(
+        &pixels,
+        &layer.transform,
+        canvas,
+        fill_checkerboard,
+    ))
 }
 
 /// A mask placed on the canvas frame; the fill is the mask's edge tone, so a
@@ -1029,13 +1073,21 @@ mod tests {
     use crate::geometry::{CGPoint, CGSize};
     use crate::raster::ImportedImage;
 
-    fn red_layer(doc: &CanvasDocument, x: f64, blend: crate::blend::LayerBlendMode, opacity: f64) -> ImageLayer {
+    fn red_layer(
+        doc: &CanvasDocument,
+        x: f64,
+        blend: crate::blend::LayerBlendMode,
+        opacity: f64,
+    ) -> ImageLayer {
         let mut image = Bitmap::new(10, 10);
         for i in (0..image.data.len()).step_by(4) {
             image.data[i] = 255;
             image.data[i + 3] = 255;
         }
-        let mut layer = ImageLayer::with_asset(ImportedImage::with_thumbnail(image, Bitmap::new(2, 2), "L"), CGPoint::new(x, 0.0));
+        let mut layer = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(image, Bitmap::new(2, 2), "L"),
+            CGPoint::new(x, 0.0),
+        );
         layer.blend_mode = blend;
         layer.opacity = opacity;
         let _ = doc;
@@ -1045,7 +1097,12 @@ mod tests {
     #[test]
     fn composite_two_opaque_layers_top_wins() {
         let mut doc = CanvasDocument::new(20, 10);
-        doc.layers = vec![red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0)];
+        doc.layers = vec![red_layer(
+            &doc,
+            0.0,
+            crate::blend::LayerBlendMode::Normal,
+            1.0,
+        )];
         let mut top = red_layer(&doc, 10.0, crate::blend::LayerBlendMode::Normal, 1.0);
         let mut blue = Bitmap::new(10, 10);
         for i in (0..blue.data.len()).step_by(4) {
@@ -1075,10 +1132,8 @@ mod tests {
         for px in image.data.chunks_exact_mut(4) {
             px.copy_from_slice(&[255, 0, 0, 255]);
         }
-        let layer = ImageLayer::with_asset(
-            ImportedImage::new(image, "L"),
-            CGPoint::new(30.0, 30.0),
-        );
+        let layer =
+            ImageLayer::with_asset(ImportedImage::new(image, "L"), CGPoint::new(30.0, 30.0));
         let thumb = layer_canvas_thumbnail(&layer, CGSize::new(100.0, 100.0)).unwrap();
         assert_eq!((thumb.width, thumb.height), (60, 60));
         assert_eq!(thumb.pixel(30, 30), [255, 0, 0, 255]);
@@ -1209,7 +1264,11 @@ mod tests {
         doc.layers = vec![bottom, top];
         let out = draw_live_composite(&doc);
         // 128/255 × 128/255 ≈ 64.
-        assert!((out.pixel(5, 5)[0] as i32 - 64).abs() <= 2, "{}", out.pixel(5, 5)[0]);
+        assert!(
+            (out.pixel(5, 5)[0] as i32 - 64).abs() <= 2,
+            "{}",
+            out.pixel(5, 5)[0]
+        );
     }
 
     #[test]
@@ -1275,7 +1334,12 @@ mod tests {
     #[test]
     fn sample_color_unpremultiplies() {
         let mut doc = CanvasDocument::new(10, 10);
-        doc.layers = vec![red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 1.0)];
+        doc.layers = vec![red_layer(
+            &doc,
+            0.0,
+            crate::blend::LayerBlendMode::Normal,
+            1.0,
+        )];
         let c = sample_composite_color(&doc, CGPoint::new(5.0, 5.0)).unwrap();
         assert_eq!(c, PaletteColor::new(1.0, 0.0, 0.0));
         assert!(sample_composite_color(&doc, CGPoint::new(50.0, 5.0)).is_none());
@@ -1300,7 +1364,10 @@ mod tests {
             offset: 0.0,
             gamma: 1.0,
         });
-        let mut bottom = ImageLayer::with_asset(ImportedImage::with_thumbnail(gray, Bitmap::new(2, 2), "G"), CGPoint::ZERO);
+        let mut bottom = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(gray, Bitmap::new(2, 2), "G"),
+            CGPoint::ZERO,
+        );
         bottom.name = "G".into();
         let mut top = ImageLayer::blank("Exposure", doc.size());
         top.adjustment = Some(adjustment.clone());
@@ -1352,7 +1419,10 @@ mod tests {
             is_linked: true,
         });
         doc.layers = vec![
-            ImageLayer::with_asset(ImportedImage::with_thumbnail(gray, Bitmap::new(4, 2), "G"), CGPoint::ZERO),
+            ImageLayer::with_asset(
+                ImportedImage::with_thumbnail(gray, Bitmap::new(4, 2), "G"),
+                CGPoint::ZERO,
+            ),
             layer,
         ];
         let out = draw_live_composite(&doc);
@@ -1388,13 +1458,19 @@ mod tests {
             base.data[i] = 255;
             base.data[i + 3] = 255;
         }
-        let base_layer = ImageLayer::with_asset(ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"), CGPoint::ZERO);
+        let base_layer = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"),
+            CGPoint::ZERO,
+        );
         let mut blue_img = Bitmap::new(20, 10);
         for i in (0..blue_img.data.len()).step_by(4) {
             blue_img.data[i + 2] = 255;
             blue_img.data[i + 3] = 255;
         }
-        let mut child = ImageLayer::with_asset(ImportedImage::with_thumbnail(blue_img, Bitmap::new(4, 2), "C"), CGPoint::ZERO);
+        let mut child = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(blue_img, Bitmap::new(4, 2), "C"),
+            CGPoint::ZERO,
+        );
         child.mask_source_id = Some(base_layer.id);
         doc.layers = vec![base_layer, child];
         let out = draw_live_composite(&doc);
@@ -1502,11 +1578,7 @@ mod tests {
             pixel.copy_from_slice(&[255, 255, 255, 255]);
         }
         layer.mask = Some(crate::document::LayerMask {
-            asset: ImportedImage::with_thumbnail(
-                mask_image,
-                Bitmap::new(4, 4),
-                "Mask",
-            ),
+            asset: ImportedImage::with_thumbnail(mask_image, Bitmap::new(4, 4), "Mask"),
             is_enabled: true,
             placement: Some(LayerTransform::new(CGPoint::ZERO, CGSize::new(40.0, 40.0))),
             is_linked: true,
@@ -1519,13 +1591,19 @@ mod tests {
         // A mask placed apart is resampled into the layer grid; the limit caps
         // the longest side of that resample (LayerMask.swift:110-118).
         let placed_mask = crate::document::LayerMask {
-            placement: Some(LayerTransform::new(CGPoint::new(10.0, 10.0), CGSize::new(20.0, 20.0))),
+            placement: Some(LayerTransform::new(
+                CGPoint::new(10.0, 10.0),
+                CGSize::new(20.0, 20.0),
+            )),
             ..layer.mask.as_ref().unwrap().clone()
         };
-        let limited =
-            mask_clip_image_limited(&placed_mask, &layer.transform, 40, 40, Some(10))
-                .expect("limited mask");
-        assert_eq!((limited.width, limited.height), (10, 10), "limit caps the grid");
+        let limited = mask_clip_image_limited(&placed_mask, &layer.transform, 40, 40, Some(10))
+            .expect("limited mask");
+        assert_eq!(
+            (limited.width, limited.height),
+            (10, 10),
+            "limit caps the grid"
+        );
     }
 
     #[test]
@@ -1652,7 +1730,10 @@ mod tests {
             base.data[i] = 255;
             base.data[i + 3] = 255;
         }
-        let mut base_layer = ImageLayer::with_asset(ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"), CGPoint::ZERO);
+        let mut base_layer = ImageLayer::with_asset(
+            ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"),
+            CGPoint::ZERO,
+        );
         let mut top = red_layer(&doc, 5.0, crate::blend::LayerBlendMode::Normal, 1.0);
         top.mask_source_id = Some(base_layer.id);
         doc.layers = vec![base_layer, top];
@@ -1662,4 +1743,3 @@ mod tests {
         assert_eq!(out.pixel(12, 5)[3], 0);
     }
 }
-

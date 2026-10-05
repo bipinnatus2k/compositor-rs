@@ -2,15 +2,15 @@
 //! that stands in for the active layer's pixels. The sheet UI itself lives in
 //! `sheets_ui.rs`.
 
-use gpui_kit::{AppContext, Context, Entity, Window};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::{AppContext, Context, Entity, Window};
 
-use compositor_core::adjust::{
-    hue_saturation_apply, levels_apply_settings, ColorRange, LevelsChannel, LevelsSettings,
-    RangeAdjustment,
-};
 use compositor_core::adjust::levels_auto::LevelsAuto;
+use compositor_core::adjust::{
+    ColorRange, LevelsChannel, LevelsSettings, RangeAdjustment, hue_saturation_apply,
+    levels_apply_settings,
+};
 use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::{FilterKind, FilterSettings};
 use compositor_core::geometry::CGAffineTransform;
@@ -176,10 +176,15 @@ impl AppState {
     /// Captures the active layer's pixels so adjustment panels can preview.
     pub(crate) fn begin_preview(&mut self) {
         self.preview_base = self
-            .tab().session
+            .tab()
+            .session
             .active_layer()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
-        self.preview_base_transform = self.tab().session.active_layer().map(|layer| layer.transform);
+        self.preview_base_transform = self
+            .tab()
+            .session
+            .active_layer()
+            .map(|layer| layer.transform);
         self.preview = self.preview_base.clone();
     }
 
@@ -251,10 +256,7 @@ impl AppState {
                 let saturation = Self::panel_value(&panel.sliders, cx, 1) as f64;
                 let lightness = Self::panel_value(&panel.sliders, cx, 2) as f64;
                 let mut settings = compositor_core::adjust::HueSaturationSettings::new(
-                    hue,
-                    saturation,
-                    lightness,
-                    colorize,
+                    hue, saturation, lightness, colorize,
                 );
                 if colorize {
                     settings.adjustments.insert(
@@ -345,7 +347,12 @@ impl AppState {
             .as_ref()
             .map(|panel| panel.levels)
             .unwrap_or_default();
-        settings.channel = match self.panel_widgets.levels.as_ref().map(|panel| panel.channel) {
+        settings.channel = match self
+            .panel_widgets
+            .levels
+            .as_ref()
+            .map(|panel| panel.channel)
+        {
             Some(1) => LevelsChannel::Red,
             Some(2) => LevelsChannel::Green,
             Some(3) => LevelsChannel::Blue,
@@ -461,7 +468,12 @@ impl AppState {
         let Some(base) = self.preview_base.as_deref() else {
             return adjusted;
         };
-        blend_through_selection(base, adjusted, self.preview_base_transform, self.current_tab().session.selection().cloned())
+        blend_through_selection(
+            base,
+            adjusted,
+            self.preview_base_transform,
+            self.current_tab().session.selection().cloned(),
+        )
     }
 
     /// Re-runs the noise filters when their checkboxes change.
@@ -488,7 +500,13 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.tab().session.add_effect(kind);
-        if self.tab().session.effects_editing.map(|editing| editing.kind) == Some(kind) {
+        if self
+            .tab()
+            .session
+            .effects_editing
+            .map(|editing| editing.kind)
+            == Some(kind)
+        {
             self.open_effects_panel(cx);
         }
         self.touch(cx);
@@ -509,7 +527,9 @@ impl AppState {
     pub fn apply_effects_sliders(&mut self, cx: &mut Context<Self>) {
         let (kind, values) = {
             let cx_app: &gpui_kit::App = cx;
-            let Some(panel) = self.panel_widgets.effects.as_ref() else { return };
+            let Some(panel) = self.panel_widgets.effects.as_ref() else {
+                return;
+            };
             let kind = LayerEffectKind::ALL
                 .get(panel.kind_index)
                 .copied()
@@ -520,47 +540,49 @@ impl AppState {
             (kind, values)
         };
         let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
-        self.tab().session.change_effects(move |effects| match kind {
-            LayerEffectKind::Stroke => {
-                if let Some(stroke) = effects.stroke.as_mut() {
-                    stroke.size = value(0);
-                    stroke.opacity = value(1) / 100.0;
+        self.tab()
+            .session
+            .change_effects(move |effects| match kind {
+                LayerEffectKind::Stroke => {
+                    if let Some(stroke) = effects.stroke.as_mut() {
+                        stroke.size = value(0);
+                        stroke.opacity = value(1) / 100.0;
+                    }
                 }
-            }
-            LayerEffectKind::Shadow => {
-                if let Some(shadow) = effects.shadow.as_mut() {
-                    shadow.opacity = value(0) / 100.0;
-                    shadow.angle = value(1);
-                    shadow.distance = value(2);
-                    shadow.blur = value(3);
+                LayerEffectKind::Shadow => {
+                    if let Some(shadow) = effects.shadow.as_mut() {
+                        shadow.opacity = value(0) / 100.0;
+                        shadow.angle = value(1);
+                        shadow.distance = value(2);
+                        shadow.blur = value(3);
+                    }
                 }
-            }
-            LayerEffectKind::ColorOverlay => {
-                if let Some(overlay) = effects.color_overlay.as_mut() {
-                    overlay.opacity = value(0) / 100.0;
+                LayerEffectKind::ColorOverlay => {
+                    if let Some(overlay) = effects.color_overlay.as_mut() {
+                        overlay.opacity = value(0) / 100.0;
+                    }
                 }
-            }
-            LayerEffectKind::InnerShadow => {
-                if let Some(inner) = effects.inner_shadow.as_mut() {
-                    inner.opacity = value(0) / 100.0;
-                    inner.angle = value(1);
-                    inner.distance = value(2);
-                    inner.blur = value(3);
+                LayerEffectKind::InnerShadow => {
+                    if let Some(inner) = effects.inner_shadow.as_mut() {
+                        inner.opacity = value(0) / 100.0;
+                        inner.angle = value(1);
+                        inner.distance = value(2);
+                        inner.blur = value(3);
+                    }
                 }
-            }
-            LayerEffectKind::OuterGlow => {
-                if let Some(glow) = effects.outer_glow.as_mut() {
-                    glow.size = value(0);
-                    glow.opacity = value(1) / 100.0;
+                LayerEffectKind::OuterGlow => {
+                    if let Some(glow) = effects.outer_glow.as_mut() {
+                        glow.size = value(0);
+                        glow.opacity = value(1) / 100.0;
+                    }
                 }
-            }
-            LayerEffectKind::InnerGlow => {
-                if let Some(glow) = effects.inner_glow.as_mut() {
-                    glow.size = value(0);
-                    glow.opacity = value(1) / 100.0;
+                LayerEffectKind::InnerGlow => {
+                    if let Some(glow) = effects.inner_glow.as_mut() {
+                        glow.size = value(0);
+                        glow.opacity = value(1) / 100.0;
+                    }
                 }
-            }
-        });
+            });
         self.touch(cx);
     }
 }
@@ -620,10 +642,7 @@ pub(crate) fn histogram_coverage(
     let selection = selection?;
     let mapping = coverage_mapping(transform, width, height);
     Some(compositor_core::adjust::pixel::coverage_path(
-        &selection,
-        width,
-        height,
-        &mapping,
+        &selection, width, height, &mapping,
     ))
 }
 
@@ -673,7 +692,8 @@ mod tests {
         // layer's pixels sitting under the selection adjust, and each rim
         // pixel blends at exactly half coverage.
         let transform = LayerTransform::new(CGPoint::new(2.0, 0.0), CGSize::new(10.0, 1.0));
-        let selection = DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
+        let selection =
+            DocumentSelection::new(SelectionPath::rect(CGRect::new(2.5, 0.0, 4.0, 1.0)));
         let blended = blend_through_selection(&base, adjusted, Some(transform), Some(selection));
         assert_eq!(blended.pixel(0, 0), [128, 128, 128, 255]);
         assert_eq!(blended.pixel(2, 0), [255, 255, 255, 255]);
@@ -718,11 +738,20 @@ mod tests {
         // Contrast touches only the composite range: the RGB sliders move,
         // a channel's sliders stay put.
         let contrast = LevelsAuto::Contrast.settings(&bins);
-        assert_eq!(levels_auto_slider_values(&contrast, 0), [20.0, 1.0, 230.0, 0.0, 255.0]);
-        assert_eq!(levels_auto_slider_values(&contrast, 1), [0.0, 1.0, 255.0, 0.0, 255.0]);
+        assert_eq!(
+            levels_auto_slider_values(&contrast, 0),
+            [20.0, 1.0, 230.0, 0.0, 255.0]
+        );
+        assert_eq!(
+            levels_auto_slider_values(&contrast, 1),
+            [0.0, 1.0, 255.0, 0.0, 255.0]
+        );
         // Color's per-channel ranges show up when that channel is visible.
         let color = LevelsAuto::Color.settings(&bins);
-        assert_eq!(levels_auto_slider_values(&color, 3), [60.0, 1.0, 230.0, 0.0, 255.0]);
+        assert_eq!(
+            levels_auto_slider_values(&color, 3),
+            [60.0, 1.0, 230.0, 0.0, 255.0]
+        );
     }
 
     #[test]
@@ -733,4 +762,3 @@ mod tests {
         assert_eq!(defaults.amount, 10.0);
     }
 }
-

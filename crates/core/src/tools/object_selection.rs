@@ -83,7 +83,11 @@ pub fn select(
     let binary = edge_preserved_binary_mask(coarse, image, width, height);
     let mask = adjusted(&binary, width, height, edge_offset);
     let outline = outline_of_mask(&mask, width, height)?;
-    Some(if smooth_edges { smoothed(&outline) } else { outline })
+    Some(if smooth_edges {
+        smoothed(&outline)
+    } else {
+        outline
+    })
 }
 
 /// `instanceIndex`: an instance mask stores 0 for background and instance
@@ -95,14 +99,12 @@ pub fn instance_index(instance_mask: &GrayMask, point: CGPoint, image_size: CGSi
     if width == 0 || height == 0 || image_size.width <= 0.0 || image_size.height <= 0.0 {
         return None;
     }
-    let x = ((point.x / image_size.width * width as f64) as i64).clamp(0, width as i64 - 1) as usize;
-    let y = ((point.y / image_size.height * height as f64) as i64).clamp(0, height as i64 - 1) as usize;
+    let x =
+        ((point.x / image_size.width * width as f64) as i64).clamp(0, width as i64 - 1) as usize;
+    let y =
+        ((point.y / image_size.height * height as f64) as i64).clamp(0, height as i64 - 1) as usize;
     let value = instance_mask.value(x, y);
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0 { None } else { Some(value) }
 }
 
 /// `edgePreservedBinaryMask`: the coarse mask upsampled to full size with
@@ -113,15 +115,31 @@ pub fn instance_index(instance_mask: &GrayMask, point: CGPoint, image_size: CGSi
 /// off the coarse region cannot pull it. Apple's kernel is closed; this is
 /// the standard formulation the filter implements, with Rec. 709 luma on
 /// the guide's (sRGB) bytes.
-fn edge_preserved_binary_mask(coarse: &GrayMask, guide: &Bitmap, width: usize, height: usize) -> Vec<u8> {
+fn edge_preserved_binary_mask(
+    coarse: &GrayMask,
+    guide: &Bitmap,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
     let refined = joint_bilateral_upsample(coarse, guide, width, height);
     refined
         .into_iter()
-        .map(|value| if value >= REFINEMENT_THRESHOLD { 255 } else { 0 })
+        .map(|value| {
+            if value >= REFINEMENT_THRESHOLD {
+                255
+            } else {
+                0
+            }
+        })
         .collect()
 }
 
-fn joint_bilateral_upsample(coarse: &GrayMask, guide: &Bitmap, width: usize, height: usize) -> Vec<u8> {
+fn joint_bilateral_upsample(
+    coarse: &GrayMask,
+    guide: &Bitmap,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
     if width == 0 || height == 0 || coarse.width == 0 || coarse.height == 0 {
         return vec![0; width * height];
     }
@@ -152,20 +170,26 @@ fn joint_bilateral_upsample(coarse: &GrayMask, guide: &Bitmap, width: usize, hei
                     }
                     // Guide luma under the coarse sample, where its value
                     // was measured.
-                    let guide_x = (((sample_x as f64 + 0.5) * width as f64 / cw - 0.5).round() as i64)
+                    let guide_x = (((sample_x as f64 + 0.5) * width as f64 / cw - 0.5).round()
+                        as i64)
                         .clamp(0, width as i64 - 1) as usize;
-                    let guide_y = (((sample_y as f64 + 0.5) * height as f64 / ch - 0.5).round() as i64)
+                    let guide_y = (((sample_y as f64 + 0.5) * height as f64 / ch - 0.5).round()
+                        as i64)
                         .clamp(0, height as i64 - 1) as usize;
                     let dl = luma - guide_luma(guide, guide_x, guide_y);
                     let ddx = sample_x as f64 - cx;
                     let ddy = sample_y as f64 - cy;
-                    let weight =
-                        (-(ddx * ddx + ddy * ddy) / two_spatial).exp() * (-(dl * dl) / two_luma).exp();
+                    let weight = (-(ddx * ddx + ddy * ddy) / two_spatial).exp()
+                        * (-(dl * dl) / two_luma).exp();
                     sum += weight * coarse.value(sample_x as usize, sample_y as usize) as f64;
                     weight_sum += weight;
                 }
             }
-            out[y * width + x] = if weight_sum > 0.0 { (sum / weight_sum).round() as u8 } else { 0 };
+            out[y * width + x] = if weight_sum > 0.0 {
+                (sum / weight_sum).round() as u8
+            } else {
+                0
+            };
         }
     }
     out
@@ -308,18 +332,18 @@ fn simplify_closed(input: &[CGPoint], tolerance: f64) -> Vec<CGPoint> {
                 .then(points[lhs].y.total_cmp(&points[rhs].y))
         })
         .unwrap_or(0);
-    let rotated: Vec<CGPoint> = points[start..].iter().chain(points[..start].iter()).copied().collect();
+    let rotated: Vec<CGPoint> = points[start..]
+        .iter()
+        .chain(points[..start].iter())
+        .copied()
+        .collect();
     let mut open = rotated.clone();
     open.push(rotated[0]);
     let mut open = simplify_open(&open, 0, open.len() - 1, tolerance);
     if open.len() >= 2 && open.first() == open.last() {
         open.pop();
     }
-    if open.len() >= 3 {
-        open
-    } else {
-        points
-    }
+    if open.len() >= 3 { open } else { points }
 }
 
 /// `simplifyOpen`: Ramer–Douglas–Peucker between two fixed endpoints — split
@@ -374,8 +398,14 @@ pub fn chaikin(input: &[CGPoint], iterations: usize) -> Vec<CGPoint> {
         for index in 0..points.len() {
             let a = points[index];
             let b = points[(index + 1) % points.len()];
-            next.push(CGPoint::new(a.x * 0.75 + b.x * 0.25, a.y * 0.75 + b.y * 0.25));
-            next.push(CGPoint::new(a.x * 0.25 + b.x * 0.75, a.y * 0.25 + b.y * 0.75));
+            next.push(CGPoint::new(
+                a.x * 0.75 + b.x * 0.25,
+                a.y * 0.75 + b.y * 0.25,
+            ));
+            next.push(CGPoint::new(
+                a.x * 0.25 + b.x * 0.75,
+                a.y * 0.25 + b.y * 0.75,
+            ));
         }
         points = next;
     }
@@ -428,13 +458,24 @@ mod tests {
         // (luma 0.5, half a unit from both the object and the field) stays
         // under the 50% threshold.
         let scene = scene();
-        let path = select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), 0, false).unwrap();
+        let path = select(
+            &scene.image,
+            &scene.coarse,
+            CGPoint::new(12.0, 12.0),
+            0,
+            false,
+        )
+        .unwrap();
         assert_eq!(path.bounds(), Some(CGRect::new(8.0, 8.0, 16.0, 16.0)));
         let covered = rasterize(&path, 32, 32, false);
         for y in 0..32 {
             for x in 0..32 {
                 let expected = u8::from((8..24).contains(&x) && (8..24).contains(&y)) * 255;
-                assert_eq!(covered.value(x, y), expected, "pixel ({x},{y}) follows the guide's square");
+                assert_eq!(
+                    covered.value(x, y),
+                    expected,
+                    "pixel ({x},{y}) follows the guide's square"
+                );
             }
         }
     }
@@ -442,9 +483,36 @@ mod tests {
     #[test]
     fn click_outside_the_image_or_an_empty_mask_selects_nothing() {
         let scene = scene();
-        assert!(select(&scene.image, &scene.coarse, CGPoint::new(32.0, 12.0), 0, false).is_none());
-        assert!(select(&scene.image, &scene.coarse, CGPoint::new(-1.0, 12.0), 0, false).is_none());
-        assert!(select(&scene.image, &scene.coarse, CGPoint::new(f64::NAN, 2.0), 0, false).is_none());
+        assert!(
+            select(
+                &scene.image,
+                &scene.coarse,
+                CGPoint::new(32.0, 12.0),
+                0,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            select(
+                &scene.image,
+                &scene.coarse,
+                CGPoint::new(-1.0, 12.0),
+                0,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            select(
+                &scene.image,
+                &scene.coarse,
+                CGPoint::new(f64::NAN, 2.0),
+                0,
+                false
+            )
+            .is_none()
+        );
         let empty = GrayMask::new(8, 8);
         assert!(select(&scene.image, &empty, CGPoint::new(12.0, 12.0), 0, false).is_none());
     }
@@ -452,16 +520,67 @@ mod tests {
     #[test]
     fn edge_offset_erodes_and_dilates_by_whole_pixels() {
         let scene = scene();
-        let grown = select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), -2, false).unwrap();
-        assert_eq!(grown.bounds(), Some(CGRect::new(6.0, 6.0, 20.0, 20.0)), "dilation expands 2 out");
-        let shrunk = select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), 2, false).unwrap();
-        assert_eq!(shrunk.bounds(), Some(CGRect::new(10.0, 10.0, 12.0, 12.0)), "erosion pulls 2 in");
-        let slight = select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), 7, false).unwrap();
-        assert_eq!(slight.bounds(), Some(CGRect::new(15.0, 15.0, 2.0, 2.0)), "7 erosions leave a 2×2 core");
+        let grown = select(
+            &scene.image,
+            &scene.coarse,
+            CGPoint::new(12.0, 12.0),
+            -2,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            grown.bounds(),
+            Some(CGRect::new(6.0, 6.0, 20.0, 20.0)),
+            "dilation expands 2 out"
+        );
+        let shrunk = select(
+            &scene.image,
+            &scene.coarse,
+            CGPoint::new(12.0, 12.0),
+            2,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            shrunk.bounds(),
+            Some(CGRect::new(10.0, 10.0, 12.0, 12.0)),
+            "erosion pulls 2 in"
+        );
+        let slight = select(
+            &scene.image,
+            &scene.coarse,
+            CGPoint::new(12.0, 12.0),
+            7,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            slight.bounds(),
+            Some(CGRect::new(15.0, 15.0, 2.0, 2.0)),
+            "7 erosions leave a 2×2 core"
+        );
         // Eight 1-pixel erosions erase the 16-pixel square; a larger offset
         // clamps to the same 10-step cap and cannot bring anything back.
-        assert!(select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), 8, false).is_none());
-        assert!(select(&scene.image, &scene.coarse, CGPoint::new(12.0, 12.0), 11, false).is_none());
+        assert!(
+            select(
+                &scene.image,
+                &scene.coarse,
+                CGPoint::new(12.0, 12.0),
+                8,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            select(
+                &scene.image,
+                &scene.coarse,
+                CGPoint::new(12.0, 12.0),
+                11,
+                false
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -471,10 +590,24 @@ mod tests {
         mask.data[1 * 4 + 2] = 3;
         let index = instance_index(&mask, CGPoint::new(4.0, 3.0), CGSize::new(8.0, 8.0));
         assert_eq!(index, Some(3));
-        assert_eq!(instance_index(&mask, CGPoint::new(1.0, 1.0), CGSize::new(8.0, 8.0)), None, "background");
+        assert_eq!(
+            instance_index(&mask, CGPoint::new(1.0, 1.0), CGSize::new(8.0, 8.0)),
+            None,
+            "background"
+        );
         // Off-image clicks clamp into the mask (the top-right cell is 0).
-        assert_eq!(instance_index(&mask, CGPoint::new(99.0, 3.0), CGSize::new(8.0, 8.0)), None);
-        assert_eq!(instance_index(&GrayMask::new(0, 0), CGPoint::new(1.0, 1.0), CGSize::new(8.0, 8.0)), None);
+        assert_eq!(
+            instance_index(&mask, CGPoint::new(99.0, 3.0), CGSize::new(8.0, 8.0)),
+            None
+        );
+        assert_eq!(
+            instance_index(
+                &GrayMask::new(0, 0),
+                CGPoint::new(1.0, 1.0),
+                CGSize::new(8.0, 8.0)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -491,7 +624,11 @@ mod tests {
         assert_eq!(once[0], CGPoint::new(2.0, 0.0));
         assert_eq!(once[1], CGPoint::new(6.0, 0.0));
         let thrice = chaikin(&square, 3);
-        assert_eq!(thrice.len(), 32, "three rounds double the vertices three times");
+        assert_eq!(
+            thrice.len(),
+            32,
+            "three rounds double the vertices three times"
+        );
     }
 
     #[test]
@@ -506,11 +643,26 @@ mod tests {
             CGPoint::new(0.0, 8.0),
         ];
         let loose = simplify_closed(&bump, 1.6);
-        assert_eq!(loose, vec![CGPoint::new(0.0, 0.0), CGPoint::new(8.0, 0.0), CGPoint::new(8.0, 8.0), CGPoint::new(0.0, 8.0)]);
+        assert_eq!(
+            loose,
+            vec![
+                CGPoint::new(0.0, 0.0),
+                CGPoint::new(8.0, 0.0),
+                CGPoint::new(8.0, 8.0),
+                CGPoint::new(0.0, 8.0)
+            ]
+        );
         let tight = simplify_closed(&bump, 0.4);
-        assert!(tight.contains(&CGPoint::new(4.0, 0.5)), "a corner beyond the tolerance stays");
+        assert!(
+            tight.contains(&CGPoint::new(4.0, 0.5)),
+            "a corner beyond the tolerance stays"
+        );
         // Fewer than 4 points pass through untouched.
-        let tiny = vec![CGPoint::new(0.0, 0.0), CGPoint::new(5.0, 5.0), CGPoint::new(9.0, 1.0)];
+        let tiny = vec![
+            CGPoint::new(0.0, 0.0),
+            CGPoint::new(5.0, 5.0),
+            CGPoint::new(9.0, 1.0),
+        ];
         assert_eq!(simplify_closed(&tiny, 1.6), tiny);
     }
 
@@ -521,7 +673,11 @@ mod tests {
             for x in 0..32 {
                 // Black square 8..24 with a white hole 16..20 punched in it.
                 let hole = (16..20).contains(&x) && (16..20).contains(&y);
-                let gray = if (8..24).contains(&x) && (8..24).contains(&y) && !hole { 0 } else { 255 };
+                let gray = if (8..24).contains(&x) && (8..24).contains(&y) && !hole {
+                    0
+                } else {
+                    255
+                };
                 image.set_pixel(x, y, [gray, gray, gray, 255]);
             }
         }
@@ -534,11 +690,21 @@ mod tests {
         }
         coarse.data[4 * 8 + 4] = 0;
         let path = select(&image, &coarse, CGPoint::new(16.0, 16.0), 0, true).unwrap();
-        assert!(path.contains(CGPoint::new(10.0, 10.0)), "the object's interior survives smoothing");
-        assert!(!path.contains(CGPoint::new(18.0, 18.0)), "the hole keeps subtracting");
+        assert!(
+            path.contains(CGPoint::new(10.0, 10.0)),
+            "the object's interior survives smoothing"
+        );
+        assert!(
+            !path.contains(CGPoint::new(18.0, 18.0)),
+            "the hole keeps subtracting"
+        );
         // Smoothing bends the stair steps: the outline no longer sits on
         // whole-pixel corners.
         let ring = &path.rings[0];
-        assert!(ring.iter().any(|p| p.x.fract() != 0.0 || p.y.fract() != 0.0), "Chaikin cuts the corners");
+        assert!(
+            ring.iter()
+                .any(|p| p.x.fract() != 0.0 || p.y.fract() != 0.0),
+            "Chaikin cuts the corners"
+        );
     }
 }

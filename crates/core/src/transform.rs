@@ -1,6 +1,6 @@
 //! Port of `Compositor/Document/LayerTransform.swift`.
 
-use crate::geometry::{rounded, CGFloat, CGAffineTransform, CGPoint, CGSize, PI};
+use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGSize, PI, rounded};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -17,7 +17,11 @@ pub enum LayerSampling {
 }
 
 impl LayerSampling {
-    pub const ALL: [LayerSampling; 3] = [LayerSampling::Nearest, LayerSampling::Smooth, LayerSampling::High];
+    pub const ALL: [LayerSampling; 3] = [
+        LayerSampling::Nearest,
+        LayerSampling::Smooth,
+        LayerSampling::High,
+    ];
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -81,7 +85,10 @@ impl LayerTransform {
     }
 
     pub fn center(&self) -> CGPoint {
-        CGPoint::new(self.origin.x + self.size.width / 2.0, self.origin.y + self.size.height / 2.0)
+        CGPoint::new(
+            self.origin.x + self.size.width / 2.0,
+            self.origin.y + self.size.height / 2.0,
+        )
     }
 
     pub fn radians(&self) -> CGFloat {
@@ -89,9 +96,15 @@ impl LayerTransform {
     }
 
     pub fn is_valid(&self) -> bool {
-        [self.origin.x, self.origin.y, self.size.width, self.size.height, self.rotation]
-            .iter()
-            .all(|v| v.is_finite())
+        [
+            self.origin.x,
+            self.origin.y,
+            self.size.width,
+            self.size.height,
+            self.rotation,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
             && (1.0..=300_000.0).contains(&self.size.width)
             && (1.0..=300_000.0).contains(&self.size.height)
             && self.origin.x.abs() <= 1_000_000.0
@@ -115,7 +128,8 @@ impl LayerTransform {
         let y = p.y - self.center().y;
         let r = self.radians();
         let (sr, cr) = r.sin_cos();
-        (x * cr + y * sr).abs() <= self.size.width / 2.0 && (-x * sr + y * cr).abs() <= self.size.height / 2.0
+        (x * cr + y * sr).abs() <= self.size.width / 2.0
+            && (-x * sr + y * cr).abs() <= self.size.height / 2.0
     }
 
     /// Width as a percentage of the `pixel_size` it places (100% draws them 1:1).
@@ -126,7 +140,10 @@ impl LayerTransform {
     /// Both sides set to `percent` of `pixel_size`, keeping the center (and rotation and flips).
     pub fn scaled(&self, percent: CGFloat, pixel_size: CGSize) -> LayerTransform {
         let mut result = *self;
-        result.size = CGSize::new(pixel_size.width * percent / 100.0, pixel_size.height * percent / 100.0);
+        result.size = CGSize::new(
+            pixel_size.width * percent / 100.0,
+            pixel_size.height * percent / 100.0,
+        );
         result.origin = CGPoint::new(
             self.center().x - result.size.width / 2.0,
             self.center().y - result.size.height / 2.0,
@@ -138,7 +155,10 @@ impl LayerTransform {
     pub fn rounded(&self) -> LayerTransform {
         let mut result = *self;
         result.origin = CGPoint::new(rounded(self.origin.x), rounded(self.origin.y));
-        result.size = CGSize::new(rounded(self.size.width).max(1.0), rounded(self.size.height).max(1.0));
+        result.size = CGSize::new(
+            rounded(self.size.width).max(1.0),
+            rounded(self.size.height).max(1.0),
+        );
         result.rotation = rounded(self.rotation);
         result
     }
@@ -160,7 +180,10 @@ impl LayerTransform {
         let degrees = angle * 180.0 / PI;
         result.rotation = degrees + ((self.rotation - degrees) / 360.0).round() * 360.0;
         result.flip_y = along < 0.0;
-        result.origin = CGPoint::new(middle.x - result.size.width / 2.0, middle.y - result.size.height / 2.0);
+        result.origin = CGPoint::new(
+            middle.x - result.size.width / 2.0,
+            middle.y - result.size.height / 2.0,
+        );
         result
     }
 
@@ -216,7 +239,10 @@ pub struct TransformGroup {
 
 impl TransformGroup {
     pub fn original(&self, id: uuid::Uuid) -> Option<&LayerTransform> {
-        self.originals.iter().find(|(k, _)| *k == id).map(|(_, v)| v)
+        self.originals
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map(|(_, v)| v)
     }
 }
 
@@ -342,8 +368,16 @@ impl TransformDrag {
                 // Dragging a handle past the opposite side turns the layer over rather than
                 // stopping at nothing: the size stays positive and the layer is flipped on that
                 // axis, as a negative scale would.
-                let raw_width = if sx == 0.0 { self.original.size.width } else { local_x * sx };
-                let raw_height = if sy == 0.0 { self.original.size.height } else { local_y * sy };
+                let raw_width = if sx == 0.0 {
+                    self.original.size.width
+                } else {
+                    local_x * sx
+                };
+                let raw_height = if sy == 0.0 {
+                    self.original.size.height
+                } else {
+                    local_y * sy
+                };
                 let mirrored_x = raw_width < 0.0;
                 let mirrored_y = raw_height < 0.0;
                 let mut width = raw_width.abs().max(1.0);
@@ -355,13 +389,12 @@ impl TransformDrag {
                         width / self.original.size.width
                     } else {
                         // Project onto the original diagonal for proportional scaling.
-                        (1.0 / self.original.size.width.min(self.original.size.height))
-                            .max(
-                                (local_x * sx * self.original.size.width
-                                    + local_y * sy * self.original.size.height)
-                                    / (self.original.size.width * self.original.size.width
-                                        + self.original.size.height * self.original.size.height),
-                            )
+                        (1.0 / self.original.size.width.min(self.original.size.height)).max(
+                            (local_x * sx * self.original.size.width
+                                + local_y * sy * self.original.size.height)
+                                / (self.original.size.width * self.original.size.width
+                                    + self.original.size.height * self.original.size.height),
+                        )
                     };
                     width = self.original.size.width * factor;
                     height = self.original.size.height * factor;
@@ -417,7 +450,11 @@ impl TransformSnap {
     }
 
     /// The smallest move that puts one of `guides` on one of `targets`, and the target it met.
-    fn shift(guides: &[CGFloat], targets: &[CGFloat], tolerance: CGFloat) -> (CGFloat, Option<CGFloat>) {
+    fn shift(
+        guides: &[CGFloat],
+        targets: &[CGFloat],
+        tolerance: CGFloat,
+    ) -> (CGFloat, Option<CGFloat>) {
         let mut best: Option<(CGFloat, CGFloat)> = None;
         for &guide_value in guides {
             for &target in targets {
@@ -425,10 +462,10 @@ impl TransformSnap {
                 if mv.abs() > tolerance {
                     continue;
                 }
-                if let Some(current) = best {
-                    if current.0.abs() <= mv.abs() {
-                        continue;
-                    }
+                if let Some(current) = best
+                    && current.0.abs() <= mv.abs()
+                {
+                    continue;
                 }
                 best = Some((mv, target));
             }
@@ -455,7 +492,10 @@ mod tests {
         t.rotation = 90.0;
         // Rotation is clockwise in y-down space: top-left (0,0) goes to top-right corner.
         let p = t.point(CGPoint::new(0.0, 0.0));
-        assert!((p.x - 100.0).abs() < 1e-9 && (p.y - 0.0).abs() < 1e-9, "{p:?}");
+        assert!(
+            (p.x - 100.0).abs() < 1e-9 && (p.y - 0.0).abs() < 1e-9,
+            "{p:?}"
+        );
     }
 
     #[test]
@@ -545,7 +585,10 @@ mod tests {
         assert!((moved.size.width - 80.0).abs() < 1e-6, "{:?}", moved.size);
         assert!((moved.size.height - 80.0).abs() < 1e-6);
         let center = moved.center();
-        assert!((center.x - 70.0).abs() < 1e-6 && (center.y - 80.0).abs() < 1e-6, "{center:?}");
+        assert!(
+            (center.x - 70.0).abs() < 1e-6 && (center.y - 80.0).abs() < 1e-6,
+            "{center:?}"
+        );
         // The rotation follows the box's.
         assert!(((moved.rotation - 45.0).abs() < 1e-6), "{}", moved.rotation);
         // A plain move carries exactly (covered elsewhere); a scale+rotate is

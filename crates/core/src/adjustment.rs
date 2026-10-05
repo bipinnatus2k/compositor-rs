@@ -11,8 +11,8 @@ pub use crate::adjust::camera_raw::CameraRawSettings;
 pub use crate::adjust::curves::{CurvePoint, CurvesSettings};
 pub use crate::adjust::hue_saturation::HueSaturationSettings;
 pub use crate::adjust::image_adjustments::{
-    AdjustmentColor, BlackWhiteSettings, ColorBalanceSettings, ExposureSettings, GradientMapSettings,
-    GrainSettings,
+    AdjustmentColor, BlackWhiteSettings, ColorBalanceSettings, ExposureSettings,
+    GradientMapSettings, GrainSettings,
 };
 pub use crate::adjust::levels::{LevelRange, LevelsSettings};
 
@@ -339,7 +339,12 @@ impl LayerAdjustment {
             AdjustmentKind::Exposure => self.exposure().apply(image),
             AdjustmentKind::GradientMap => self.gradient_map().apply(image),
             AdjustmentKind::Grain => {
-                let region = region.unwrap_or(CGRect::new(0.0, 0.0, image.width as f64, image.height as f64));
+                let region = region.unwrap_or(CGRect::new(
+                    0.0,
+                    0.0,
+                    image.width as f64,
+                    image.height as f64,
+                ));
                 self.grain().apply(
                     image,
                     region.origin,
@@ -350,9 +355,11 @@ impl LayerAdjustment {
             AdjustmentKind::GaussianBlur => {
                 crate::raster::gaussian_blur_rgba(image, self.gaussian_radius())
             }
-            AdjustmentKind::MotionBlur => {
-                crate::filters::motion_blur(image, self.resolved_motion_distance(), self.resolved_motion_angle())
-            }
+            AdjustmentKind::MotionBlur => crate::filters::motion_blur(
+                image,
+                self.resolved_motion_distance(),
+                self.resolved_motion_angle(),
+            ),
             AdjustmentKind::AddNoise => {
                 let mut result = image.clone();
                 crate::filters::noise_add_at(
@@ -366,7 +373,11 @@ impl LayerAdjustment {
                 );
                 result
             }
-            AdjustmentKind::Invert => crate::adjust::pixel::invert(image, &crate::geometry::CGAffineTransform::IDENTITY, None),
+            AdjustmentKind::Invert => crate::adjust::pixel::invert(
+                image,
+                &crate::geometry::CGAffineTransform::IDENTITY,
+                None,
+            ),
         }
     }
 }
@@ -402,22 +413,37 @@ mod tests {
         let mut settings = a.resolved_hsv();
         settings.adjustments.insert(
             crate::adjust::ColorRange::Reds,
-            crate::adjust::RangeAdjustment { hue: 400.0, saturation: 0.0, lightness: 0.0 },
+            crate::adjust::RangeAdjustment {
+                hue: 400.0,
+                saturation: 0.0,
+                lightness: 0.0,
+            },
         );
         a.hsv_settings = Some(settings);
         assert!(!a.is_valid(), "a range hue past ±360 is invalid");
         let mut settings = a.resolved_hsv();
         settings.adjustments.insert(
             crate::adjust::ColorRange::Reds,
-            crate::adjust::RangeAdjustment { hue: 0.0, saturation: 200.0, lightness: -150.0 },
+            crate::adjust::RangeAdjustment {
+                hue: 0.0,
+                saturation: 200.0,
+                lightness: -150.0,
+            },
         );
         a.hsv_settings = Some(settings);
-        assert!(!a.is_valid(), "range saturation/lightness past ±100 are invalid");
+        assert!(
+            !a.is_valid(),
+            "range saturation/lightness past ±100 are invalid"
+        );
         // Back inside the bounds the settings are fine again.
         let mut settings = a.resolved_hsv();
         settings.adjustments.insert(
             crate::adjust::ColorRange::Reds,
-            crate::adjust::RangeAdjustment { hue: 180.0, saturation: 100.0, lightness: -100.0 },
+            crate::adjust::RangeAdjustment {
+                hue: 180.0,
+                saturation: 100.0,
+                lightness: -100.0,
+            },
         );
         a.hsv_settings = Some(settings);
         assert!(a.is_valid());
@@ -425,7 +451,11 @@ mod tests {
         let mut settings = a.resolved_hsv();
         settings.adjustments.insert(
             crate::adjust::ColorRange::Blues,
-            crate::adjust::RangeAdjustment { hue: f64::NAN, saturation: 0.0, lightness: 0.0 },
+            crate::adjust::RangeAdjustment {
+                hue: f64::NAN,
+                saturation: 0.0,
+                lightness: 0.0,
+            },
         );
         a.hsv_settings = Some(settings);
         assert!(!a.is_valid());
@@ -453,7 +483,10 @@ mod tests {
 
     #[test]
     fn sampling_margin_by_kind() {
-        assert_eq!(LayerAdjustment::new(AdjustmentKind::Levels).sampling_margin(), 0.0);
+        assert_eq!(
+            LayerAdjustment::new(AdjustmentKind::Levels).sampling_margin(),
+            0.0
+        );
         let m = LayerAdjustment::new(AdjustmentKind::MotionBlur);
         assert_eq!(m.sampling_margin(), 7.0);
     }
@@ -481,7 +514,10 @@ mod tests {
 
     #[test]
     fn filter_kinds_map() {
-        assert_eq!(AdjustmentKind::Curves.filter_kind(), Some(crate::filters::FilterKind::Curves));
+        assert_eq!(
+            AdjustmentKind::Curves.filter_kind(),
+            Some(crate::filters::FilterKind::Curves)
+        );
         assert_eq!(AdjustmentKind::Levels.filter_kind(), None);
         assert_eq!(AdjustmentKind::Invert.filter_kind(), None);
         assert!(!AdjustmentKind::Invert.is_editable());

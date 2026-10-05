@@ -153,29 +153,27 @@ impl EditorSession {
             return;
         };
         self.close_color_picker(commit);
-        if !commit {
-            if let Some(original) = self.effects_editing_original {
-                // Swift only restores when the layer still *has* effects.
-                if let Some(mut effects) = self
-                    .document
-                    .as_ref()
-                    .and_then(|document| document.layer(editing.layer_id))
-                    .and_then(|layer| layer.effects)
-                {
-                    match editing.kind {
-                        LayerEffectKind::Stroke => effects.stroke = original.stroke,
-                        LayerEffectKind::Shadow => effects.shadow = original.shadow,
-                        LayerEffectKind::ColorOverlay => effects.color_overlay = original.color_overlay,
-                        LayerEffectKind::InnerShadow => effects.inner_shadow = original.inner_shadow,
-                        LayerEffectKind::OuterGlow => effects.outer_glow = original.outer_glow,
-                        LayerEffectKind::InnerGlow => effects.inner_glow = original.inner_glow,
-                    }
-                    self.set_effects(
-                        effects,
-                        Some(editing.layer_id),
-                        &format!("Cancel {}", editing.kind.label()),
-                    );
+        if !commit && let Some(original) = self.effects_editing_original {
+            // Swift only restores when the layer still *has* effects.
+            if let Some(mut effects) = self
+                .document
+                .as_ref()
+                .and_then(|document| document.layer(editing.layer_id))
+                .and_then(|layer| layer.effects)
+            {
+                match editing.kind {
+                    LayerEffectKind::Stroke => effects.stroke = original.stroke,
+                    LayerEffectKind::Shadow => effects.shadow = original.shadow,
+                    LayerEffectKind::ColorOverlay => effects.color_overlay = original.color_overlay,
+                    LayerEffectKind::InnerShadow => effects.inner_shadow = original.inner_shadow,
+                    LayerEffectKind::OuterGlow => effects.outer_glow = original.outer_glow,
+                    LayerEffectKind::InnerGlow => effects.inner_glow = original.inner_glow,
                 }
+                self.set_effects(
+                    effects,
+                    Some(editing.layer_id),
+                    &format!("Cancel {}", editing.kind.label()),
+                );
             }
         }
         self.effects_editing = None;
@@ -234,12 +232,17 @@ impl EditorSession {
         if layer.is_group || layer.asset.is_none() {
             return;
         }
-        let normalized = if effects.is_empty() { None } else { Some(effects) };
+        let normalized = if effects.is_empty() {
+            None
+        } else {
+            Some(effects)
+        };
         if layer.effects == normalized {
             return;
         }
         self.finish_opacity_edit();
-        self.history.begin(name, &self.document, self.active_layer_id);
+        self.history
+            .begin(name, &self.document, self.active_layer_id);
         if let Some(document) = self.document.as_mut() {
             document.layers[index].effects = normalized;
         }
@@ -307,7 +310,12 @@ impl EditorSession {
         else {
             return;
         };
-        if self.effects_editing == Some(LayerEffectSelection { layer_id: target, kind }) {
+        if self.effects_editing
+            == Some(LayerEffectSelection {
+                layer_id: target,
+                kind,
+            })
+        {
             self.finish_effects_editing(true);
         }
         let mut effects = self
@@ -333,9 +341,9 @@ impl EditorSession {
 mod tests {
     use super::*;
     use crate::document::{ImageLayer, PaletteColor};
+    use crate::geometry::CGSize;
     use crate::raster::{Bitmap, ImportedImage};
     use crate::session::EditorSession;
-    use crate::geometry::CGSize;
 
     /// A session with a document whose first layer carries pixels, so it can
     /// take effects (a local copy of session.rs's private `session()`).
@@ -382,7 +390,10 @@ mod tests {
         s.select_effect(LayerEffectKind::Stroke, id, false);
         assert_eq!(
             s.selected_effect(),
-            Some(LayerEffectSelection { layer_id: id, kind: LayerEffectKind::Stroke })
+            Some(LayerEffectSelection {
+                layer_id: id,
+                kind: LayerEffectKind::Stroke
+            })
         );
 
         s.remove_selected_effect();
@@ -415,7 +426,13 @@ mod tests {
         );
         assert_eq!(effects.stroke.unwrap().size, 4.0);
         assert_eq!(s.history.undo_name(), "Add Stroke");
-        assert_eq!(s.effects_editing, Some(LayerEffectSelection { layer_id: id, kind: LayerEffectKind::Stroke }));
+        assert_eq!(
+            s.effects_editing,
+            Some(LayerEffectSelection {
+                layer_id: id,
+                kind: LayerEffectKind::Stroke
+            })
+        );
 
         // The other kinds keep their struct defaults. Each add cancels the
         // previous *uncommitted* edit (Swift's finishEffectsEditing(commit:
@@ -431,7 +448,10 @@ mod tests {
         assert_eq!(s.history.undo_name(), "Add Outer Glow");
         assert_eq!(
             s.effects_editing,
-            Some(LayerEffectSelection { layer_id: id, kind: LayerEffectKind::OuterGlow })
+            Some(LayerEffectSelection {
+                layer_id: id,
+                kind: LayerEffectKind::OuterGlow
+            })
         );
     }
 
@@ -451,7 +471,10 @@ mod tests {
             }
         });
         assert_eq!(effects_of(&s, first).stroke.unwrap().size, 9.0);
-        assert!(effects_of(&s, second).is_empty(), "the other layer is untouched");
+        assert!(
+            effects_of(&s, second).is_empty(),
+            "the other layer is untouched"
+        );
         assert_eq!(s.history.undo_name(), "Edit Stroke");
     }
 
@@ -474,7 +497,10 @@ mod tests {
         s.finish_effects_editing(false);
 
         let after = effects_of(&s, id);
-        assert_eq!(after.stroke, None, "the stroke had no original: Cancel removes it");
+        assert_eq!(
+            after.stroke, None,
+            "the stroke had no original: Cancel removes it"
+        );
         assert_eq!(after.shadow, shadow_before, "the earlier shadow survives");
         assert_eq!(s.history.undo_name(), "Cancel Stroke");
         assert_eq!(s.effects_editing, None);
@@ -490,9 +516,20 @@ mod tests {
         s.finish_effects_editing(false);
         assert!(effects_of(&s, id).is_empty(), "the added effect is gone");
         // Nothing stored: an empty effects set normalizes to nil.
-        assert!(s.document.as_ref().unwrap().layer(id).unwrap().effects.is_none());
+        assert!(
+            s.document
+                .as_ref()
+                .unwrap()
+                .layer(id)
+                .unwrap()
+                .effects
+                .is_none()
+        );
         assert_eq!(s.effects_editing, None);
-        assert_eq!(s.effect_selection, None, "the selection leaves with the panel");
+        assert_eq!(
+            s.effect_selection, None,
+            "the selection leaves with the panel"
+        );
     }
 
     #[test]
@@ -506,7 +543,10 @@ mod tests {
         // The effect selection stays while the layer is active and carries it.
         assert_eq!(
             s.selected_effect(),
-            Some(LayerEffectSelection { layer_id: id, kind: LayerEffectKind::Stroke })
+            Some(LayerEffectSelection {
+                layer_id: id,
+                kind: LayerEffectKind::Stroke
+            })
         );
     }
 
@@ -518,7 +558,10 @@ mod tests {
         // An invalid effect (size over the 500 px cap) is refused.
         s.set_effects(
             LayerEffects {
-                stroke: Some(StrokeEffect { size: 600.0, ..Default::default() }),
+                stroke: Some(StrokeEffect {
+                    size: 600.0,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             Some(id),
@@ -582,7 +625,10 @@ mod tests {
         let target = pixel_layer(&mut s, "Target");
 
         assert!(s.can_copy_effect(LayerEffectKind::Stroke, source, target));
-        assert!(!s.can_copy_effect(LayerEffectKind::Stroke, source, source), "same layer");
+        assert!(
+            !s.can_copy_effect(LayerEffectKind::Stroke, source, source),
+            "same layer"
+        );
         assert!(
             !s.can_copy_effect(LayerEffectKind::Shadow, source, target),
             "the source has no shadow"
@@ -594,7 +640,19 @@ mod tests {
         assert_eq!(s.history.undo_name(), "Copy Stroke");
         // The copy selects the effect on the target (without editing); the
         // panel stays bound to the source's stroke, which it was editing.
-        assert_eq!(s.effect_selection, Some(LayerEffectSelection { layer_id: target, kind: LayerEffectKind::Stroke }));
-        assert_eq!(s.effects_editing, Some(LayerEffectSelection { layer_id: source, kind: LayerEffectKind::Stroke }));
+        assert_eq!(
+            s.effect_selection,
+            Some(LayerEffectSelection {
+                layer_id: target,
+                kind: LayerEffectKind::Stroke
+            })
+        );
+        assert_eq!(
+            s.effects_editing,
+            Some(LayerEffectSelection {
+                layer_id: source,
+                kind: LayerEffectKind::Stroke
+            })
+        );
     }
 }

@@ -17,12 +17,13 @@
 //!   `itemsFromDifferentFoldersUseCommonParent…` builds its two seed folders
 //!   with `add_group` instead.
 
-use compositor_core::canvas::{resize_canvas, resize_image, CanvasSizeOptions};
+use compositor_core::canvas::{CanvasSizeOptions, resize_canvas, resize_image};
 use compositor_core::document::{NavigationTool, PaletteColor};
 use compositor_core::export::png_data;
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::project::{
-    document_from_project, project_from_document, save as save_project, ProjectData, ProjectManifest,
+    ProjectData, ProjectManifest, document_from_project, project_from_document,
+    save as save_project,
 };
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render::draw_live_composite;
@@ -179,12 +180,14 @@ fn transform_selection_moves_pixels_and_outline_as_one_undo() {
         .as_ref()
         .expect("transform edit")
         .draft;
-    assert!(session
-        .transform_edit
-        .as_ref()
-        .expect("transform edit")
-        .floating
-        .is_some());
+    assert!(
+        session
+            .transform_edit
+            .as_ref()
+            .expect("transform edit")
+            .floating
+            .is_some()
+    );
     assert_eq!(session.tool, NavigationTool::Move);
     draft.origin = CGPoint::new(70.0, 20.0);
     session.preview_transform(draft);
@@ -246,7 +249,10 @@ fn applying_an_unchanged_transform_leaves_soft_edges_untouched() {
     let count = session.history.undo_count();
     session.begin_selection_transform();
     session.commit_transform();
-    assert!(session.document == before, "an unchanged draft restores exactly");
+    assert!(
+        session.document == before,
+        "an unchanged draft restores exactly"
+    );
     assert_eq!(session.history.undo_count(), count);
 }
 
@@ -324,8 +330,13 @@ fn copy_merged_takes_every_visible_layer_not_just_the_active_one() {
         None,
     );
     let green = session.active_layer_id.expect("green layer");
-    session.document.as_mut().unwrap().layer_mut(green).unwrap().transform =
-        LayerTransform::new(CGPoint::new(60.0, 10.0), CGSize::new(20.0, 20.0));
+    session
+        .document
+        .as_mut()
+        .unwrap()
+        .layer_mut(green)
+        .unwrap()
+        .transform = LayerTransform::new(CGPoint::new(60.0, 10.0), CGSize::new(20.0, 20.0));
     select(&mut session, CGRect::new(55.0, 5.0, 30.0, 30.0));
 
     session.copy_selection(); // Active layer only: just the green square.
@@ -381,7 +392,14 @@ fn nested_groups_move_out_collapse_and_delete_undo() {
     );
     assert_eq!(session.active_layer_id, Some(outer));
     session.toggle_group_expansion(outer);
-    assert_eq!(session.layer_rows().iter().map(|row| row.depth).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(
+        session
+            .layer_rows()
+            .iter()
+            .map(|row| row.depth)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
     session.select_layer(Some(child));
     session.move_active_layer_out_of_group();
     assert_eq!(session.active_layer().unwrap().parent_id, Some(outer));
@@ -444,11 +462,25 @@ fn hidden_parent_overrides_children_and_export_order_follows_groups() {
         .image
         .clone();
     session.toggle_layer_visibility(group);
-    assert!(session.active_layer().unwrap().is_visible, "the child stays visible");
-    assert!(session.document.as_ref().unwrap().render_layers().is_empty());
+    assert!(
+        session.active_layer().unwrap().is_visible,
+        "the child stays visible"
+    );
+    assert!(
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .render_layers()
+            .is_empty()
+    );
     // Swift also asserts `!canTransform` here; the Rust `can_transform` lacks
     // the effective-visibility term (module notes).
-    assert_eq!(render(&session).pixel(0, 0)[3], 0, "a hidden parent hides everything");
+    assert_eq!(
+        render(&session).pixel(0, 0)[3],
+        0,
+        "a hidden parent hides everything"
+    );
     session.toggle_layer_visibility(group);
     assert_eq!(
         session
@@ -462,7 +494,13 @@ fn hidden_parent_overrides_children_and_export_order_follows_groups() {
         vec![child]
     );
     assert_eq!(
-        session.active_layer().unwrap().asset.as_ref().unwrap().image,
+        session
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image,
         source
     );
     session.select_layer(None);
@@ -533,8 +571,8 @@ fn groups_round_trip_and_survive_image_and_canvas_resize() {
     assert_eq!(record(&loaded, group).is_group, Some(true));
     assert_eq!(record(&loaded, child).parent_id, Some(group));
     let (loaded_doc, _) = document_from_project(&loaded).expect("decodes");
-    let resized = resize_image(&loaded_doc, 40, 20, Some(72.0), LayerSampling::High)
-        .expect("image resizes");
+    let resized =
+        resize_image(&loaded_doc, 40, 20, Some(72.0), LayerSampling::High).expect("image resizes");
     let cropped = resize_canvas(&resized, &CanvasSizeOptions::new(30, 15)).expect("canvas resizes");
     assert_eq!(cropped.layer(child).unwrap().parent_id, Some(group));
     assert!(cropped.layer(group).unwrap().is_group);
@@ -569,23 +607,47 @@ fn single_layer_and_folder_are_wrapped_rather_than_creating_a_child_folder() {
     session.group_selected_layers();
     let inner = session.active_layer_id.expect("inner");
     assert_eq!(
-        session.document.as_ref().unwrap().layer(layer).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(layer)
+            .unwrap()
+            .parent_id,
         Some(inner)
     );
     session.group_selected_layers();
     let outer = session.active_layer_id.expect("outer");
     assert_eq!(
-        session.document.as_ref().unwrap().layer(inner).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(inner)
+            .unwrap()
+            .parent_id,
         Some(outer)
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(layer).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(layer)
+            .unwrap()
+            .parent_id,
         Some(inner)
     );
     assert_eq!(session.active_layer().unwrap().parent_id, None);
     session.undo();
     assert_eq!(
-        session.document.as_ref().unwrap().layer(inner).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(inner)
+            .unwrap()
+            .parent_id,
         None
     );
     assert_eq!(session.document.as_ref().unwrap().layers.len(), 2);
@@ -610,15 +672,33 @@ fn multiple_selection_preserves_order_and_selected_folder_descendants() {
     session.group_selected_layers();
     let wrapper = session.active_layer_id.expect("wrapper");
     assert_eq!(
-        session.document.as_ref().unwrap().layer(folder).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(folder)
+            .unwrap()
+            .parent_id,
         Some(wrapper)
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(sibling).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(sibling)
+            .unwrap()
+            .parent_id,
         Some(wrapper)
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(child).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(child)
+            .unwrap()
+            .parent_id,
         Some(folder),
         "selected descendants stay in their folder"
     );
@@ -657,19 +737,43 @@ fn items_from_different_folders_use_common_parent() {
     let group = session.active_layer_id.expect("group");
     assert_eq!(session.active_layer().unwrap().parent_id, None);
     assert_eq!(
-        session.document.as_ref().unwrap().layer(a).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(a)
+            .unwrap()
+            .parent_id,
         Some(group)
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(b).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(b)
+            .unwrap()
+            .parent_id,
         Some(group)
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(first).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(first)
+            .unwrap()
+            .parent_id,
         None
     );
     assert_eq!(
-        session.document.as_ref().unwrap().layer(second).unwrap().parent_id,
+        session
+            .document
+            .as_ref()
+            .unwrap()
+            .layer(second)
+            .unwrap()
+            .parent_id,
         None
     );
 }

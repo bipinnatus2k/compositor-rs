@@ -18,7 +18,7 @@ use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat};
 use uuid::Uuid;
 
 use super::manifest::{
-    image_file_name, mask_file_name, ProjectLayerRecord, ProjectManifest, MAX_VERSION, MIN_VERSION,
+    MAX_VERSION, MIN_VERSION, ProjectLayerRecord, ProjectManifest, image_file_name, mask_file_name,
 };
 use super::{ProjectData, ProjectError};
 use crate::adjustment::AdjustmentKind;
@@ -45,10 +45,10 @@ pub(crate) fn validate(manifest: &ProjectManifest) -> Result<(), ProjectError> {
     if manifest.color_space != "sRGB" {
         return Err(ProjectError::Invalid);
     }
-    if let Some(resolution) = manifest.resolution {
-        if !resolution.is_finite() || !(1.0..=9600.0).contains(&resolution) {
-            return Err(ProjectError::Invalid);
-        }
+    if let Some(resolution) = manifest.resolution
+        && (!resolution.is_finite() || !(1.0..=9600.0).contains(&resolution))
+    {
+        return Err(ProjectError::Invalid);
     }
     if !(1..=MAX_SIDE).contains(&manifest.width)
         || !(1..=MAX_SIDE).contains(&manifest.height)
@@ -57,14 +57,13 @@ pub(crate) fn validate(manifest: &ProjectManifest) -> Result<(), ProjectError> {
         return Err(ProjectError::TooLarge);
     }
     for layer in &manifest.layers {
-        if let Some(text) = &layer.text {
-            if !LayerTextStyle::from(text.clone()).is_valid()
+        if let Some(text) = &layer.text
+            && (!LayerTextStyle::from(text.clone()).is_valid()
                 || layer.image_file.is_none()
                 || layer.is_group == Some(true)
-                || layer.adjustment.is_some()
-            {
-                return Err(ProjectError::Invalid);
-            }
+                || layer.adjustment.is_some())
+        {
+            return Err(ProjectError::Invalid);
         }
         if let Some(adjustment) = &layer.adjustment {
             // Adjustment layers arrived in version 7; the blur and noise
@@ -78,7 +77,9 @@ pub(crate) fn validate(manifest: &ProjectManifest) -> Result<(), ProjectError> {
             }
             if matches!(
                 adjustment.kind,
-                AdjustmentKind::GaussianBlur | AdjustmentKind::MotionBlur | AdjustmentKind::AddNoise
+                AdjustmentKind::GaussianBlur
+                    | AdjustmentKind::MotionBlur
+                    | AdjustmentKind::AddNoise
             ) && manifest.version < 9
             {
                 return Err(ProjectError::Invalid);
@@ -94,10 +95,10 @@ pub(crate) fn validate(manifest: &ProjectManifest) -> Result<(), ProjectError> {
         if layer.mask_enabled.is_some() && layer.mask_file.is_none() {
             return Err(ProjectError::Invalid);
         }
-        if let Some(placement) = &layer.mask_placement {
-            if !placement.is_valid() || layer.mask_file.is_none() {
-                return Err(ProjectError::Invalid);
-            }
+        if let Some(placement) = &layer.mask_placement
+            && (!placement.is_valid() || layer.mask_file.is_none())
+        {
+            return Err(ProjectError::Invalid);
         }
         let opacity = layer.opacity.unwrap_or(1.0);
         let blend = layer.blend_mode.unwrap_or(LayerBlendMode::Normal);
@@ -140,16 +141,16 @@ pub(crate) fn validate(manifest: &ProjectManifest) -> Result<(), ProjectError> {
         if layer.name.trim().is_empty() || layer.name.len() > 16_384 {
             return Err(ProjectError::Invalid);
         }
-        if let Some(image_file) = &layer.image_file {
-            if *image_file != image_file_name(layer.id) {
-                return Err(ProjectError::Invalid);
-            }
-        }
-    }
-    if let Some(active) = manifest.active_layer_id {
-        if !ids.contains(&active) {
+        if let Some(image_file) = &layer.image_file
+            && *image_file != image_file_name(layer.id)
+        {
             return Err(ProjectError::Invalid);
         }
+    }
+    if let Some(active) = manifest.active_layer_id
+        && !ids.contains(&active)
+    {
+        return Err(ProjectError::Invalid);
     }
     validate_guides(manifest)
 }
@@ -208,14 +209,19 @@ fn validate_live_masks(layers: &[ProjectLayerRecord]) -> Result<(), ProjectError
             let Some(record) = records.get(&id) else {
                 return Err(ProjectError::Invalid);
             };
-            if let Some(source) = record.mask_source_id {
-                if record.is_group == Some(true)
+            if let Some(source) = record.mask_source_id
+                && (record.is_group == Some(true)
                     || !records.contains_key(&source)
-                    || records.get(&source).map(|r| r.is_group == Some(true)).unwrap_or(true)
-                    || records.get(&source).map(|r| r.adjustment.is_some()).unwrap_or(true)
-                {
-                    return Err(ProjectError::Invalid);
-                }
+                    || records
+                        .get(&source)
+                        .map(|r| r.is_group == Some(true))
+                        .unwrap_or(true)
+                    || records
+                        .get(&source)
+                        .map(|r| r.adjustment.is_some())
+                        .unwrap_or(true))
+            {
+                return Err(ProjectError::Invalid);
             }
             current = record.mask_source_id;
         }
@@ -238,7 +244,9 @@ fn validate_guides(manifest: &ProjectManifest) -> Result<(), ProjectError> {
     }
     let mut ids = HashSet::new();
     for guide in guides {
-        if !ids.insert(guide.id) || !guide.position.is_finite() || guide.position.abs() > 1_000_000.0
+        if !ids.insert(guide.id)
+            || !guide.position.is_finite()
+            || guide.position.abs() > 1_000_000.0
         {
             return Err(ProjectError::Invalid);
         }
@@ -325,7 +333,8 @@ fn read_png_asset(path: &Path, is_mask: bool, used: &mut u64) -> Result<Asset, P
             data,
         )))
     } else {
-        let dynamic = DynamicImage::from_decoder(decoder).map_err(|_| ProjectError::MissingImage)?;
+        let dynamic =
+            DynamicImage::from_decoder(decoder).map_err(|_| ProjectError::MissingImage)?;
         let rgba = dynamic.into_rgba8();
         let (width, height) = (rgba.width() as usize, rgba.height() as usize);
         let mut data = rgba.into_raw();
@@ -364,9 +373,8 @@ fn encode_image_png(bitmap: &Bitmap) -> Result<Vec<u8>, ProjectError> {
     for pixel in data.chunks_exact_mut(4) {
         unpremultiply_pixel(pixel);
     }
-    let image =
-        image::RgbaImage::from_raw(bitmap.width as u32, bitmap.height as u32, data)
-            .ok_or(ProjectError::Encode)?;
+    let image = image::RgbaImage::from_raw(bitmap.width as u32, bitmap.height as u32, data)
+        .ok_or(ProjectError::Encode)?;
     let mut out = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
@@ -375,8 +383,9 @@ fn encode_image_png(bitmap: &Bitmap) -> Result<Vec<u8>, ProjectError> {
 }
 
 fn encode_mask_png(mask: &GrayMask) -> Result<Vec<u8>, ProjectError> {
-    let image = image::GrayImage::from_raw(mask.width as u32, mask.height as u32, mask.data.clone())
-        .ok_or(ProjectError::Encode)?;
+    let image =
+        image::GrayImage::from_raw(mask.width as u32, mask.height as u32, mask.data.clone())
+            .ok_or(ProjectError::Encode)?;
     let mut out = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
@@ -391,7 +400,12 @@ pub fn load(dir: &Path) -> Result<ProjectData, ProjectError> {
         return Err(ProjectError::Invalid);
     }
     let metadata_path = dir.join("manifest.json");
-    check_file(&metadata_path, dir, MANIFEST_MAX_BYTES, ProjectError::Invalid)?;
+    check_file(
+        &metadata_path,
+        dir,
+        MANIFEST_MAX_BYTES,
+        ProjectError::Invalid,
+    )?;
     let metadata = fs::read(&metadata_path).map_err(|_| ProjectError::Invalid)?;
     // The header decides between "damaged" and "unsupported version".
     #[derive(serde::Deserialize)]
@@ -576,8 +590,8 @@ fn write_package(
 mod tests {
     use super::super::convert::{document_from_project, project_from_document};
     use super::super::manifest::{
-        image_file_name, mask_file_name, ManifestGuide, ManifestTextStyle, ManifestTransform,
-        ProjectLayerRecord, ProjectManifest, CURRENT_VERSION,
+        CURRENT_VERSION, ManifestGuide, ManifestTextStyle, ManifestTransform, ProjectLayerRecord,
+        ProjectManifest, image_file_name, mask_file_name,
     };
     use super::*;
     use crate::document::{CanvasDocument, CanvasGuide, GuideAxis, ImageLayer};
@@ -723,13 +737,22 @@ mod tests {
         assert_eq!(check_size(30_000, 3_333, &mut used), Ok(()));
         assert_eq!(used, 99_990_000);
         assert_eq!(check_size(10_000, 1, &mut used), Ok(()));
-        assert_eq!(check_size(10_001, 1, &mut used), Err(ProjectError::TooLarge));
+        assert_eq!(
+            check_size(10_001, 1, &mut used),
+            Err(ProjectError::TooLarge)
+        );
         // A fresh budget rejects anything over 100 million at once.
         let mut fresh = 0u64;
-        assert_eq!(check_size(30_000, 3_334, &mut fresh), Err(ProjectError::TooLarge));
+        assert_eq!(
+            check_size(30_000, 3_334, &mut fresh),
+            Err(ProjectError::TooLarge)
+        );
         // Per-side limits.
         let mut side = 0u64;
-        assert_eq!(check_size(30_001, 1, &mut side), Err(ProjectError::TooLarge));
+        assert_eq!(
+            check_size(30_001, 1, &mut side),
+            Err(ProjectError::TooLarge)
+        );
         assert_eq!(check_size(0, 10, &mut side), Err(ProjectError::TooLarge));
         // Masks draw on a budget of their own.
         let mut masks = 0u64;
@@ -857,8 +880,9 @@ mod tests {
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         let mut m = m.clone();
         m.layers[0].is_group = Some(false);
-        m.layers[0].adjustment =
-            Some(crate::adjustment::LayerAdjustment::new(AdjustmentKind::Invert));
+        m.layers[0].adjustment = Some(crate::adjustment::LayerAdjustment::new(
+            AdjustmentKind::Invert,
+        ));
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         let mut m = m.clone();
         m.layers[0].adjustment = None;
@@ -996,18 +1020,21 @@ mod tests {
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         let mut m = m.clone();
         m.layers[0].is_group = Some(false);
-        m.layers[0].adjustment =
-            Some(crate::adjustment::LayerAdjustment::new(AdjustmentKind::Invert));
+        m.layers[0].adjustment = Some(crate::adjustment::LayerAdjustment::new(
+            AdjustmentKind::Invert,
+        ));
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         // Adjustments: version 7+, non-group layers without image pixels.
         let mut m = base_manifest();
         m.version = 6;
-        m.layers[0].adjustment =
-            Some(crate::adjustment::LayerAdjustment::new(AdjustmentKind::Invert));
+        m.layers[0].adjustment = Some(crate::adjustment::LayerAdjustment::new(
+            AdjustmentKind::Invert,
+        ));
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         let mut m = base_manifest();
-        m.layers[0].adjustment =
-            Some(crate::adjustment::LayerAdjustment::new(AdjustmentKind::Invert));
+        m.layers[0].adjustment = Some(crate::adjustment::LayerAdjustment::new(
+            AdjustmentKind::Invert,
+        ));
         assert_eq!(validate(&m), Ok(()));
         let mut m = m.clone();
         let id = m.layers[0].id;
@@ -1015,8 +1042,9 @@ mod tests {
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         let mut m = base_manifest();
         m.layers[0].is_group = Some(true);
-        m.layers[0].adjustment =
-            Some(crate::adjustment::LayerAdjustment::new(AdjustmentKind::Invert));
+        m.layers[0].adjustment = Some(crate::adjustment::LayerAdjustment::new(
+            AdjustmentKind::Invert,
+        ));
         assert_eq!(validate(&m), Err(ProjectError::Invalid));
         // Blur and noise adjustments need version 9.
         for kind in [
@@ -1125,7 +1153,10 @@ mod tests {
                 .iter()
                 .map(|l| l.name.clone())
                 .collect::<Vec<_>>(),
-            doc.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>()
+            doc.layers
+                .iter()
+                .map(|l| l.name.clone())
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             reopened
@@ -1152,7 +1183,12 @@ mod tests {
         assert_eq!(image.pixel(63, 0)[3], 0);
         // The package layout is manifest.json + images/.
         assert!(moved.join("manifest.json").is_file());
-        assert!(moved.join("images").join(image_file_name(image_id)).is_file());
+        assert!(
+            moved
+                .join("images")
+                .join(image_file_name(image_id))
+                .is_file()
+        );
     }
 
     #[test]
@@ -1197,9 +1233,7 @@ mod tests {
         let loaded = load(&destination).unwrap();
         assert!(loaded.images.is_empty());
         assert_eq!(loaded.manifest.layers.len(), 1);
-        let images: Vec<_> = fs::read_dir(destination.join("images"))
-            .unwrap()
-            .collect();
+        let images: Vec<_> = fs::read_dir(destination.join("images")).unwrap().collect();
         assert!(images.is_empty(), "{images:?}");
     }
 
@@ -1293,7 +1327,11 @@ mod tests {
             for (index, entry) in table.iter_mut().enumerate() {
                 let mut c = index as u32;
                 for _ in 0..8 {
-                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                    c = if c & 1 != 0 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
                 }
                 *entry = c;
             }
@@ -1305,17 +1343,17 @@ mod tests {
         }
         let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
         for (kind, body) in [
+            (&b"IHDR"[..], {
+                let mut body = Vec::new();
+                body.extend_from_slice(&width.to_be_bytes());
+                body.extend_from_slice(&height.to_be_bytes());
+                body.extend_from_slice(&[8, 6, 0, 0, 0]);
+                body
+            }),
             (
-                &b"IHDR"[..],
-                {
-                    let mut body = Vec::new();
-                    body.extend_from_slice(&width.to_be_bytes());
-                    body.extend_from_slice(&height.to_be_bytes());
-                    body.extend_from_slice(&[8, 6, 0, 0, 0]);
-                    body
-                },
+                &b"IDAT"[..],
+                vec![0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
             ),
-            (&b"IDAT"[..], vec![0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]),
             (&b"IEND"[..], Vec::new()),
         ] {
             let mut chunk = kind.to_vec();
@@ -1351,8 +1389,11 @@ mod tests {
                 m.width = 100;
                 m.height = 100;
                 m.layers = layers.to_vec();
-                fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&m).unwrap())
-                    .unwrap();
+                fs::write(
+                    dir.join("manifest.json"),
+                    serde_json::to_vec_pretty(&m).unwrap(),
+                )
+                .unwrap();
                 for (name, bytes) in assets {
                     fs::write(dir.join("images").join(name), bytes).unwrap();
                 }
@@ -1365,10 +1406,7 @@ mod tests {
         write_manifest_and_assets(
             &huge,
             &[record],
-            &[(
-                &image_file_name(u1),
-                png_header_only(30_000, 3_334),
-            )],
+            &[(&image_file_name(u1), png_header_only(30_000, 3_334))],
         );
         assert_eq!(load(&huge), Err(ProjectError::TooLarge));
         // A manifest over 4 MiB is rejected on save (names may be 16 KiB).

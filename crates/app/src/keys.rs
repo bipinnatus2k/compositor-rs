@@ -5,70 +5,178 @@
 use gpui_kit::KeyBinding;
 use gpui_kit::actions;
 
-actions!(compositor, [
-    // Tools
-    ToolMove, ToolMarquee, ToolLasso, ToolWand, ToolCrop, ToolBrush, ToolEraser,
-    ToolHealing, ToolClone, ToolSmear, ToolGradient, ToolShape, ToolType,
-    ToolEyedropper, ToolHand, ToolZoom,
-    // Palette and tool modes
-    SwapColors, DefaultColors, CycleToolMode, CycleShapeKind,
-    BrushSofter, BrushHarder, BlendModeNext, BlendModePrevious,
-    // File
-    NewCanvas, OpenDocument, SaveDocument, SaveAs, ExportPng, ExportJpeg, ImportImages,
-    CloseDocument, Quit,
-    // Edit
-    Undo, Redo, FillForeground, FillBackground, FreeTransform, ShowShortcuts,
-    Cut, CopyPixels, CopyMerged, PastePixels,
-    ShowTransformControls, ContentAwareFill,
-    CurvesSheet, InvertPixels, ToggleClippingMask,
-    MoveLayerUp, MoveLayerDown, ToggleLevelsPreview,
-    // Image
-    ImageSize, CanvasSize, TrimSheet, CropToSelection,
-    FlipCanvasHorizontal, FlipCanvasVertical,
-    LevelsSheet, HueSaturationSheet,
-    // Layer
-    NewLayer, DuplicateLayer, DeleteLayer, MergeDown, NewGroup, AddMask,
-    FlipLayerHorizontal, FlipLayerVertical,
-    GroupSelectedLayers, MoveOutOfFolder, RenameLayer, ToggleLayerVisibility,
-    EditAdjustment,
-    // Select / Edit extras
-    ClearSelectionPixels,
-    LoadLayerSelection, LoadMaskSelection,
-    // Image adjustments that run through the filter sheet
-    FilterBlackWhite, FilterColorBalance, FilterExposure, FilterGradientMap, FilterGrain,
-    ClearGuides,
-    // New Adjustment Layer submenu (AdjustmentKind)
-    AddAdjustmentHsv, AddAdjustmentLevels, AddAdjustmentCurves, AddAdjustmentExposure,
-    AddAdjustmentGradientMap, AddAdjustmentGrain, AddAdjustmentAddNoise, AddAdjustmentGaussianBlur,
-    AddAdjustmentMotionBlur, AddAdjustmentInvert, AddAdjustmentBlackWhite, AddAdjustmentColorBalance,
-    // Select
-    SelectAllAction, DeselectAction, InvertSelection,
-    FeatherSheet, ExpandSheet, ContractSheet,
-    // Filter
-    FilterGaussianBlur, FilterMotionBlur, FilterAddNoise, FilterLensCorrection,
-    FilterCameraRaw,
-    // View
-    ToggleRulers, ToggleGrid, ToggleGuides, TogglePixelGrid,
-    SnapToggle, SnapGuides, SnapGrid, SnapLayers, SnapBounds, LockGuides,
-    ZoomIn, ZoomOut, ZoomFit, Zoom100,
-    // Window / Help
-    ResetPanels, About,
-    // Canvas keys
-    NudgeLeft, NudgeRight, NudgeUp, NudgeDown,
-    NudgeLeftMore, NudgeRightMore, NudgeUpMore, NudgeDownMore,
-    NudgePixelsLeft, NudgePixelsRight, NudgePixelsUp, NudgePixelsDown,
-    NudgePixelsLeftMore, NudgePixelsRightMore, NudgePixelsUpMore, NudgePixelsDownMore,
-    BrushSmaller, BrushLarger, FinishLasso, CancelAction,
-    // Inline text editor spacing (CanvasTextView.keyDown's Option-arrows).
-    // Their bindings carry no context, so they outrank the input's own
-    // alt-arrow bindings (word move / extra cursors) whenever the inline
-    // editor's overlay div sits on the dispatch path; elsewhere nothing
-    // handles them and the next binding (the input's) still applies.
-    InlineTextTrackingTighten, InlineTextTrackingLoosen,
-    InlineTextTrackingTightenMore, InlineTextTrackingLoosenMore,
-    InlineTextLeadingTighten, InlineTextLeadingLoosen,
-    InlineTextLeadingTightenMore, InlineTextLeadingLoosenMore,
-]);
+actions!(
+    compositor,
+    [
+        // Tools
+        ToolMove,
+        ToolMarquee,
+        ToolLasso,
+        ToolWand,
+        ToolCrop,
+        ToolBrush,
+        ToolEraser,
+        ToolHealing,
+        ToolClone,
+        ToolSmear,
+        ToolGradient,
+        ToolShape,
+        ToolType,
+        ToolEyedropper,
+        ToolHand,
+        ToolZoom,
+        // Palette and tool modes
+        SwapColors,
+        DefaultColors,
+        CycleToolMode,
+        CycleShapeKind,
+        BrushSofter,
+        BrushHarder,
+        BlendModeNext,
+        BlendModePrevious,
+        // File
+        NewCanvas,
+        OpenDocument,
+        SaveDocument,
+        SaveAs,
+        ExportPng,
+        ExportJpeg,
+        ImportImages,
+        CloseDocument,
+        Quit,
+        // Edit
+        Undo,
+        Redo,
+        FillForeground,
+        FillBackground,
+        FreeTransform,
+        ShowShortcuts,
+        Cut,
+        CopyPixels,
+        CopyMerged,
+        PastePixels,
+        ShowTransformControls,
+        ContentAwareFill,
+        CurvesSheet,
+        InvertPixels,
+        ToggleClippingMask,
+        MoveLayerUp,
+        MoveLayerDown,
+        ToggleLevelsPreview,
+        // Image
+        ImageSize,
+        CanvasSize,
+        TrimSheet,
+        CropToSelection,
+        FlipCanvasHorizontal,
+        FlipCanvasVertical,
+        LevelsSheet,
+        HueSaturationSheet,
+        // Layer
+        NewLayer,
+        DuplicateLayer,
+        DeleteLayer,
+        MergeDown,
+        NewGroup,
+        AddMask,
+        FlipLayerHorizontal,
+        FlipLayerVertical,
+        GroupSelectedLayers,
+        MoveOutOfFolder,
+        RenameLayer,
+        ToggleLayerVisibility,
+        EditAdjustment,
+        // Select / Edit extras
+        ClearSelectionPixels,
+        LoadLayerSelection,
+        LoadMaskSelection,
+        // Image adjustments that run through the filter sheet
+        FilterBlackWhite,
+        FilterColorBalance,
+        FilterExposure,
+        FilterGradientMap,
+        FilterGrain,
+        ClearGuides,
+        // New Adjustment Layer submenu (AdjustmentKind)
+        AddAdjustmentHsv,
+        AddAdjustmentLevels,
+        AddAdjustmentCurves,
+        AddAdjustmentExposure,
+        AddAdjustmentGradientMap,
+        AddAdjustmentGrain,
+        AddAdjustmentAddNoise,
+        AddAdjustmentGaussianBlur,
+        AddAdjustmentMotionBlur,
+        AddAdjustmentInvert,
+        AddAdjustmentBlackWhite,
+        AddAdjustmentColorBalance,
+        // Select
+        SelectAllAction,
+        DeselectAction,
+        InvertSelection,
+        FeatherSheet,
+        ExpandSheet,
+        ContractSheet,
+        // Filter
+        FilterGaussianBlur,
+        FilterMotionBlur,
+        FilterAddNoise,
+        FilterLensCorrection,
+        FilterCameraRaw,
+        // View
+        ToggleRulers,
+        ToggleGrid,
+        ToggleGuides,
+        TogglePixelGrid,
+        SnapToggle,
+        SnapGuides,
+        SnapGrid,
+        SnapLayers,
+        SnapBounds,
+        LockGuides,
+        ZoomIn,
+        ZoomOut,
+        ZoomFit,
+        Zoom100,
+        // Window / Help
+        ResetPanels,
+        About,
+        // Canvas keys
+        NudgeLeft,
+        NudgeRight,
+        NudgeUp,
+        NudgeDown,
+        NudgeLeftMore,
+        NudgeRightMore,
+        NudgeUpMore,
+        NudgeDownMore,
+        NudgePixelsLeft,
+        NudgePixelsRight,
+        NudgePixelsUp,
+        NudgePixelsDown,
+        NudgePixelsLeftMore,
+        NudgePixelsRightMore,
+        NudgePixelsUpMore,
+        NudgePixelsDownMore,
+        BrushSmaller,
+        BrushLarger,
+        FinishLasso,
+        CancelAction,
+        // Inline text editor spacing (CanvasTextView.keyDown's Option-arrows).
+        // Their bindings carry no context, so they outrank the input's own
+        // alt-arrow bindings (word move / extra cursors) whenever the inline
+        // editor's overlay div sits on the dispatch path; elsewhere nothing
+        // handles them and the next binding (the input's) still applies.
+        InlineTextTrackingTighten,
+        InlineTextTrackingLoosen,
+        InlineTextTrackingTightenMore,
+        InlineTextTrackingLoosenMore,
+        InlineTextLeadingTighten,
+        InlineTextLeadingLoosen,
+        InlineTextLeadingTightenMore,
+        InlineTextLeadingLoosenMore,
+    ]
+);
 
 /// Every key binding, bound globally so menus show hints and canvas keys work
 /// as soon as the workspace has focus. Handlers ignore most actions while a
@@ -130,10 +238,7 @@ pub fn rebuild_bindings(cx: &mut gpui_kit::App) {
 
 /// [`rebuild_bindings`] against an explicit registry (tests and callers that
 /// already hold the lock).
-pub(crate) fn rebuild_with(
-    cx: &mut gpui_kit::App,
-    registry: &crate::shortcuts::ShortcutRegistry,
-) {
+pub(crate) fn rebuild_with(cx: &mut gpui_kit::App, registry: &crate::shortcuts::ShortcutRegistry) {
     // Snapshot before clearing: the keymap also holds gpui-kit's component
     // bindings, which nothing re-installs automatically.
     let (baseline, _) = split_bindings(
@@ -164,7 +269,11 @@ pub(crate) fn bindings_tracked(
                 record.push($id);
             }
             for keystroke in $registry.keystrokes_for($id) {
-                $out.push(KeyBinding::new(&keystroke, $action, $registry.context_for($id)));
+                $out.push(KeyBinding::new(
+                    &keystroke,
+                    $action,
+                    $registry.context_for($id),
+                ));
             }
         }};
     }
@@ -212,9 +321,21 @@ pub(crate) fn bindings_tracked(
     // Photoshop's fill shortcuts: Option-Delete, Cmd-Delete, Shift-Delete
     bind!(out, ids, registry, "edit.fill-foreground", FillForeground);
     bind!(out, ids, registry, "edit.fill-background", FillBackground);
-    bind!(out, ids, registry, "edit.content-aware-fill", ContentAwareFill);
+    bind!(
+        out,
+        ids,
+        registry,
+        "edit.content-aware-fill",
+        ContentAwareFill
+    );
     // Transform controls toggle (Cmd-H) and Invert pixels (Cmd-I)
-    bind!(out, ids, registry, "view.transform-controls", ShowTransformControls);
+    bind!(
+        out,
+        ids,
+        registry,
+        "view.transform-controls",
+        ShowTransformControls
+    );
     bind!(out, ids, registry, "image.invert", InvertPixels);
     // Curves (Cmd-M) and clipping mask toggle (Cmd-Alt-G)
     bind!(out, ids, registry, "image.curves", CurvesSheet);
@@ -229,7 +350,13 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "view.lock-guides", LockGuides);
     // Image adjustments
     bind!(out, ids, registry, "image.levels", LevelsSheet);
-    bind!(out, ids, registry, "image.hue-saturation", HueSaturationSheet);
+    bind!(
+        out,
+        ids,
+        registry,
+        "image.hue-saturation",
+        HueSaturationSheet
+    );
     // Image
     bind!(out, ids, registry, "image.image-size", ImageSize);
     bind!(out, ids, registry, "image.canvas-size", CanvasSize);
@@ -269,10 +396,28 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "nudge.pixels-right", NudgePixelsRight);
     bind!(out, ids, registry, "nudge.pixels-up", NudgePixelsUp);
     bind!(out, ids, registry, "nudge.pixels-down", NudgePixelsDown);
-    bind!(out, ids, registry, "nudge.pixels-left-10", NudgePixelsLeftMore);
-    bind!(out, ids, registry, "nudge.pixels-right-10", NudgePixelsRightMore);
+    bind!(
+        out,
+        ids,
+        registry,
+        "nudge.pixels-left-10",
+        NudgePixelsLeftMore
+    );
+    bind!(
+        out,
+        ids,
+        registry,
+        "nudge.pixels-right-10",
+        NudgePixelsRightMore
+    );
     bind!(out, ids, registry, "nudge.pixels-up-10", NudgePixelsUpMore);
-    bind!(out, ids, registry, "nudge.pixels-down-10", NudgePixelsDownMore);
+    bind!(
+        out,
+        ids,
+        registry,
+        "nudge.pixels-down-10",
+        NudgePixelsDownMore
+    );
     // Brush size / hardness
     bind!(out, ids, registry, "brush.smaller", BrushSmaller);
     bind!(out, ids, registry, "brush.larger", BrushLarger);
@@ -283,7 +428,13 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "blend.next", BlendModeNext);
     bind!(out, ids, registry, "shape.cycle", CycleShapeKind);
     // Levels preview toggle (Alt-P)
-    bind!(out, ids, registry, "view.levels-preview", ToggleLevelsPreview);
+    bind!(
+        out,
+        ids,
+        registry,
+        "view.levels-preview",
+        ToggleLevelsPreview
+    );
     // Finish a polygonal lasso / cancel the active canvas edit or sheet.
     bind!(out, ids, registry, "canvas.apply", FinishLasso);
     bind!(out, ids, registry, "canvas.cancel", CancelAction);
@@ -349,7 +500,10 @@ mod tests {
                 !b.action()
                     .name()
                     .starts_with("compositor::InlineTextTracking")
-                    && !b.action().name().starts_with("compositor::InlineTextLeading")
+                    && !b
+                        .action()
+                        .name()
+                        .starts_with("compositor::InlineTextLeading")
             })
             .map(|b| {
                 b.keystrokes()
@@ -453,8 +607,10 @@ mod tests {
         }
         // Every regenerated binding is app-owned; every kept one is not.
         assert!(regenerated.iter().all(|b| is_app_action(b.action().name())));
-        assert!(kept_baseline
-            .iter()
-            .all(|b| !is_app_action(b.action().name())));
+        assert!(
+            kept_baseline
+                .iter()
+                .all(|b| !is_app_action(b.action().name()))
+        );
     }
 }

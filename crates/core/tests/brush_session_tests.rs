@@ -142,7 +142,10 @@ fn soft_mask_painting_hides_and_repaints() {
         let alpha = result.pixel(x, 40)[3];
         // The committed mask is resampled (smooth) as it multiplies the layer,
         // a little softer than the raw grid bytes on the feather's slope.
-        assert!((alpha as i32 - expected as i32).abs() <= 10, "x={x}: {alpha} vs {expected}");
+        assert!(
+            (alpha as i32 - expected as i32).abs() <= 10,
+            "x={x}: {alpha} vs {expected}"
+        );
     }
     assert!(result.pixel(40, 40)[3] < 25, "the center hides");
     // Painting white with a hard tip reveals again.
@@ -188,7 +191,11 @@ fn brush_stays_circular_on_nonuniform_rotated_flipped_layer() {
     edit.flush();
     let result = render_edit(&edit, 100, 100);
     for (x, y) in [(50usize, 50usize), (54, 50), (50, 54)] {
-        assert!(result.pixel(x, y)[1] > 240, "({x},{y}): {:?}", result.pixel(x, y));
+        assert!(
+            result.pixel(x, y)[1] > 240,
+            "({x},{y}): {:?}",
+            result.pixel(x, y)
+        );
     }
     for (x, y) in [(61usize, 50usize), (50, 61)] {
         assert_eq!(result.pixel(x, y)[3], 0, "({x},{y}) stays clear");
@@ -243,10 +250,18 @@ fn painted_bounds_trim_and_keep_soft_edges() {
         // Every border row and column keeps a touched pixel.
         let mut edges = Vec::new();
         for y in [0, image.height - 1] {
-            edges.push((0..image.width).map(|x| image.pixel(x, y)[3]).collect::<Vec<_>>());
+            edges.push(
+                (0..image.width)
+                    .map(|x| image.pixel(x, y)[3])
+                    .collect::<Vec<_>>(),
+            );
         }
         for x in [0, image.width - 1] {
-            edges.push((0..image.height).map(|y| image.pixel(x, y)[3]).collect::<Vec<_>>());
+            edges.push(
+                (0..image.height)
+                    .map(|y| image.pixel(x, y)[3])
+                    .collect::<Vec<_>>(),
+            );
         }
         for edge in &edges {
             assert!(edge.iter().any(|a| *a > 0), "hardness {hardness}: {edge:?}");
@@ -260,7 +275,11 @@ fn painted_bounds_trim_and_keep_soft_edges() {
         document.layers.push(layer);
         let result = draw_live_composite(&document);
         for x in 288..=312 {
-            assert_eq!(result.pixel(x, 100)[3], live.pixel(x, 100)[3], "hardness {hardness} x={x}");
+            assert_eq!(
+                result.pixel(x, 100)[3],
+                live.pixel(x, 100)[3],
+                "hardness {hardness} x={x}"
+            );
         }
     }
 }
@@ -329,7 +348,10 @@ fn spaced_dabs_leave_no_visible_ripple_along_the_stroke() {
                 .map(|x| image.pixel(x, 150 + offset)[3])
                 .collect::<Vec<_>>();
             let ripple = run.iter().max().unwrap() - run.iter().min().unwrap();
-            assert!(ripple <= 16, "hardness {hardness} offset {offset} rippled by {ripple}");
+            assert!(
+                ripple <= 16,
+                "hardness {hardness} offset {offset} rippled by {ripple}"
+            );
         }
     }
 }
@@ -408,8 +430,13 @@ fn opacity_applies_to_mask_painting() {
     edit.flush();
     let (asset, _, _) = edit.paint_snapshot();
     let layer = session.active_layer().unwrap().clone();
-    session.document.as_mut().unwrap().layer_mut(id).unwrap().mask =
-        Some(layer.mask.unwrap().replacing(asset));
+    session
+        .document
+        .as_mut()
+        .unwrap()
+        .layer_mut(id)
+        .unwrap()
+        .mask = Some(layer.mask.unwrap().replacing(asset));
     let result = draw_live_composite(session.document.as_ref().unwrap());
     let center = result.pixel(40, 40)[3];
     assert!((center as i32 - 128).abs() <= 1, "{center}");
@@ -471,7 +498,10 @@ fn folders_reject_painting() {
     let mut session = EditorSession::new();
     session.create_document(600, 80, false);
     session.add_group();
-    assert!(!session.can_edit_pixels(), "a folder has no pixels to paint");
+    assert!(
+        !session.can_edit_pixels(),
+        "a folder has no pixels to paint"
+    );
 }
 
 fn red(width: usize, height: usize) -> ImportedImage {

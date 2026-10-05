@@ -29,7 +29,10 @@ fn raster_has_transparent_background_and_colored_glyphs() {
             clear += 1;
         } else {
             ink += 1;
-            assert!(px[0] > 0 && px[1] == 0 && px[2] == 0, "ink is pure red: {px:?}");
+            assert!(
+                px[0] > 0 && px[1] == 0 && px[2] == 0,
+                "ink is pure red: {px:?}"
+            );
         }
     }
     assert!(ink > 100, "glyph pixels exist: {ink}");
@@ -50,8 +53,16 @@ fn clipping_to_text_exports_colored_glyphs_on_transparency() {
     };
     let text = text_image(&style).expect("text renders");
     let size = text_box_size(&style);
-    assert_eq!(size.width.ceil() as usize, text.width, "raster uses the box size");
-    assert_eq!(size.height.ceil() as usize, text.height, "raster uses the box size");
+    assert_eq!(
+        size.width.ceil() as usize,
+        text.width,
+        "raster uses the box size"
+    );
+    assert_eq!(
+        size.height.ceil() as usize,
+        text.height,
+        "raster uses the box size"
+    );
 
     // The fill: a red rectangle covering the text layer's whole box, clipped
     // to the text layer (`addPixelLayer` + `linkMask(source:target:)`).
@@ -86,7 +97,10 @@ fn clipping_to_text_exports_colored_glyphs_on_transparency() {
         }
     }
     assert!(ink > 100, "glyph pixels exist: {ink}");
-    assert!(clear > 100, "canvas stays transparent off the glyphs: {clear}");
+    assert!(
+        clear > 100,
+        "canvas stays transparent off the glyphs: {clear}"
+    );
 }
 
 /// Swift `invalidAndStaleDraftsDoNotChangeDocument`, reduced to its pure

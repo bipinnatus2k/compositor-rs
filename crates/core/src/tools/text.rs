@@ -23,9 +23,21 @@ const FONT_DIRECTORIES: &[&str] = &[
 
 /// Well-known stand-ins for fonts the host may not ship (Helvetica first).
 const FONT_SUBSTITUTES: &[(&str, &[&str])] = &[
-    ("helvetica", &["arial.ttf", "Helvetica.ttc", "segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"]),
+    (
+        "helvetica",
+        &[
+            "arial.ttf",
+            "Helvetica.ttc",
+            "segoeui.ttf",
+            "DejaVuSans.ttf",
+            "LiberationSans-Regular.ttf",
+        ],
+    ),
     ("arial", &["arial.ttf", "Helvetica.ttc", "DejaVuSans.ttf"]),
-    ("times new roman", &["times.ttf", "Times New Roman.ttf", "DejaVuSerif.ttf"]),
+    (
+        "times new roman",
+        &["times.ttf", "Times New Roman.ttf", "DejaVuSerif.ttf"],
+    ),
     ("courier new", &["cour.ttf", "DejaVuSansMono.ttf"]),
 ];
 
@@ -67,7 +79,10 @@ fn find_font_file(name: &str) -> Option<std::path::PathBuf> {
             .map(|entry| entry.path())
             .filter(|path| {
                 matches!(
-                    path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+                    path.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_lowercase())
+                        .as_deref(),
                     Some("ttf") | Some("otf") | Some("ttc")
                 )
             })
@@ -158,16 +173,23 @@ fn layout_lines(style: &LayerTextStyle, container_width: f64) -> Vec<LayoutLine>
     let mut lines = Vec::new();
     for paragraph in style.content.split('\n') {
         if !wraps {
-            lines.push(LayoutLine { text: paragraph.to_string(), width: advance_of(paragraph) });
+            lines.push(LayoutLine {
+                text: paragraph.to_string(),
+                width: advance_of(paragraph),
+            });
             continue;
         }
         // By-word wrapping: a line breaks at the last space that fits.
         let mut current = String::new();
         let mut current_width = 0.0;
         for word in paragraph.split_inclusive(' ') {
-            let word_width = advance_of(word.trim_end_matches(' ')) + advance_of(" ") * word.matches(' ').count() as f64;
+            let word_width = advance_of(word.trim_end_matches(' '))
+                + advance_of(" ") * word.matches(' ').count() as f64;
             if !current.is_empty() && current_width + word_width > container_width {
-                lines.push(LayoutLine { width: current_width, text: current.trim_end().to_string() });
+                lines.push(LayoutLine {
+                    width: current_width,
+                    text: current.trim_end().to_string(),
+                });
                 current = word.trim_start().to_string();
                 current_width = advance_of(current.trim_start().to_string().as_str());
             } else {
@@ -175,10 +197,16 @@ fn layout_lines(style: &LayerTextStyle, container_width: f64) -> Vec<LayoutLine>
                 current_width += word_width;
             }
         }
-        lines.push(LayoutLine { width: current_width, text: current.trim_end().to_string() });
+        lines.push(LayoutLine {
+            width: current_width,
+            text: current.trim_end().to_string(),
+        });
     }
     if lines.is_empty() {
-        lines.push(LayoutLine { text: String::new(), width: 0.0 });
+        lines.push(LayoutLine {
+            text: String::new(),
+            width: 0.0,
+        });
     }
     lines
 }
@@ -194,7 +222,9 @@ pub fn text_box_size(style: &LayerTextStyle) -> CGSize {
     let measured_height = lines.len() as f64 * style.line_height();
     let line = style.line_height().ceil();
     CGSize::new(
-        (measured_width + PADDING * 2.0 + style.font_size * 0.1).ceil().max(16.0),
+        (measured_width + PADDING * 2.0 + style.font_size * 0.1)
+            .ceil()
+            .max(16.0),
         (measured_height.max(line) + PADDING * 2.0).ceil().max(16.0),
     )
 }
@@ -328,8 +358,14 @@ mod tests {
         let small_box = text_box_size(&small);
         let big_box = text_box_size(&big);
         assert!(small_box.width > 16.0 + 24.0, "{small_box:?}");
-        assert!(big_box.width > small_box.width, "{small_box:?} vs {big_box:?}");
-        assert!(big_box.height > small_box.height, "taller type measures taller");
+        assert!(
+            big_box.width > small_box.width,
+            "{small_box:?} vs {big_box:?}"
+        );
+        assert!(
+            big_box.height > small_box.height,
+            "taller type measures taller"
+        );
         // Padding surrounds the text on both sides.
         assert!(small_box.height >= small.line_height() + PADDING * 2.0 - 2.0);
     }

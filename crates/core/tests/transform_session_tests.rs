@@ -21,7 +21,7 @@ use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render::draw_live_composite;
 use compositor_core::session::EditorSession;
-use compositor_core::transform::{DragMode, LayerSampling, LayerTransform, TransformDrag, HANDLES};
+use compositor_core::transform::{DragMode, HANDLES, LayerSampling, LayerTransform, TransformDrag};
 
 /// A document whose single layer is a painted canvas-sized image
 /// (Swift `insertPaintedLayer`).
@@ -82,13 +82,19 @@ fn duplicate_transform_with_multi_select_copies_every_root() {
     for chunk in second.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[0, 255, 0, 255]);
     }
-    session.insert_image(ImportedImage::with_thumbnail(second.clone(), second, "Second"), None);
+    session.insert_image(
+        ImportedImage::with_thumbnail(second.clone(), second, "Second"),
+        None,
+    );
     let second_id = session.active_layer_id.unwrap();
     session.select_layers(&[first_id, second_id], Some(first_id));
     let count = session.history.undo_count();
     session.begin_duplicate_transform();
     // The copies are selected and transform as a group.
-    let edit = session.transform_edit.as_ref().expect("group transform opens");
+    let edit = session
+        .transform_edit
+        .as_ref()
+        .expect("group transform opens");
     assert!(edit.group.is_some());
     let mut draft = edit.draft;
     draft.origin.x += 20.0;
@@ -214,7 +220,10 @@ fn rotated_transform_contains_its_own_points() {
     assert!(transform.contains(CGPoint::new(150.0, 265.0)));
     assert!(!transform.contains(CGPoint::new(190.0, 225.0)));
     // The corner handles sit on the rotated corners.
-    assert_eq!(transform.point(HANDLES[4]), transform.point(CGPoint::new(1.0, 1.0)));
+    assert_eq!(
+        transform.point(HANDLES[4]),
+        transform.point(CGPoint::new(1.0, 1.0))
+    );
 }
 
 /// Swift `previewCommitCancelAndUndoPreserveSources`.
@@ -232,7 +241,10 @@ fn preview_commit_cancel_and_undo_preserve_sources() {
     for _ in 0..30 {
         session.preview_transform(value);
     }
-    assert_eq!(session.active_layer().unwrap().transform, original.transform);
+    assert_eq!(
+        session.active_layer().unwrap().transform,
+        original.transform
+    );
     assert_eq!(session.history.undo_count(), count);
     session.cancel_transform();
     assert_eq!(session.active_layer().unwrap().clone(), original);
@@ -271,7 +283,10 @@ fn scale_percent_sets_both_sides_about_the_center() {
     stretched.rotation = 30.0;
     assert_eq!(stretched.scale_percent(pixels), 200.0);
     let scaled = stretched.scaled(50.0, pixels);
-    assert_eq!(scaled.size, CGSize::new(pixels.width / 2.0, pixels.height / 2.0));
+    assert_eq!(
+        scaled.size,
+        CGSize::new(pixels.width / 2.0, pixels.height / 2.0)
+    );
     assert!((scaled.center().x - stretched.center().x).abs() < 0.001);
     assert!((scaled.center().y - stretched.center().y).abs() < 0.001);
     assert_eq!(scaled.rotation, 30.0);
@@ -291,15 +306,25 @@ fn no_op_invalid_values_and_switching_tools() {
     let count = session.history.undo_count();
     session.begin_transform();
     session.commit_transform();
-    assert_eq!(session.history.undo_count(), count, "an untouched edit is no-op");
+    assert_eq!(
+        session.history.undo_count(),
+        count,
+        "an untouched edit is no-op"
+    );
     session.begin_transform();
     let mut invalid = session.transform_edit.as_ref().unwrap().draft;
     invalid.size.width = 0.0;
     session.preview_transform(invalid);
-    assert_eq!(session.transform_edit.as_ref().unwrap().draft.size.width, 200.0);
+    assert_eq!(
+        session.transform_edit.as_ref().unwrap().draft.size.width,
+        200.0
+    );
     invalid.size.width = f64::INFINITY;
     session.preview_transform(invalid);
-    assert_eq!(session.transform_edit.as_ref().unwrap().draft.size.width, 200.0);
+    assert_eq!(
+        session.transform_edit.as_ref().unwrap().draft.size.width,
+        200.0
+    );
     let mut moved = session.transform_edit.as_ref().unwrap().draft;
     moved.origin.x = 10.0;
     session.preview_transform(moved);
@@ -318,7 +343,15 @@ fn rendering_rotates_scales_and_flips_without_replacing_pixels() {
     let mut image = Bitmap::new(8, 8);
     for y in 0..8 {
         for x in 0..8 {
-            image.set_pixel(x, y, if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+            image.set_pixel(
+                x,
+                y,
+                if x < 4 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                },
+            );
         }
     }
     let mut session = EditorSession::new();
@@ -343,13 +376,25 @@ fn rendering_rotates_scales_and_flips_without_replacing_pixels() {
         draw_live_composite(&solo)
     };
     let preview = render_preview(&session, value);
-    assert!(preview.pixel(16, 12)[0] > 242, "{:?}", preview.pixel(16, 12));
-    assert!(preview.pixel(16, 20)[2] > 242, "{:?}", preview.pixel(16, 20));
+    assert!(
+        preview.pixel(16, 12)[0] > 242,
+        "{:?}",
+        preview.pixel(16, 12)
+    );
+    assert!(
+        preview.pixel(16, 20)[2] > 242,
+        "{:?}",
+        preview.pixel(16, 20)
+    );
 
     value.flip_x = true;
     session.preview_transform(value);
     let preview = render_preview(&session, value);
-    assert!(preview.pixel(16, 12)[2] > 242, "{:?}", preview.pixel(16, 12));
+    assert!(
+        preview.pixel(16, 12)[2] > 242,
+        "{:?}",
+        preview.pixel(16, 12)
+    );
 
     session.commit_transform();
     let active = session.active_layer().unwrap();
@@ -359,7 +404,10 @@ fn rendering_rotates_scales_and_flips_without_replacing_pixels() {
         "the pixels are not replaced"
     );
     session.undo();
-    assert_eq!(session.active_layer().unwrap().size(), CGSize::new(8.0, 8.0));
+    assert_eq!(
+        session.active_layer().unwrap().size(),
+        CGSize::new(8.0, 8.0)
+    );
 }
 
 /// Swift's multi-select group transform (`transformsAsGroup`,
@@ -393,8 +441,14 @@ fn multi_select_transform_moves_members_together_in_one_undo_step() {
     let count = session.history.undo_count();
 
     session.begin_transform();
-    let edit = session.transform_edit.as_ref().expect("group transform opens");
-    let group = edit.group.as_ref().expect("multi-select transforms as a group");
+    let edit = session
+        .transform_edit
+        .as_ref()
+        .expect("group transform opens");
+    let group = edit
+        .group
+        .as_ref()
+        .expect("multi-select transforms as a group");
     assert_eq!(group.originals.len(), 2);
     assert_eq!(edit.draft, session.group_transform_box().unwrap());
     // The box spans both layers (second sits at 120,40 and first at 0,0).
@@ -444,7 +498,10 @@ fn cancel_group_transform_leaves_members_untouched() {
     for chunk in second.data.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[0, 255, 0, 255]);
     }
-    session.insert_image(ImportedImage::with_thumbnail(second.clone(), second, "Second"), None);
+    session.insert_image(
+        ImportedImage::with_thumbnail(second.clone(), second, "Second"),
+        None,
+    );
     let second_id = session.active_layer_id.unwrap();
     session.select_layers(&[first_id, second_id], Some(first_id));
     let before: Vec<_> = session

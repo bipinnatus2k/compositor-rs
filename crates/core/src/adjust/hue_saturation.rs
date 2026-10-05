@@ -110,11 +110,7 @@ impl HueBand {
     /// Degrees from `from` forward to `to`, always 0…360.
     pub fn forward(from: f64, to: f64) -> f64 {
         let delta = (to - from) % 360.0;
-        if delta < 0.0 {
-            delta + 360.0
-        } else {
-            delta
-        }
+        if delta < 0.0 { delta + 360.0 } else { delta }
     }
 
     /// How strongly this band claims a hue: 1 inside the range, ramping
@@ -131,7 +127,11 @@ impl HueBand {
         let ramp_in = Self::forward(self.falloff_start, self.range_start);
         let plateau_end = Self::forward(self.falloff_start, self.range_end);
         if position < ramp_in {
-            return if ramp_in > 0.0 { position / ramp_in } else { 1.0 };
+            return if ramp_in > 0.0 {
+                position / ramp_in
+            } else {
+                1.0
+            };
         }
         if position <= plateau_end {
             return 1.0;
@@ -145,7 +145,12 @@ impl HueBand {
     }
 
     pub fn handles(&self) -> [f64; 4] {
-        [self.falloff_start, self.range_start, self.range_end, self.falloff_end]
+        [
+            self.falloff_start,
+            self.range_start,
+            self.range_end,
+            self.falloff_end,
+        ]
     }
 
     /// A band centered on one hue, keeping this band's core and shoulder widths.
@@ -155,11 +160,7 @@ impl HueBand {
         let trailing = Self::forward(self.range_end, self.falloff_end);
         fn wrap(value: f64) -> f64 {
             let r = value % 360.0;
-            if r < 0.0 {
-                r + 360.0
-            } else {
-                r
-            }
+            if r < 0.0 { r + 360.0 } else { r }
         }
         let start = wrap(hue - core / 2.0);
         HueBand::new(
@@ -212,11 +213,7 @@ impl HueBand {
     fn normalize(&mut self) {
         fn wrap(value: f64) -> f64 {
             let r = value % 360.0;
-            if r < 0.0 {
-                r + 360.0
-            } else {
-                r
-            }
+            if r < 0.0 { r + 360.0 } else { r }
         }
         self.falloff_start = wrap(self.falloff_start);
         self.range_start = wrap(self.range_start);
@@ -286,7 +283,10 @@ pub struct HueSaturationSettings {
 }
 
 fn default_bands() -> HashMap<ColorRange, HueBand> {
-    ColorRange::ALL.iter().map(|c| (*c, c.default_band())).collect()
+    ColorRange::ALL
+        .iter()
+        .map(|c| (*c, c.default_band()))
+        .collect()
 }
 
 impl Default for HueSaturationSettings {
@@ -326,7 +326,10 @@ impl HueSaturationSettings {
     }
 
     pub fn hue(&self) -> f64 {
-        self.adjustments.get(&self.range).map(|a| a.hue).unwrap_or(0.0)
+        self.adjustments
+            .get(&self.range)
+            .map(|a| a.hue)
+            .unwrap_or(0.0)
     }
 
     pub fn set_hue(&mut self, value: f64) {
@@ -334,7 +337,10 @@ impl HueSaturationSettings {
     }
 
     pub fn saturation(&self) -> f64 {
-        self.adjustments.get(&self.range).map(|a| a.saturation).unwrap_or(0.0)
+        self.adjustments
+            .get(&self.range)
+            .map(|a| a.saturation)
+            .unwrap_or(0.0)
     }
 
     pub fn set_saturation(&mut self, value: f64) {
@@ -342,7 +348,10 @@ impl HueSaturationSettings {
     }
 
     pub fn lightness(&self) -> f64 {
-        self.adjustments.get(&self.range).map(|a| a.lightness).unwrap_or(0.0)
+        self.adjustments
+            .get(&self.range)
+            .map(|a| a.lightness)
+            .unwrap_or(0.0)
     }
 
     pub fn set_lightness(&mut self, value: f64) {
@@ -350,7 +359,10 @@ impl HueSaturationSettings {
     }
 
     pub fn band(&self) -> HueBand {
-        self.bands.get(&self.range).copied().unwrap_or_else(|| self.range.default_band())
+        self.bands
+            .get(&self.range)
+            .copied()
+            .unwrap_or_else(|| self.range.default_band())
     }
 
     pub fn set_band(&mut self, band: HueBand) {
@@ -395,7 +407,12 @@ pub fn hue_response(settings: &HueSaturationSettings) -> Vec<HueResponse> {
             // too, but a deterministic order keeps float sums reproducible
             // across runs and platforms.
             let mut order: Vec<&ColorRange> = settings.adjustments.keys().collect();
-            order.sort_by_key(|r| ColorRange::ALL.iter().position(|a| a == *r).unwrap_or(usize::MAX));
+            order.sort_by_key(|r| {
+                ColorRange::ALL
+                    .iter()
+                    .position(|a| a == *r)
+                    .unwrap_or(usize::MAX)
+            });
             for color_range in order {
                 let adjustment = &settings.adjustments[color_range];
                 if *adjustment == RangeAdjustment::default() {
@@ -437,7 +454,7 @@ pub fn adjust_hsl(
                 &owned
             }
         };
-        let sampled = table[(hue.round() as usize).min(table.len() - 1).max(0)];
+        let sampled = table[(hue.round() as usize).min(table.len() - 1)];
         lightness_amount = sampled.2 / 100.0;
         hue = (hue + sampled.0) % 360.0;
         if hue < 0.0 {
@@ -675,7 +692,10 @@ mod tests {
     fn centered_keeps_widths() {
         let reds = ColorRange::Reds.default_band();
         let c = reds.centered_on(180.0);
-        assert_eq!(HueBand::forward(c.range_start, c.range_end), HueBand::forward(reds.range_start, reds.range_end));
+        assert_eq!(
+            HueBand::forward(c.range_start, c.range_end),
+            HueBand::forward(reds.range_start, reds.range_end)
+        );
         assert_eq!(c.weight(180.0), 1.0);
     }
 
@@ -822,7 +842,10 @@ mod tests {
     fn cube_identity_maps_every_lattice_point_to_itself() {
         let cube = ColorCube::build(&HueSaturationSettings::default());
         assert_eq!(cube.dimension(), CUBE_DIMENSION);
-        assert_eq!(cube.data().len(), CUBE_DIMENSION * CUBE_DIMENSION * CUBE_DIMENSION * 4);
+        assert_eq!(
+            cube.data().len(),
+            CUBE_DIMENSION * CUBE_DIMENSION * CUBE_DIMENSION * 4
+        );
         let step = (CUBE_DIMENSION - 1) as f64;
         let mut index = 0;
         for blue in 0..CUBE_DIMENSION {
@@ -843,7 +866,12 @@ mod tests {
             }
         }
         // Spot-check the index arithmetic against the sequential walk above.
-        for &(r, g, b) in &[(1usize, 0usize, 0usize), (0, 5, 7), (32, 32, 32), (2, 31, 17)] {
+        for &(r, g, b) in &[
+            (1usize, 0usize, 0usize),
+            (0, 5, 7),
+            (32, 32, 32),
+            (2, 31, 17),
+        ] {
             let i = cube.index(r, g, b);
             let expected = [r as f64 / 32.0, g as f64 / 32.0, b as f64 / 32.0];
             for c in 0..3 {

@@ -153,7 +153,11 @@ impl CGRect {
     }
 
     pub fn contains_point(&self, p: CGPoint) -> bool {
-        !self.is_null() && p.x >= self.min_x() && p.x < self.max_x() && p.y >= self.min_y() && p.y < self.max_y()
+        !self.is_null()
+            && p.x >= self.min_x()
+            && p.x < self.max_x()
+            && p.y >= self.min_y()
+            && p.y < self.max_y()
     }
 
     /// `CGRect.intersection` (returns NULL when they don't overlap).
@@ -231,10 +235,26 @@ impl CGRect {
             CGPoint::new(self.max_x(), self.max_y()).applying(t),
             CGPoint::new(self.min_x(), self.max_y()).applying(t),
         ];
-        let min_x = corners[0].x.min(corners[1].x).min(corners[2].x).min(corners[3].x);
-        let max_x = corners[0].x.max(corners[1].x).max(corners[2].x).max(corners[3].x);
-        let min_y = corners[0].y.min(corners[1].y).min(corners[2].y).min(corners[3].y);
-        let max_y = corners[0].y.max(corners[1].y).max(corners[2].y).max(corners[3].y);
+        let min_x = corners[0]
+            .x
+            .min(corners[1].x)
+            .min(corners[2].x)
+            .min(corners[3].x);
+        let max_x = corners[0]
+            .x
+            .max(corners[1].x)
+            .max(corners[2].x)
+            .max(corners[3].x);
+        let min_y = corners[0]
+            .y
+            .min(corners[1].y)
+            .min(corners[2].y)
+            .min(corners[3].y);
+        let max_y = corners[0]
+            .y
+            .max(corners[1].y)
+            .max(corners[2].y)
+            .max(corners[3].y);
         CGRect::new(min_x, min_y, max_x - min_x, max_y - min_y)
     }
 }

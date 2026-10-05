@@ -9,8 +9,10 @@
 //! content + paint × coverage × opacity, which caps the whole stroke at the
 //! brush opacity exactly as the Swift does.
 
-use crate::geometry::{CGFloat, CGAffineTransform, CGPoint, CGSize, CGRect};
-use crate::raster::{falloff, pixel_to_document, spacing_fraction, Bitmap, GrayMask, ImportedImage};
+use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
+use crate::raster::{
+    Bitmap, GrayMask, ImportedImage, falloff, pixel_to_document, spacing_fraction,
+};
 use crate::selection::SelectionClip;
 use crate::transform::LayerTransform;
 use serde::{Deserialize, Serialize};
@@ -161,8 +163,11 @@ impl RasterEdit {
             .map(|s| s.height)
             .unwrap_or_else(|| base_transform.size.height.round().max(1.0) as usize);
         let original_bounds = CGRect::new(0.0, 0.0, original_width as f64, original_height as f64);
-        let original_mapping =
-            pixel_to_document(&base_transform, original_width as f64, original_height as f64);
+        let original_mapping = pixel_to_document(
+            &base_transform,
+            original_width as f64,
+            original_height as f64,
+        );
         // A mask paints in its own grid; a layer's grid grows to cover the
         // canvas so strokes past the source still land.
         let extent = if mask {
@@ -266,8 +271,9 @@ impl RasterEdit {
                     ((1.0 - d) * radius).min(1.0).max(0.0)
                 } else {
                     // The falloff starts at the hardness radius.
-                    let u = ((d * radius - hardness * radius) / (radius - hardness * radius).max(1e-9))
-                        .clamp(0.0, 1.0);
+                    let u = ((d * radius - hardness * radius)
+                        / (radius - hardness * radius).max(1e-9))
+                    .clamp(0.0, 1.0);
                     falloff(u)
                 };
                 tip.data[y * size + x] = (value * 255.0 + 0.5) as u8;
@@ -358,12 +364,11 @@ impl RasterEdit {
     /// With smoothing the brush can trail short of the pointer, so the
     /// stroke ends where the hand did (`finishBrushImmediately`).
     pub fn flush(&mut self) {
-        if let (Some(pointer), Some(anchor)) =
-            (self.smoothing_pointer, self.smoothing_anchor)
+        if let (Some(pointer), Some(anchor)) = (self.smoothing_pointer, self.smoothing_anchor)
+            && self.settings.smoothing > 0.0
+            && pointer != anchor
         {
-            if self.settings.smoothing > 0.0 && pointer != anchor {
-                self.append(pointer);
-            }
+            self.append(pointer);
         }
         let count = self.samples.len();
         if count >= 2 {
@@ -487,7 +492,11 @@ impl RasterEdit {
             let a3 = mix(end, after, t2, t3, t);
             let b1 = mix(a1, a2, t0, t2, t);
             let b2 = mix(a2, a3, t1, t3, t);
-            let point = if index == pieces { end } else { mix(b1, b2, t1, t2, t) };
+            let point = if index == pieces {
+                end
+            } else {
+                mix(b1, b2, t1, t2, t)
+            };
             self.walk_to(point, true);
         }
     }
@@ -531,7 +540,12 @@ impl RasterEdit {
 
     fn dab(&mut self, point: CGPoint) {
         let radius = self.settings.diameter / 2.0;
-        let circle = CGRect::new(point.x - radius, point.y - radius, radius * 2.0, radius * 2.0);
+        let circle = CGRect::new(
+            point.x - radius,
+            point.y - radius,
+            radius * 2.0,
+            radius * 2.0,
+        );
         let clipped = circle.intersection(&self.canvas);
         if clipped.is_null() || clipped.is_empty() {
             return;
@@ -551,7 +565,12 @@ impl RasterEdit {
         let affected = blit
             .intersection(&pixel_canvas)
             .integral()
-            .intersection(&CGRect::new(0.0, 0.0, self.width as f64, self.height as f64));
+            .intersection(&CGRect::new(
+                0.0,
+                0.0,
+                self.width as f64,
+                self.height as f64,
+            ));
         if affected.is_null() || affected.is_empty() {
             return;
         }
@@ -560,7 +579,8 @@ impl RasterEdit {
             for x in affected.min_x() as usize..affected.max_x() as usize {
                 let tip_x = ((x as f64 + 0.5) - blit.min_x()) as i64;
                 let tip_y = ((y as f64 + 0.5) - blit.min_y()) as i64;
-                if tip_x < 0 || tip_y < 0 || tip_x >= tip.width as i64 || tip_y >= tip.height as i64 {
+                if tip_x < 0 || tip_y < 0 || tip_x >= tip.width as i64 || tip_y >= tip.height as i64
+                {
                     continue;
                 }
                 let value = tip.value(tip_x as usize, tip_y as usize);
@@ -628,7 +648,8 @@ impl RasterEdit {
             sub_base.data[row * rw * 4..row * rw * 4 + rw * 4]
                 .copy_from_slice(&self.base.data[src..src + rw * 4]);
             sub_coverage.data[row * rw..row * rw + rw].copy_from_slice(
-                &coverage_mask.data[(ry + row) * self.width + rx..(ry + row) * self.width + rx + rw],
+                &coverage_mask.data
+                    [(ry + row) * self.width + rx..(ry + row) * self.width + rx + rw],
             );
         }
         let opacity = self.settings.opacity as f32;
@@ -643,7 +664,9 @@ impl RasterEdit {
                 t.key_dy,
                 t.key_w,
             ),
-            None => crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed),
+            None => {
+                crate::tools::heal::spot_heal(&mut sub_base, &sub_coverage, opacity, mode, seed)
+            }
         };
         if !healed {
             // The heal failed (e.g. no RING pixels inside the work box). The
@@ -739,7 +762,11 @@ impl RasterEdit {
                 let doc = CGPoint::new(x, y).applying(&self.pixel_to_document);
                 let sx = (doc.x + offset.width).floor() as i64;
                 let sy = (doc.y + offset.height).floor() as i64;
-                if sx >= 0 && sy >= 0 && (sx as usize) < sample.width && (sy as usize) < sample.height {
+                if sx >= 0
+                    && sy >= 0
+                    && (sx as usize) < sample.width
+                    && (sy as usize) < sample.height
+                {
                     let s = sample.pixel(sx as usize, sy as usize);
                     if self.replaces_with_clone {
                         // .copy: the destination is replaced outright —
@@ -786,10 +813,11 @@ impl RasterEdit {
                         continue;
                     }
                     let o = i * 4;
-                    let keep = 1.0 - alpha as f32;
+                    let keep = 1.0 - alpha;
                     for c in 0..4 {
                         out.data[o + c] = (self.base.data[o + c] as f32 * keep
-                            + out.data[o + c] as f32 * alpha as f32) as u8;
+                            + out.data[o + c] as f32 * alpha)
+                            as u8;
                     }
                 }
             }
@@ -805,14 +833,18 @@ impl RasterEdit {
 
     /// The snapshot for an already-composed grid (fill / clear results).
     pub fn snapshot_of(&self, composed: &Bitmap) -> (ImportedImage, LayerTransform, CGRect) {
-        let mut bounds = if self.source.is_some() { Some(self.source_rect) } else { None };
-        if !self.is_mask {
-            if let Some(alpha_bounds) = composed.alpha_bounds() {
-                bounds = Some(match bounds {
-                    Some(existing) => existing.union(&alpha_bounds),
-                    None => alpha_bounds,
-                });
-            }
+        let mut bounds = if self.source.is_some() {
+            Some(self.source_rect)
+        } else {
+            None
+        };
+        if !self.is_mask
+            && let Some(alpha_bounds) = composed.alpha_bounds()
+        {
+            bounds = Some(match bounds {
+                Some(existing) => existing.union(&alpha_bounds),
+                None => alpha_bounds,
+            });
         }
         let crop = bounds.unwrap_or(CGRect::new(0.0, 0.0, self.width as f64, self.height as f64));
         let cropped = crate::filters::crop_bitmap(composed, &crop);
@@ -858,7 +890,8 @@ impl RasterEdit {
                         continue;
                     }
                 }
-                let doc = CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&self.pixel_to_document);
+                let doc =
+                    CGPoint::new(x as f64 + 0.5, y as f64 + 0.5).applying(&self.pixel_to_document);
                 let t = match shape {
                     GradientShape::Linear => {
                         let dx = end.x - start.x;
@@ -1002,7 +1035,7 @@ impl RasterEdit {
                 }
                 // Punch out under the original selection.
                 let o = (y * self.width + x) * 4;
-                let keep = 1.0 - alpha as f32;
+                let keep = 1.0 - alpha;
                 let a = (out.data[o + 3] as f32 * keep).round();
                 for c in 0..3 {
                     out.data[o + c] = (out.data[o + c] as f32 * keep).round() as u8;
@@ -1012,7 +1045,8 @@ impl RasterEdit {
         }
         // Whole-pixel moves sample nearest; fractional ones interpolate
         // (BrushStroke.moveLifted's `whole ? .none : .high`).
-        let whole = target.min_x() == target.min_x().round() && target.min_y() == target.min_y().round();
+        let whole =
+            target.min_x() == target.min_x().round() && target.min_y() == target.min_y().round();
         crate::raster::draw_over(
             &mut out,
             lifted,
@@ -1149,7 +1183,12 @@ fn segment_density(p: CGPoint, segment: &StrokeSegment, params: &ContinuousParam
         // Initial click.
         let dx = p.x - s0.x;
         let dy = p.y - s0.y;
-        return tip_density(dx * dx + dy * dy, params.radius, params.hardness, params.antialias);
+        return tip_density(
+            dx * dx + dy * dy,
+            params.radius,
+            params.hardness,
+            params.antialias,
+        );
     }
     let dir = (vx / length, vy / length);
     let (dx, dy) = (p.x - s0.x, p.y - s0.y);
@@ -1189,7 +1228,6 @@ fn segment_density(p: CGPoint, segment: &StrokeSegment, params: &ContinuousParam
     integral * half_length / params.spacing
 }
 
-
 #[cfg(test)]
 fn render_one(params: &ContinuousParams, w: usize, h: usize) -> ContinuousTile {
     let mut tile = ContinuousTile {
@@ -1225,7 +1263,12 @@ fn segment_distance_squared(p: CGPoint, segment: &StrokeSegment) -> f64 {
     let dy = p.y - s0.y;
     let dot = vx * dx + vy * dy;
     let len_squared = vx * vx + vy * vy;
-    let t = (if len_squared > 0.0 { dot / len_squared } else { 0.0 }).clamp(0.0, 1.0);
+    let t = (if len_squared > 0.0 {
+        dot / len_squared
+    } else {
+        0.0
+    })
+    .clamp(0.0, 1.0);
     let ex = dx - t * vx;
     let ey = dy - t * vy;
     ex * ex + ey * ey
@@ -1364,11 +1407,7 @@ pub fn render_continuous_tile(tile: &mut ContinuousTile, params: &ContinuousPara
                 params.origin.x + local.0 * params.axis_x.x + local.1 * params.axis_y.x,
                 params.origin.y + local.0 * params.axis_x.y + local.1 * params.axis_y.y,
             );
-            if p.x < 0.0
-                || p.y < 0.0
-                || p.x >= params.canvas.width
-                || p.y >= params.canvas.height
-            {
+            if p.x < 0.0 || p.y < 0.0 || p.x >= params.canvas.width || p.y >= params.canvas.height {
                 tile.preview[index] = 0;
                 continue;
             }
@@ -1387,12 +1426,21 @@ pub fn render_continuous_tile(tile: &mut ContinuousTile, params: &ContinuousPara
                         tail = tail.min(d);
                     }
                 }
-                let value = (tile.permanent[index] as f64)
-                    .max(brush_coverage(settled, params.radius, params.hardness, params.antialias));
+                let value = (tile.permanent[index] as f64).max(brush_coverage(
+                    settled,
+                    params.radius,
+                    params.hardness,
+                    params.antialias,
+                ));
                 tile.permanent[index] = value as f32;
                 tile.preview[index] = (255.0
-                    * value.max(brush_coverage(tail, params.radius, params.hardness, params.antialias)))
-                    .round() as u8;
+                    * value.max(brush_coverage(
+                        tail,
+                        params.radius,
+                        params.hardness,
+                        params.antialias,
+                    )))
+                .round() as u8;
             } else {
                 let mut value = tile.permanent[index] as f64;
                 let mut tail = 0.0;
@@ -1443,11 +1491,7 @@ fn render_continuous_tile_reference(tile: &mut ContinuousTile, params: &Continuo
                 params.origin.x + local.0 * params.axis_x.x + local.1 * params.axis_y.x,
                 params.origin.y + local.0 * params.axis_x.y + local.1 * params.axis_y.y,
             );
-            if p.x < 0.0
-                || p.y < 0.0
-                || p.x >= params.canvas.width
-                || p.y >= params.canvas.height
-            {
+            if p.x < 0.0 || p.y < 0.0 || p.x >= params.canvas.width || p.y >= params.canvas.height {
                 tile.preview[index] = 0;
                 continue;
             }
@@ -1460,12 +1504,21 @@ fn render_continuous_tile_reference(tile: &mut ContinuousTile, params: &Continuo
                 for segment in params.tail {
                     tail = tail.min(segment_distance_squared(p, segment));
                 }
-                let value = (tile.permanent[index] as f64)
-                    .max(brush_coverage(settled, params.radius, params.hardness, params.antialias));
+                let value = (tile.permanent[index] as f64).max(brush_coverage(
+                    settled,
+                    params.radius,
+                    params.hardness,
+                    params.antialias,
+                ));
                 tile.permanent[index] = value as f32;
                 tile.preview[index] = (255.0
-                    * value.max(brush_coverage(tail, params.radius, params.hardness, params.antialias)))
-                    .round() as u8;
+                    * value.max(brush_coverage(
+                        tail,
+                        params.radius,
+                        params.hardness,
+                        params.antialias,
+                    )))
+                .round() as u8;
             } else {
                 let mut value = tile.permanent[index] as f64;
                 for segment in params.settled {
@@ -1516,7 +1569,14 @@ mod tests {
 
     #[test]
     fn stroke_paints_foreground_with_opacity_cap() {
-        let mut edit = RasterEdit::new(None, blank_layer_transform(), false, BrushSettings::default(), CGSize::new(100.0, 100.0), None);
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
         edit.settings.red = 255.0 / 255.0;
         edit.settings.blue = 1.0;
         edit.settings.opacity = 0.5;
@@ -1543,7 +1603,14 @@ mod tests {
         for i in (0..source.data.len()).step_by(4) {
             source.data[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
         }
-        let mut edit = RasterEdit::new(Some(source), blank_layer_transform(), false, BrushSettings::default(), CGSize::new(100.0, 100.0), None);
+        let mut edit = RasterEdit::new(
+            Some(source),
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
         edit.settings.erasing = true;
         edit.settings.hardness = 1.0;
         edit.settings.diameter = 20.0;
@@ -1556,7 +1623,14 @@ mod tests {
 
     #[test]
     fn straight_line_between_far_points() {
-        let mut edit = RasterEdit::new(None, blank_layer_transform(), false, BrushSettings::default(), CGSize::new(100.0, 100.0), None);
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
         edit.settings.diameter = 10.0;
         edit.settings.hardness = 1.0;
         edit.append(CGPoint::new(10.0, 50.0));
@@ -1687,7 +1761,11 @@ mod tests {
             CGPoint::new(20.0, 150.0),
             CGPoint::new(150.0, 150.0),
         );
-        assert!(piece.len() >= 3, "sharp turn must subdivide, got {}", piece.len());
+        assert!(
+            piece.len() >= 3,
+            "sharp turn must subdivide, got {}",
+            piece.len()
+        );
         assert_eq!(piece[0], CGPoint::new(20.0, 150.0));
         assert_eq!(*piece.last().unwrap(), CGPoint::new(70.0, 40.0));
     }
@@ -1703,7 +1781,10 @@ mod tests {
             CGPoint::new(-50.0, 0.0),
             CGPoint::new(150.0, 0.0),
         );
-        assert_eq!(straight, vec![CGPoint::new(0.0, 0.0), CGPoint::new(100.0, 0.0)]);
+        assert_eq!(
+            straight,
+            vec![CGPoint::new(0.0, 0.0), CGPoint::new(100.0, 0.0)]
+        );
 
         // A sharp S stays within 0.2px of the exact spline.
         let (start, end, before, after) = (
@@ -1712,8 +1793,7 @@ mod tests {
             CGPoint::new(20.0, 40.0),
             CGPoint::new(180.0, 160.0),
         );
-        let points =
-            RasterEdit::continuous_curve_points(start, end, before, after);
+        let points = RasterEdit::continuous_curve_points(start, end, before, after);
         assert!(points.len() >= 4, "{}", points.len());
         // Dense reference evaluation of the same centripetal Catmull–Rom.
         fn knot(t: f64, a: CGPoint, b: CGPoint) -> f64 {
@@ -1747,8 +1827,7 @@ mod tests {
                     let dy = b.y - a.y;
                     let length_squared = dx * dx + dy * dy;
                     let t = if length_squared > 0.0 {
-                        (((reference.x - a.x) * dx + (reference.y - a.y) * dy)
-                            / length_squared)
+                        (((reference.x - a.x) * dx + (reference.y - a.y) * dy) / length_squared)
                             .clamp(0.0, 1.0)
                     } else {
                         0.0
@@ -1788,7 +1867,11 @@ mod tests {
         edit.append_smoothed(CGPoint::new(200.0, 50.0));
         let wet = edit.result();
         assert_eq!(wet.pixel(120, 50)[3], 255, "tail renders along the string");
-        assert_eq!(wet.pixel(198, 50)[3], 0, "the brush stops short of the pointer");
+        assert_eq!(
+            wet.pixel(198, 50)[3],
+            0,
+            "the brush stops short of the pointer"
+        );
         // Flushing closes the gap with the raw pointer.
         edit.flush();
         let out = edit.result();
@@ -1846,7 +1929,15 @@ mod tests {
         let mut sample = Bitmap::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                sample.set_pixel(x, y, if x < 50 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+                sample.set_pixel(
+                    x,
+                    y,
+                    if x < 50 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    },
+                );
             }
         }
         let mut edit = RasterEdit::new(
@@ -1878,7 +1969,14 @@ mod tests {
             CGRect::new(20.0, 20.0, 10.0, 10.0),
         ));
         let clip = sel.clip(CGSize::new(100.0, 100.0));
-        let mut edit = RasterEdit::new(Some(source), blank_layer_transform(), false, BrushSettings::default(), CGSize::new(100.0, 100.0), Some(clip));
+        let mut edit = RasterEdit::new(
+            Some(source),
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            Some(clip),
+        );
         assert!(edit.lift_selection());
         let out = edit.move_lifted(CGSize::new(30.0, 0.0), false).unwrap();
         // The selection is a transparent hole…
@@ -1896,7 +1994,14 @@ mod tests {
         for i in (0..source.data.len()).step_by(4) {
             source.data[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
         }
-        let mut edit = RasterEdit::new(Some(source), blank_layer_transform(), false, BrushSettings::default(), CGSize::new(100.0, 100.0), None);
+        let mut edit = RasterEdit::new(
+            Some(source),
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
         edit.settings.diameter = 20.0;
         edit.settings.hardness = 1.0;
         edit.append(CGPoint::new(50.0, 50.0));
@@ -1909,7 +2014,14 @@ mod tests {
     #[test]
     fn mask_stroke_paints_foreground_gray() {
         // The default brush color (black) paints black on a white mask.
-        let mut edit = RasterEdit::new(None, blank_layer_transform(), true, BrushSettings::default(), CGSize::new(100.0, 100.0), None);
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            true,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
         edit.settings.diameter = 20.0;
         edit.settings.hardness = 1.0;
         edit.append(CGPoint::new(50.0, 50.0));
@@ -1965,7 +2077,10 @@ mod heal_tests {
         // The wash is gone; the membrane solve fills from the red ring (a
         // small spot in a 24px image has no legal source patch, so this is
         // the smooth fill), leaving at most a partial step toward the ring.
-        assert!(healed[0] > wash[0], "should move toward the ring: {healed:?}");
+        assert!(
+            healed[0] > wash[0],
+            "should move toward the ring: {healed:?}"
+        );
         assert_eq!(healed[3], 255);
     }
 
@@ -2006,7 +2121,11 @@ mod heal_tests {
         let reach: f64 = (10.0 + 32.0) * 3.2;
         // Grown on every side, integral.
         assert_eq!(region.min_x(), (250.0 - reach).floor());
-        assert!((region.width() - (10.0 + reach * 2.0)).abs() <= 2.0, "{}", region.width());
+        assert!(
+            (region.width() - (10.0 + reach * 2.0)).abs() <= 2.0,
+            "{}",
+            region.width()
+        );
         // Near an edge the region clips to the canvas.
         let edge = heal_region(CGRect::new(2.0, 2.0, 4.0, 4.0), 20, 20);
         assert_eq!(edge.min_x(), 0.0);
@@ -2083,7 +2202,11 @@ mod heal_tests {
         assert!(center > 200, "{center}");
         assert_eq!(corner, 0);
         let out = edit.result();
-        assert!(out.pixel(50, 50)[3] > 100, "paint lands: {:?}", out.pixel(50, 50));
+        assert!(
+            out.pixel(50, 50)[3] > 100,
+            "paint lands: {:?}",
+            out.pixel(50, 50)
+        );
     }
 
     #[test]
@@ -2107,7 +2230,10 @@ mod heal_tests {
             canvas: CGSize::new(30.0, 30.0),
         };
         render_continuous_tile(&mut tile, &params);
-        assert!(tile.permanent.iter().all(|v| *v == 0.0), "tail is never permanent");
+        assert!(
+            tile.permanent.iter().all(|v| *v == 0.0),
+            "tail is never permanent"
+        );
         assert!(tile.preview.iter().any(|v| *v > 0), "the tail previews");
     }
 
@@ -2179,7 +2305,11 @@ mod heal_tests {
         // exactly at the new spot.
         let moved = edit.move_lifted(CGSize::new(5.0, 5.0), false).unwrap();
         assert_eq!(moved.pixel(12, 12)[3], 0, "the origin punches out");
-        assert_eq!(moved.pixel(18, 18), [255, 255, 255, 255], "the block moves intact");
+        assert_eq!(
+            moved.pixel(18, 18),
+            [255, 255, 255, 255],
+            "the block moves intact"
+        );
     }
 
     #[test]
@@ -2224,7 +2354,10 @@ mod heal_tests {
         edit.append(CGPoint::new(4.0, 4.0));
         edit.append(CGPoint::new(4.0, 4.5));
         assert!(edit.has_paint());
-        assert!(!edit.heal(0, 1), "a fully covered layer has no RING to heal from");
+        assert!(
+            !edit.heal(0, 1),
+            "a fully covered layer has no RING to heal from"
+        );
         let out = edit.result();
         assert_eq!(
             out.pixel(4, 4),
@@ -2277,9 +2410,15 @@ mod cull_tests {
         for _ in 0..n {
             points.push([(rnd() * spread) as f32, (rnd() * spread) as f32]);
         }
-        points.windows(2).map(|w| [w[0][0], w[0][1], w[1][0], w[1][1]]).collect()
+        points
+            .windows(2)
+            .map(|w| [w[0][0], w[0][1], w[1][0], w[1][1]])
+            .collect()
     }
 
+    // The 45° axis literals are reference data for the bit-identical check;
+    // FRAC_1_SQRT_2 is the same value but the literals document the source.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn culled_kernel_is_bit_identical_to_the_reference() {
         // Hard and soft tips, straight and rotated/scaled grid axes, segments
@@ -2288,7 +2427,12 @@ mod cull_tests {
         for &hardness in &[1.0f64, 0.5, 0.0] {
             for &(ax, ay, bx, by) in &[
                 (1.0, 0.0, 0.0, 1.0),
-                (0.7071067811865476, 0.7071067811865476, -0.7071067811865476, 0.7071067811865476),
+                (
+                    0.7071067811865476,
+                    0.7071067811865476,
+                    -0.7071067811865476,
+                    0.7071067811865476,
+                ),
                 (2.0, 0.0, 0.0, 0.5),
                 (-1.0, 0.0, 0.0, -1.0),
             ] {
@@ -2375,7 +2519,8 @@ mod heal_trim_tests {
             sub_base.data[row * rw * 4..row * rw * 4 + rw * 4]
                 .copy_from_slice(&edit.base.data[src..src + rw * 4]);
             sub_coverage.data[row * rw..row * rw + rw].copy_from_slice(
-                &coverage_mask.data[(ry + row) * edit.width + rx..(ry + row) * edit.width + rx + rw],
+                &coverage_mask.data
+                    [(ry + row) * edit.width + rx..(ry + row) * edit.width + rx + rw],
             );
         }
         let opacity = edit.settings.opacity as f32;
@@ -2418,7 +2563,11 @@ mod heal_trim_tests {
         hardness: f64,
     ) -> RasterEdit {
         let mut edit = RasterEdit::new(
-            Some(textured_source(canvas.width as usize, canvas.height as usize, 7)),
+            Some(textured_source(
+                canvas.width as usize,
+                canvas.height as usize,
+                7,
+            )),
             LayerTransform::new(CGPoint::ZERO, canvas),
             false,
             BrushSettings::default(),
@@ -2439,15 +2588,35 @@ mod heal_trim_tests {
     fn trimmed_heal_is_bit_identical_to_the_full_region_reference() {
         let cases: [(CGSize, Vec<(f64, f64)>, f64, f64); 5] = [
             // Elongated mid-canvas stroke on a tall canvas: the trim bites.
-            (CGSize::new(600.0, 900.0), vec![(80.0, 450.0), (520.0, 450.0)], 10.0, 0.5),
+            (
+                CGSize::new(600.0, 900.0),
+                vec![(80.0, 450.0), (520.0, 450.0)],
+                10.0,
+                0.5,
+            ),
             // Vertical stroke.
-            (CGSize::new(500.0, 700.0), vec![(250.0, 100.0), (250.0, 600.0)], 8.0, 0.5),
+            (
+                CGSize::new(500.0, 700.0),
+                vec![(250.0, 100.0), (250.0, 600.0)],
+                8.0,
+                0.5,
+            ),
             // Stroke touching the canvas corner: the work box clips there.
-            (CGSize::new(300.0, 300.0), vec![(4.0, 4.0), (120.0, 6.0)], 8.0, 1.0),
+            (
+                CGSize::new(300.0, 300.0),
+                vec![(4.0, 4.0), (120.0, 6.0)],
+                8.0,
+                1.0,
+            ),
             // Short click, small canvas.
             (CGSize::new(60.0, 60.0), vec![(30.0, 30.0)], 12.0, 0.5),
             // Diagonal stroke.
-            (CGSize::new(400.0, 400.0), vec![(50.0, 50.0), (350.0, 350.0)], 10.0, 0.0),
+            (
+                CGSize::new(400.0, 400.0),
+                vec![(50.0, 50.0), (350.0, 350.0)],
+                10.0,
+                0.0,
+            ),
         ];
         for (canvas, points, diameter, hardness) in cases {
             for mode in 0..3 {
@@ -2455,8 +2624,16 @@ mod heal_trim_tests {
                     let mut a = healed_stroke(canvas, &points, diameter, hardness);
                     let mut b = healed_stroke(canvas, &points, diameter, hardness);
                     let healed = a.heal(mode, seed);
-                    assert_eq!(healed, heal_reference(&mut b, mode, seed), "return value diverged, mode {mode} seed {seed}");
-                    assert_eq!(a.result().data, b.result().data, "pixels diverged, mode {mode} seed {seed}");
+                    assert_eq!(
+                        healed,
+                        heal_reference(&mut b, mode, seed),
+                        "return value diverged, mode {mode} seed {seed}"
+                    );
+                    assert_eq!(
+                        a.result().data,
+                        b.result().data,
+                        "pixels diverged, mode {mode} seed {seed}"
+                    );
                 }
             }
         }
@@ -2467,15 +2644,28 @@ mod heal_trim_tests {
         // A 440px stroke on a tall canvas: the full region insets by
         // (max side + 32) * 3.2 on every axis; the trim's vertical extent
         // follows the stroke's own (small) height instead.
-        let edit = healed_stroke(CGSize::new(600.0, 900.0), &vec![(80.0, 450.0), (520.0, 450.0)], 10.0, 0.5);
+        let edit = healed_stroke(
+            CGSize::new(600.0, 900.0),
+            &vec![(80.0, 450.0), (520.0, 450.0)],
+            10.0,
+            0.5,
+        );
         let coverage = edit.effective_coverage();
         let painted = crate::raster::coverage_bounds(&coverage).unwrap();
         let region = heal_region(painted, edit.width, edit.height);
         let trim = crate::tools::heal::trim_heal_region(painted, region).expect("trim applies");
         assert!(trim.rect.width() <= region.width() + 1e-9);
-        assert!(trim.rect.height() < region.height() - 1.0, "vertical extent must shrink: {} vs {}", trim.rect.height(), region.height());
+        assert!(
+            trim.rect.height() < region.height() - 1.0,
+            "vertical extent must shrink: {} vs {}",
+            trim.rect.height(),
+            region.height()
+        );
         let trim_area = trim.rect.width() * trim.rect.height();
         let region_area = region.width() * region.height();
-        assert!(trim_area < region_area * 0.6, "trim {trim_area} vs region {region_area}");
+        assert!(
+            trim_area < region_area * 0.6,
+            "trim {trim_area} vs region {region_area}"
+        );
     }
 }

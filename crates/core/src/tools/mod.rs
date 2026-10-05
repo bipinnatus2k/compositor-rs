@@ -4,12 +4,12 @@
 //! `SubjectRemoval.swift`, `HealPixels.c`, `WandPixels.c`, `ContentFill.c`.
 
 pub mod brush;
-pub mod distort;
 pub mod content_fill;
+pub mod distort;
 pub mod heal;
 pub mod mask_tracing;
 pub mod object_selection;
 pub mod subject_removal;
 pub mod text;
-pub mod warp;
 pub mod wand;
+pub mod warp;

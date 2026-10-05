@@ -17,28 +17,28 @@
 //! `DockedToMainWindowRight`, everything else `Automatic` (centered on the
 //! canvas the first time, then wherever it was left).
 
-use gpui_kit::{
-    px, AnyElement, AppContext, Context, IntoElement, InteractiveElement, ParentElement, Pixels,
-    Point, SharedString, Styled, Window,
-};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{Disableable, Selectable, Sizable};
+use gpui_kit::{
+    AnyElement, AppContext, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Point,
+    SharedString, Styled, Window, px,
+};
 
-use compositor_core::adjust::levels_auto::LevelsAuto;
 use compositor_core::adjust::LevelsChannel;
+use compositor_core::adjust::levels_auto::LevelsAuto;
 use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
 
-use crate::panels::{docked_top_left, panel_names, render_panel, PanelPlacement, DOCKED_WIDTH};
+use crate::panels::{DOCKED_WIDTH, PanelPlacement, docked_top_left, panel_names, render_panel};
 use crate::sheets::SliderRole;
-use crate::state::AppState;
-use crate::ui::{dropdown, labeled_checkbox, text_label, MenuEntry};
 use crate::sheets_ui::{
     histogram_view, labeled_slider, levels_channel_label, parse_input_usize, sheet_row,
 };
+use crate::state::AppState;
+use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
 
 /// The per-panel widget bundles. A panel's bundle exists exactly while the
 /// panel is open — the same lifetime the sheet's `SheetState` had.
@@ -143,8 +143,11 @@ impl AppState {
             );
         }
         self.panel_widgets.levels = Some(panel);
-        self.panels
-            .show(panel_names::LEVELS_PANEL, "Levels", PanelPlacement::Automatic);
+        self.panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
         self.sync_panel_guard();
         self.touch(cx);
     }
@@ -191,9 +194,7 @@ impl AppState {
             SelectionAmountOperation::Contract => session.selection_contract_amount,
             SelectionAmountOperation::Feather => session.selection_feather_amount,
         };
-        let tolerance = cx.new(|cx| {
-            InputState::new(window, cx).default_value(amount.to_string())
-        });
+        let tolerance = cx.new(|cx| InputState::new(window, cx).default_value(amount.to_string()));
         let maximum = amount_maximum(operation);
         let slider = cx.new(|_| {
             SliderState::new()
@@ -275,24 +276,37 @@ impl AppState {
         match kind {
             FilterKind::GaussianBlur => {
                 panel.sliders = vec![self.make_slider(
-                    0.1, 250.0, defaults.radius as f32, SliderRole::Radius, cx,
+                    0.1,
+                    250.0,
+                    defaults.radius as f32,
+                    SliderRole::Radius,
+                    cx,
                 )];
             }
             FilterKind::MotionBlur => {
                 panel.sliders = vec![
                     self.make_slider(-90.0, 90.0, defaults.angle as f32, SliderRole::Angle, cx),
-                    self.make_slider(1.0, 2000.0, defaults.distance as f32, SliderRole::Distance, cx),
+                    self.make_slider(
+                        1.0,
+                        2000.0,
+                        defaults.distance as f32,
+                        SliderRole::Distance,
+                        cx,
+                    ),
                 ];
             }
             FilterKind::AddNoise => {
                 panel.sliders = vec![self.make_slider(
-                    0.1, 400.0, defaults.amount as f32, SliderRole::Amount, cx,
+                    0.1,
+                    400.0,
+                    defaults.amount as f32,
+                    SliderRole::Amount,
+                    cx,
                 )];
             }
             FilterKind::LensCorrection => {
-                panel.sliders = vec![self.make_slider(
-                    -100.0, 100.0, 0.0, SliderRole::Distortion, cx,
-                )];
+                panel.sliders =
+                    vec![self.make_slider(-100.0, 100.0, 0.0, SliderRole::Distortion, cx)];
             }
             FilterKind::CameraRaw => {
                 let group: [(f64, f64, f64); 14] = [
@@ -315,7 +329,13 @@ impl AppState {
                     .iter()
                     .enumerate()
                     .map(|(i, (min, max, value))| {
-                        self.make_slider(*min as f32, *max as f32, *value as f32, SliderRole::CameraRaw(i), cx)
+                        self.make_slider(
+                            *min as f32,
+                            *max as f32,
+                            *value as f32,
+                            SliderRole::CameraRaw(i),
+                            cx,
+                        )
                     })
                     .collect();
             }
@@ -358,40 +378,123 @@ impl AppState {
             .map(|editing| editing.kind)
             .unwrap_or(LayerEffectKind::Stroke);
         let mut slider = |min: f64, max: f64, value: f64, index: usize| {
-            self.make_slider(min as f32, max as f32, value as f32, SliderRole::Effect(index), cx)
+            self.make_slider(
+                min as f32,
+                max as f32,
+                value as f32,
+                SliderRole::Effect(index),
+                cx,
+            )
         };
         // Slider thumb ranges are the EffectsSheet's visible ranges; the
         // core `isValid` guard bounds every stored value.
         let sliders = match kind {
             LayerEffectKind::Stroke => vec![
                 slider(0.0, 20.0, editing.stroke.map(|s| s.size).unwrap_or(4.0), 0),
-                slider(0.0, 100.0, editing.stroke.map(|s| s.opacity * 100.0).unwrap_or(100.0), 1),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.stroke.map(|s| s.opacity * 100.0).unwrap_or(100.0),
+                    1,
+                ),
             ],
             LayerEffectKind::Shadow => vec![
-                slider(0.0, 100.0, editing.shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
-                slider(-180.0, 180.0, editing.shadow.map(|s| s.angle).unwrap_or(90.0), 1),
-                slider(0.0, 100.0, editing.shadow.map(|s| s.distance).unwrap_or(20.0), 2),
-                slider(0.0, 100.0, editing.shadow.map(|s| s.blur).unwrap_or(20.0), 3),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0),
+                    0,
+                ),
+                slider(
+                    -180.0,
+                    180.0,
+                    editing.shadow.map(|s| s.angle).unwrap_or(90.0),
+                    1,
+                ),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.shadow.map(|s| s.distance).unwrap_or(20.0),
+                    2,
+                ),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.shadow.map(|s| s.blur).unwrap_or(20.0),
+                    3,
+                ),
             ],
             LayerEffectKind::ColorOverlay => vec![slider(
                 0.0,
                 100.0,
-                editing.color_overlay.map(|s| s.opacity * 100.0).unwrap_or(100.0),
+                editing
+                    .color_overlay
+                    .map(|s| s.opacity * 100.0)
+                    .unwrap_or(100.0),
                 0,
             )],
             LayerEffectKind::InnerShadow => vec![
-                slider(0.0, 100.0, editing.inner_shadow.map(|s| s.opacity * 100.0).unwrap_or(50.0), 0),
-                slider(-180.0, 180.0, editing.inner_shadow.map(|s| s.angle).unwrap_or(90.0), 1),
-                slider(0.0, 50.0, editing.inner_shadow.map(|s| s.distance).unwrap_or(10.0), 2),
-                slider(0.0, 100.0, editing.inner_shadow.map(|s| s.blur).unwrap_or(10.0), 3),
+                slider(
+                    0.0,
+                    100.0,
+                    editing
+                        .inner_shadow
+                        .map(|s| s.opacity * 100.0)
+                        .unwrap_or(50.0),
+                    0,
+                ),
+                slider(
+                    -180.0,
+                    180.0,
+                    editing.inner_shadow.map(|s| s.angle).unwrap_or(90.0),
+                    1,
+                ),
+                slider(
+                    0.0,
+                    50.0,
+                    editing.inner_shadow.map(|s| s.distance).unwrap_or(10.0),
+                    2,
+                ),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.inner_shadow.map(|s| s.blur).unwrap_or(10.0),
+                    3,
+                ),
             ],
             LayerEffectKind::OuterGlow => vec![
-                slider(0.0, 100.0, editing.outer_glow.map(|s| s.size).unwrap_or(20.0), 0),
-                slider(0.0, 100.0, editing.outer_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.outer_glow.map(|s| s.size).unwrap_or(20.0),
+                    0,
+                ),
+                slider(
+                    0.0,
+                    100.0,
+                    editing
+                        .outer_glow
+                        .map(|s| s.opacity * 100.0)
+                        .unwrap_or(75.0),
+                    1,
+                ),
             ],
             LayerEffectKind::InnerGlow => vec![
-                slider(0.0, 100.0, editing.inner_glow.map(|s| s.size).unwrap_or(10.0), 0),
-                slider(0.0, 100.0, editing.inner_glow.map(|s| s.opacity * 100.0).unwrap_or(75.0), 1),
+                slider(
+                    0.0,
+                    100.0,
+                    editing.inner_glow.map(|s| s.size).unwrap_or(10.0),
+                    0,
+                ),
+                slider(
+                    0.0,
+                    100.0,
+                    editing
+                        .inner_glow
+                        .map(|s| s.opacity * 100.0)
+                        .unwrap_or(75.0),
+                    1,
+                ),
             ],
         };
         let kind_index = LayerEffectKind::ALL
@@ -694,7 +797,8 @@ impl AppState {
         let viewport = window.viewport_size();
         let top_left = match placement {
             PanelPlacement::DockedToMainWindowRight => {
-                let (x, y) = docked_top_left((f32::from(viewport.width), f32::from(viewport.height)));
+                let (x, y) =
+                    docked_top_left((f32::from(viewport.width), f32::from(viewport.height)));
                 Point::new(px(x), px(y))
             }
             PanelPlacement::Automatic => {
@@ -715,24 +819,21 @@ impl AppState {
         let content = self.panel_content(name, cx)?;
 
         let app = app.clone();
-        let on_close = move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
-            state.cancel_panel(name, cx);
-        };
-        let on_moved =
-            move |state: &mut AppState, position: Point<Pixels>, _window: &mut Window, cx: &mut Context<AppState>| {
-                state
-                    .panels
-                    .remember_position(name, f32::from(position.x), f32::from(position.y));
-                state.notify_only(cx);
+        let on_close =
+            move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
+                state.cancel_panel(name, cx);
             };
+        let on_moved = move |state: &mut AppState,
+                             position: Point<Pixels>,
+                             _window: &mut Window,
+                             cx: &mut Context<AppState>| {
+            state
+                .panels
+                .remember_position(name, f32::from(position.x), f32::from(position.y));
+            state.notify_only(cx);
+        };
         Some(render_panel(
-            &app,
-            top_left,
-            title,
-            fixed_size,
-            content,
-            on_close,
-            on_moved,
+            &app, top_left, title, fixed_size, content, on_close, on_moved,
         ))
     }
 
@@ -800,8 +901,8 @@ impl AppState {
     /// or the draft conflicts).
     fn shortcuts_panel_footer_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let body = self.shortcuts_sheet_body(cx);
-        let done_disabled = Self::shortcuts_recording_id().is_some()
-            || self.shortcuts().validate().is_err();
+        let done_disabled =
+            Self::shortcuts_recording_id().is_some() || self.shortcuts().validate().is_err();
         gpui_kit::div()
             .flex()
             .flex_col()
@@ -930,9 +1031,24 @@ impl AppState {
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(auto_button("levels-auto-contrast", "Contrast", LevelsAuto::Contrast, cx))
-                    .child(auto_button("levels-auto-color", "Color", LevelsAuto::Color, cx))
-                    .child(auto_button("levels-auto-neutral", "Neutral", LevelsAuto::Neutral, cx)),
+                    .child(auto_button(
+                        "levels-auto-contrast",
+                        "Contrast",
+                        LevelsAuto::Contrast,
+                        cx,
+                    ))
+                    .child(auto_button(
+                        "levels-auto-color",
+                        "Color",
+                        LevelsAuto::Color,
+                        cx,
+                    ))
+                    .child(auto_button(
+                        "levels-auto-neutral",
+                        "Neutral",
+                        LevelsAuto::Neutral,
+                        cx,
+                    )),
             ))
             .into_any_element()
     }
@@ -983,21 +1099,22 @@ impl AppState {
         let maximum = amount_maximum(panel.operation);
         let cx_app: &gpui_kit::App = cx;
         let valid = parse_amount(&tolerance.read(cx_app).value(), maximum).is_some();
-        let mut body = gpui_kit::div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(sheet_row(
-                "Amount",
-                gpui_kit::div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .child(gpui_kit::div().flex_1().min_w_0().child(Slider::new(&slider)))
-                    .child(Input::new(&tolerance).id("amount-value").w(px(64.0))),
-            ));
+        let mut body = gpui_kit::div().flex().flex_col().gap_1().child(sheet_row(
+            "Amount",
+            gpui_kit::div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_1()
+                .child(
+                    gpui_kit::div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Slider::new(&slider)),
+                )
+                .child(Input::new(&tolerance).id("amount-value").w(px(64.0))),
+        ));
         if !valid {
             body = body.child(text_label(
                 format!("Enter a whole number from 1 to {maximum} px."),
@@ -1034,10 +1151,7 @@ impl AppState {
                 let readout = selected
                     .and_then(|index| points.get(index))
                     .map(|point| {
-                        format!(
-                            "Input {} \u{b7} Output {}",
-                            point.x as i64, point.y as i64
-                        )
+                        format!("Input {} \u{b7} Output {}", point.x as i64, point.y as i64)
                     })
                     .unwrap_or_default();
                 let can_remove =
@@ -1084,10 +1198,7 @@ impl AppState {
                                 &curves, &points, selected, cx,
                             )),
                     )
-                    .child(text_label(
-                        "Click to add a point. Drag to adjust.",
-                        true,
-                    ))
+                    .child(text_label("Click to add a point. Drag to adjust.", true))
                     .child(
                         gpui_kit::div()
                             .flex()
@@ -1226,7 +1337,11 @@ impl AppState {
             }
             row
         };
-        let mut body = gpui_kit::div().flex().flex_col().gap_1().child(title_row(cx));
+        let mut body = gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(title_row(cx));
         match kind {
             LayerEffectKind::Stroke => {
                 body = body
@@ -1333,7 +1448,10 @@ pub(crate) fn parse_amount(text: &str, maximum: i64) -> Option<i64> {
     if trimmed.is_empty() {
         return None;
     }
-    trimmed.parse::<i64>().ok().filter(|value| (1..=maximum).contains(value))
+    trimmed
+        .parse::<i64>()
+        .ok()
+        .filter(|value| (1..=maximum).contains(value))
 }
 
 /// The slider thumb position for the amount text — the slider binding's
@@ -1388,7 +1506,10 @@ fn effect_swatch(
     let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
     let rgb = (channel(color.red) << 16) | (channel(color.green) << 8) | channel(color.blue);
     gpui_kit::div()
-        .id(SharedString::from(format!("effect-swatch-{}", kind.label())))
+        .id(SharedString::from(format!(
+            "effect-swatch-{}",
+            kind.label()
+        )))
         .w(px(36.0))
         .h(px(18.0))
         .rounded_xs()

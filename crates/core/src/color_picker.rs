@@ -161,7 +161,11 @@ impl EditorSession {
                 ColorPickerTarget::Effect { kind } => {
                     // The end has been previewing the working color; Cancel
                     // puts the original back.
-                    let color = if commit { picker.color() } else { picker.original };
+                    let color = if commit {
+                        picker.color()
+                    } else {
+                        picker.original
+                    };
                     self.change_effect_color_for_preview(kind, color);
                 }
                 ColorPickerTarget::GradientMap { .. } => {
@@ -230,11 +234,12 @@ impl EditorSession {
         }
         self.finish_opacity_edit();
         let name = format!("Edit {}", editing.kind.label());
-        self.history.begin(&name, &self.document, self.active_layer_id);
-        if let Some(document) = self.document.as_mut() {
-            if let Some(layer) = document.layer_mut(layer_id) {
-                layer.effects = Some(effects);
-            }
+        self.history
+            .begin(&name, &self.document, self.active_layer_id);
+        if let Some(document) = self.document.as_mut()
+            && let Some(layer) = document.layer_mut(layer_id)
+        {
+            layer.effects = Some(effects);
         }
         self.history.end(&self.document, self.active_layer_id);
     }
@@ -243,10 +248,10 @@ impl EditorSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::PickerHSB;
     use crate::effects::{LayerEffectSelection, LayerEffects, ShadowEffect};
     use crate::geometry::CGPoint;
     use crate::raster::{Bitmap, ImportedImage};
-    use crate::document::PickerHSB;
 
     fn session() -> EditorSession {
         let mut s = EditorSession::new();

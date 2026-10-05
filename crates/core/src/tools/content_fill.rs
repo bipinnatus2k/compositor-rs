@@ -19,15 +19,7 @@ impl Rng {
 
 /// Mean squared difference between the known pixels around `p` and those
 /// around candidate donor `q` (an (2r+1)² patch).
-fn patch_match(
-    pixels: &Bitmap,
-    known: &[u8],
-    w: i64,
-    h: i64,
-    p: i64,
-    q: i64,
-    radius: i64,
-) -> f64 {
+fn patch_match(pixels: &Bitmap, known: &[u8], w: i64, h: i64, p: i64, q: i64, radius: i64) -> f64 {
     let (px, py) = (p % w, p / w);
     let (qx, qy) = (q % w, q / w);
     let mut sum = 0.0f64;
@@ -108,7 +100,8 @@ pub fn content_fill(pixels: &mut Bitmap, mask: &[u8]) -> bool {
                 for dx in -radius..=radius {
                     let sx = x + dx;
                     let sy = y + dy;
-                    if sx < 0 || sy < 0 || sx >= w || sy >= h || known[(sy * w + sx) as usize] == 0 {
+                    if sx < 0 || sy < 0 || sx >= w || sy >= h || known[(sy * w + sx) as usize] == 0
+                    {
                         ok = false;
                         break;
                     }
@@ -164,7 +157,11 @@ pub fn content_fill(pixels: &mut Bitmap, mask: &[u8]) -> bool {
                 if k < 4 {
                     let t = neighbors[k];
                     if t >= 0 {
-                        let chosen_t = if chosen[t as usize] >= 0 { chosen[t as usize] } else { t };
+                        let chosen_t = if chosen[t as usize] >= 0 {
+                            chosen[t as usize]
+                        } else {
+                            t
+                        };
                         q = chosen_t + (p - t);
                     }
                 } else {
@@ -233,7 +230,11 @@ pub fn content_fill(pixels: &mut Bitmap, mask: &[u8]) -> bool {
 
 /// `ContentFill.run`: fill the selection region of `image` from its own
 /// texture. Returns None when there is no usable source.
-pub fn run_fill(image: &Bitmap, selection: &SelectionClip, mapping: &CGAffineTransform) -> Option<Bitmap> {
+pub fn run_fill(
+    image: &Bitmap,
+    selection: &SelectionClip,
+    mapping: &CGAffineTransform,
+) -> Option<Bitmap> {
     let w = image.width;
     let h = image.height;
     let mut pixels = image.clone();
@@ -255,7 +256,7 @@ pub fn run(image: &Bitmap) -> Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{CGRect, CGPoint, CGSize};
+    use crate::geometry::{CGPoint, CGRect, CGSize};
     use crate::selection::{DocumentSelection, SelectionPath};
 
     fn rect_clip() -> SelectionClip {

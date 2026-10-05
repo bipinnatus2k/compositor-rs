@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::PaletteColor;
 use crate::geometry::{CGFloat, CGPoint, CGRect, CGSize};
-use crate::raster::{gaussian_blur_gray, Bitmap, GrayMask};
+use crate::raster::{Bitmap, GrayMask, gaussian_blur_gray};
 use crate::transform::LayerTransform;
 
 /// A line drawn around what the layer shows, outside its edge or inside it.
@@ -111,11 +111,16 @@ macro_rules! shadow_like {
                 let radians = self.angle * std::f64::consts::PI / 180.0;
                 // The shadow falls away from the light, and a layer's pixels
                 // count y downward.
-                CGSize::new(-radians.cos() * self.distance, radians.sin() * self.distance)
+                CGSize::new(
+                    -radians.cos() * self.distance,
+                    radians.sin() * self.distance,
+                )
             }
 
             pub fn is_valid(&self) -> bool {
-                [self.angle, self.distance, self.blur].iter().all(|v| v.is_finite())
+                [self.angle, self.distance, self.blur]
+                    .iter()
+                    .all(|v| v.is_finite())
                     && (-360.0..=360.0).contains(&self.angle)
                     && (0.0..=5000.0).contains(&self.distance)
                     && (0.0..=500.0).contains(&self.blur)
@@ -129,8 +134,18 @@ macro_rules! shadow_like {
     };
 }
 
-shadow_like!(ShadowEffect, "default_shadow_distance", "default_shadow_blur", "default_shadow_opacity");
-shadow_like!(InnerShadowEffect, "default_inner_distance", "default_inner_blur", "default_inner_opacity");
+shadow_like!(
+    ShadowEffect,
+    "default_shadow_distance",
+    "default_shadow_blur",
+    "default_shadow_opacity"
+);
+shadow_like!(
+    InnerShadowEffect,
+    "default_inner_distance",
+    "default_inner_blur",
+    "default_inner_opacity"
+);
 
 fn default_shadow_distance() -> CGFloat {
     20.0
@@ -266,8 +281,16 @@ macro_rules! glow_like {
     };
 }
 
-glow_like!(OuterGlowEffect, "default_outer_size", "default_outer_opacity");
-glow_like!(InnerGlowEffect, "default_inner_glow_size", "default_inner_glow_opacity");
+glow_like!(
+    OuterGlowEffect,
+    "default_outer_size",
+    "default_outer_opacity"
+);
+glow_like!(
+    InnerGlowEffect,
+    "default_inner_glow_size",
+    "default_inner_glow_opacity"
+);
 
 fn default_outer_size() -> CGFloat {
     20.0
@@ -400,8 +423,12 @@ impl LayerEffects {
         match kind {
             LayerEffectKind::Stroke => self.stroke.map(|s| s.is_enabled()).unwrap_or(false),
             LayerEffectKind::Shadow => self.shadow.map(|s| s.is_enabled()).unwrap_or(false),
-            LayerEffectKind::ColorOverlay => self.color_overlay.map(|s| s.is_enabled()).unwrap_or(false),
-            LayerEffectKind::InnerShadow => self.inner_shadow.map(|s| s.is_enabled()).unwrap_or(false),
+            LayerEffectKind::ColorOverlay => {
+                self.color_overlay.map(|s| s.is_enabled()).unwrap_or(false)
+            }
+            LayerEffectKind::InnerShadow => {
+                self.inner_shadow.map(|s| s.is_enabled()).unwrap_or(false)
+            }
             LayerEffectKind::OuterGlow => self.outer_glow.map(|s| s.is_enabled()).unwrap_or(false),
             LayerEffectKind::InnerGlow => self.inner_glow.map(|s| s.is_enabled()).unwrap_or(false),
         }
@@ -505,7 +532,13 @@ fn levels_mask(levels: &[f32], width: usize, height: usize) -> GrayMask {
 
 /// The largest (or smallest) value within `reach` on each side: two
 /// sliding-window passes (`LayerEffectsRenderer.extreme`).
-pub fn extreme(source: &[f32], width: usize, height: usize, reach: usize, smallest: bool) -> Vec<f32> {
+pub fn extreme(
+    source: &[f32],
+    width: usize,
+    height: usize,
+    reach: usize,
+    smallest: bool,
+) -> Vec<f32> {
     if width == 0 || height == 0 || source.len() != width * height {
         return Vec::new();
     }
@@ -513,7 +546,12 @@ pub fn extreme(source: &[f32], width: usize, height: usize, reach: usize, smalle
     let mut pass = vec![0.0f32; source.len()];
     let mut result = vec![0.0f32; source.len()];
     let mut queue = vec![0usize; width.max(height)];
-    let mut sweep = |input: &[f32], output: &mut [f32], lines: usize, count: usize, line_step: usize, element_step: usize| {
+    let mut sweep = |input: &[f32],
+                     output: &mut [f32],
+                     lines: usize,
+                     count: usize,
+                     line_step: usize,
+                     element_step: usize| {
         for line in 0..lines {
             let base = line * line_step;
             let mut head = 0usize;
@@ -524,7 +562,11 @@ pub fn extreme(source: &[f32], width: usize, height: usize, reach: usize, smalle
                     let value = input[base + next * element_step];
                     while tail > head {
                         let previous = input[base + queue[tail - 1] * element_step];
-                        if if smallest { previous < value } else { previous > value } {
+                        if if smallest {
+                            previous < value
+                        } else {
+                            previous > value
+                        } {
                             break;
                         }
                         tail -= 1;
@@ -537,8 +579,11 @@ pub fn extreme(source: &[f32], width: usize, height: usize, reach: usize, smalle
                     head += 1;
                 }
                 let outside = center < radius || center + radius >= count;
-                output[base + center * element_step] =
-                    if smallest && outside { 0.0 } else { input[base + queue[head] * element_step] };
+                output[base + center * element_step] = if smallest && outside {
+                    0.0
+                } else {
+                    input[base + queue[head] * element_step]
+                };
             }
         }
     };
@@ -548,7 +593,13 @@ pub fn extreme(source: &[f32], width: usize, height: usize, reach: usize, smalle
 }
 
 /// The layer's shape alpha as a gray coverage in a larger canvas, optionally blurred.
-fn shape_coverage(image: &Bitmap, placed: CGRect, width: usize, height: usize, blur: CGFloat) -> GrayMask {
+fn shape_coverage(
+    image: &Bitmap,
+    placed: CGRect,
+    width: usize,
+    height: usize,
+    blur: CGFloat,
+) -> GrayMask {
     let mut mask = GrayMask::new(width, height);
     // The source's alpha, drawn into the placed rect (nearest, as BrushRaster.draw).
     if placed.is_null() || placed.is_empty() {
@@ -556,12 +607,12 @@ fn shape_coverage(image: &Bitmap, placed: CGRect, width: usize, height: usize, b
     }
     for y in 0..height {
         let v = (y as f64 + 0.5 - placed.min_y()) / placed.height();
-        if v < 0.0 || v >= 1.0 {
+        if !(0.0..1.0).contains(&v) {
             continue;
         }
         for x in 0..width {
             let u = (x as f64 + 0.5 - placed.min_x()) / placed.width();
-            if u < 0.0 || u >= 1.0 {
+            if !(0.0..1.0).contains(&u) {
                 continue;
             }
             let sx = (u * image.width as f64) as usize;
@@ -577,7 +628,11 @@ fn shape_coverage(image: &Bitmap, placed: CGRect, width: usize, height: usize, b
 
 /// `LayerEffectsRenderer.render`: `image` with `effects` around it, on a
 /// canvas grown by the effect margin. Returns the composited bitmap and inset.
-pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEffects) -> (Bitmap, CGFloat) {
+pub fn render_effects(
+    image: &Bitmap,
+    mask: Option<&GrayMask>,
+    effects: &LayerEffects,
+) -> (Bitmap, CGFloat) {
     let effects = effects.visible();
     let inset = effect_margin(&effects);
     let width = image.width + inset as usize * 2;
@@ -620,7 +675,7 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
     };
     let placed = CGRect::new(inset, inset, image.width as f64, image.height as f64);
     let mut canvas = Bitmap::new(width, height);
-    let full = CGRect::new(0.0, 0.0, width as f64, height as f64);
+    let _full = CGRect::new(0.0, 0.0, width as f64, height as f64);
 
     let fill = |canvas: &mut Bitmap, color: PaletteColor, alpha: f64, coverage: &GrayMask| {
         let cr = (color.red * 255.0).round() as u8;
@@ -645,7 +700,8 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
                     0 => cr,
                     1 => cg,
                     _ => cb,
-                } as f32 / 255.0;
+                } as f32
+                    / 255.0;
                 // Coverage multiplies alpha only; color stays as given (as
                 // BrushRaster.fill does: the color is not premultiplied by the
                 // gray coverage twice).
@@ -657,35 +713,40 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
         }
     };
 
-    if let Some(shadow) = effects.shadow {
-        if shadow.opacity > 0.0 {
-            let offset = shadow.offset();
-            let alpha = shape_coverage(
-                &shown,
-                placed.offset_by(offset.width, offset.height),
-                width,
-                height,
-                shadow.blur,
-            );
-            fill(&mut canvas, shadow.color(), shadow.opacity, &alpha);
-        }
+    if let Some(shadow) = effects.shadow
+        && shadow.opacity > 0.0
+    {
+        let offset = shadow.offset();
+        let alpha = shape_coverage(
+            &shown,
+            placed.offset_by(offset.width, offset.height),
+            width,
+            height,
+            shadow.blur,
+        );
+        fill(&mut canvas, shadow.color(), shadow.opacity, &alpha);
     }
-    if let Some(glow) = effects.outer_glow {
-        if glow.opacity > 0.0 {
-            let shape = shape_coverage(&shown, placed, width, height, 0.0);
-            let soft = shape_coverage(&shown, placed, width, height, glow.size);
-            let mut inside = mask_levels(&soft);
-            let outside = mask_levels(&shape);
-            for (i, v) in inside.iter_mut().enumerate() {
-                *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
-            }
-            fill(&mut canvas, glow.color(), glow.opacity, &levels_mask(&inside, width, height));
+    if let Some(glow) = effects.outer_glow
+        && glow.opacity > 0.0
+    {
+        let shape = shape_coverage(&shown, placed, width, height, 0.0);
+        let soft = shape_coverage(&shown, placed, width, height, glow.size);
+        let mut inside = mask_levels(&soft);
+        let outside = mask_levels(&shape);
+        for (i, v) in inside.iter_mut().enumerate() {
+            *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
         }
+        fill(
+            &mut canvas,
+            glow.color(),
+            glow.opacity,
+            &levels_mask(&inside, width, height),
+        );
     }
     // An outside stroke sits behind the layer's own pixels; an inside one is
     // drawn over them.
     let stroke = effects.stroke.filter(|s| s.size > 0.0 && s.opacity > 0.0);
-    let mut draw_stroke = |canvas: &mut Bitmap, stroke: &StrokeEffect| {
+    let draw_stroke = |canvas: &mut Bitmap, stroke: &StrokeEffect| {
         let shape = shape_coverage(&shown, placed, width, height, 0.0);
         let mut levels = mask_levels(&shape);
         let reach = (stroke.size.round() as usize).max(1);
@@ -698,12 +759,17 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
                 (moved[i] - *v).max(0.0)
             };
         }
-        fill(canvas, stroke.color(), stroke.opacity, &levels_mask(&levels, width, height));
+        fill(
+            canvas,
+            stroke.color(),
+            stroke.opacity,
+            &levels_mask(&levels, width, height),
+        );
     };
-    if let Some(stroke) = &stroke {
-        if !stroke.inside {
-            draw_stroke(&mut canvas, stroke);
-        }
+    if let Some(stroke) = &stroke
+        && !stroke.inside
+    {
+        draw_stroke(&mut canvas, stroke);
     }
     // The pixels themselves, source-over.
     {
@@ -716,47 +782,60 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
         );
         canvas = over;
     }
-    if let Some(overlay) = effects.color_overlay {
-        if overlay.is_enabled() && overlay.opacity > 0.0 {
-            let shape = shape_coverage(&shown, placed, width, height, 0.0);
-            fill(&mut canvas, overlay.color(), overlay.opacity, &shape);
-        }
+    if let Some(overlay) = effects.color_overlay
+        && overlay.is_enabled()
+        && overlay.opacity > 0.0
+    {
+        let shape = shape_coverage(&shown, placed, width, height, 0.0);
+        fill(&mut canvas, overlay.color(), overlay.opacity, &shape);
     }
-    if let Some(inner_glow) = effects.inner_glow {
-        if inner_glow.is_enabled() && inner_glow.opacity > 0.0 {
-            let shape = shape_coverage(&shown, placed, width, height, 0.0);
-            let blurred = shape_coverage(&shown, placed, width, height, inner_glow.size);
-            let mut inside = mask_levels(&shape);
-            let outside = mask_levels(&blurred);
-            for (i, v) in inside.iter_mut().enumerate() {
-                *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
-            }
-            fill(&mut canvas, inner_glow.color(), inner_glow.opacity, &levels_mask(&inside, width, height));
+    if let Some(inner_glow) = effects.inner_glow
+        && inner_glow.is_enabled()
+        && inner_glow.opacity > 0.0
+    {
+        let shape = shape_coverage(&shown, placed, width, height, 0.0);
+        let blurred = shape_coverage(&shown, placed, width, height, inner_glow.size);
+        let mut inside = mask_levels(&shape);
+        let outside = mask_levels(&blurred);
+        for (i, v) in inside.iter_mut().enumerate() {
+            *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
         }
+        fill(
+            &mut canvas,
+            inner_glow.color(),
+            inner_glow.opacity,
+            &levels_mask(&inside, width, height),
+        );
     }
-    if let Some(inner) = effects.inner_shadow {
-        if inner.is_enabled() && inner.opacity > 0.0 {
-            let shape = shape_coverage(&shown, placed, width, height, 0.0);
-            let offset = inner.offset();
-            let moved = shape_coverage(
-                &shown,
-                placed.offset_by(offset.width, offset.height),
-                width,
-                height,
-                inner.blur,
-            );
-            let mut inside = mask_levels(&shape);
-            let outside = mask_levels(&moved);
-            for (i, v) in inside.iter_mut().enumerate() {
-                *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
-            }
-            fill(&mut canvas, inner.color(), inner.opacity, &levels_mask(&inside, width, height));
+    if let Some(inner) = effects.inner_shadow
+        && inner.is_enabled()
+        && inner.opacity > 0.0
+    {
+        let shape = shape_coverage(&shown, placed, width, height, 0.0);
+        let offset = inner.offset();
+        let moved = shape_coverage(
+            &shown,
+            placed.offset_by(offset.width, offset.height),
+            width,
+            height,
+            inner.blur,
+        );
+        let mut inside = mask_levels(&shape);
+        let outside = mask_levels(&moved);
+        for (i, v) in inside.iter_mut().enumerate() {
+            *v = (*v * (1.0 - outside[i])).clamp(0.0, 1.0);
         }
+        fill(
+            &mut canvas,
+            inner.color(),
+            inner.opacity,
+            &levels_mask(&inside, width, height),
+        );
     }
-    if let Some(stroke) = &stroke {
-        if stroke.inside {
-            draw_stroke(&mut canvas, stroke);
-        }
+    if let Some(stroke) = &stroke
+        && stroke.inside
+    {
+        draw_stroke(&mut canvas, stroke);
     }
     (canvas, inset)
 }
@@ -765,10 +844,10 @@ pub fn render_effects(image: &Bitmap, mask: Option<&GrayMask>, effects: &LayerEf
 pub fn effect_margin(effects: &LayerEffects) -> CGFloat {
     let effects = effects.visible();
     let mut margin: CGFloat = 0.0;
-    if let Some(stroke) = effects.stroke {
-        if !stroke.inside {
-            margin = margin.max(stroke.size);
-        }
+    if let Some(stroke) = effects.stroke
+        && !stroke.inside
+    {
+        margin = margin.max(stroke.size);
     }
     if let Some(shadow) = effects.shadow {
         margin = margin.max(shadow.distance + shadow.blur * 3.0);
@@ -780,7 +859,11 @@ pub fn effect_margin(effects: &LayerEffects) -> CGFloat {
 }
 
 /// `LayerEffectsRenderer.placed`: the layer's transform grown by the margin.
-pub fn placed_transform(transform: &LayerTransform, image: &Bitmap, inset: CGFloat) -> LayerTransform {
+pub fn placed_transform(
+    transform: &LayerTransform,
+    image: &Bitmap,
+    inset: CGFloat,
+) -> LayerTransform {
     let mut grown = *transform;
     let width = image.width as f64;
     let height = image.height as f64;
@@ -840,7 +923,10 @@ mod tests {
         e.shadow = Some(ShadowEffect::default());
         assert_eq!(e.kinds(), vec![LayerEffectKind::Shadow]);
         e.set_color(PaletteColor::new(1.0, 0.0, 0.0), LayerEffectKind::Shadow);
-        assert_eq!(e.color(LayerEffectKind::Shadow), Some(PaletteColor::new(1.0, 0.0, 0.0)));
+        assert_eq!(
+            e.color(LayerEffectKind::Shadow),
+            Some(PaletteColor::new(1.0, 0.0, 0.0))
+        );
         e.set_enabled(false, LayerEffectKind::Shadow);
         assert!(!e.is_enabled(LayerEffectKind::Shadow));
         assert!(e.visible().shadow.is_none());
@@ -899,7 +985,10 @@ mod tests {
             (0..result.height).any(|y| (0..result.width).any(|x| result.pixel(x, y) == black)),
             "a black shadow pixel is rendered"
         );
-        assert!(result.height >= 4 + inset as usize, "the inset reserves room");
+        assert!(
+            result.height >= 4 + inset as usize,
+            "the inset reserves room"
+        );
     }
 
     #[test]

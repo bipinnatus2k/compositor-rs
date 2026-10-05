@@ -11,7 +11,7 @@
 //! is a pure function — so "copies are cached" is asserted as determinism.
 
 use compositor_core::geometry::CGAffineTransform;
-use compositor_core::raster::{draw_affine, downsample_level, halve, resample, Bitmap};
+use compositor_core::raster::{Bitmap, downsample_level, draw_affine, halve, resample};
 use compositor_core::transform::LayerSampling;
 
 /// An opaque RGBA image whose pixel colors come from `gray(x, y)`
@@ -88,14 +88,13 @@ fn fine_stripes_average_to_flat_gray_without_shimmer() {
     // The outermost pixels fade into the transparent edge; judge the inside.
     let values: Vec<f64> = (4..252).map(|x| pixels.pixel(x, 16)[0] as f64).collect();
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let spread = (values
-        .iter()
-        .map(|v| (v - mean) * (v - mean))
-        .sum::<f64>()
-        / values.len() as f64)
-        .sqrt();
+    let spread =
+        (values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / values.len() as f64).sqrt();
     assert!((mean - 127.5).abs() < 8.0, "mean {mean}");
-    assert!(spread < 6.0, "stripes shimmer after shrinking: spread {spread}");
+    assert!(
+        spread < 6.0,
+        "stripes shimmer after shrinking: spread {spread}"
+    );
 }
 
 /// Swift `translucentEdgesStayValidAndMasksStayGray`.
@@ -130,7 +129,15 @@ fn translucent_edges_stay_valid_and_masks_stay_gray() {
     let mut mask = Bitmap::new(512, 512);
     for y in 0..512 {
         for x in 0..512 {
-            mask.set_pixel(x, y, if x < 256 { [255, 255, 255, 255] } else { [0, 0, 0, 255] });
+            mask.set_pixel(
+                x,
+                y,
+                if x < 256 {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                },
+            );
         }
     }
     let level = halve(&halve(&mask));

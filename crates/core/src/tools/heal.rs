@@ -63,11 +63,7 @@ fn heal_score(
             n += 1;
         }
     }
-    if n > 0 {
-        sum / n as f64
-    } else {
-        f64::INFINITY
-    }
+    if n > 0 { sum / n as f64 } else { f64::INFINITY }
 }
 
 /// Solves for smooth values over HOLE pixels, fixed to the RING values around
@@ -77,8 +73,8 @@ fn heal_solve(value: &mut [f32], role: &[u8], w: i64, h: i64, depth: i32) {
     let mut iterations = 300i64;
     let (w, h) = (w as usize, h as usize);
     if w > 32 && h > 32 && depth < 16 {
-        let cw = (w + 1) / 2;
-        let ch = (h + 1) / 2;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
         let mut coarse = vec![0.0f32; cw * ch * 4];
         let mut coarse_role = vec![OUTSIDE; cw * ch];
         for y in 0..ch {
@@ -249,7 +245,11 @@ pub(crate) fn spot_heal_offset(
         for x in 0..ww {
             let x = x as usize;
             prefix[x + 1] = prefix[x]
-                + if role[y * ww as usize + x] == HOLE { 1i64 } else { 0i64 };
+                + if role[y * ww as usize + x] == HOLE {
+                    1i64
+                } else {
+                    0i64
+                };
         }
         for x in 0..ww {
             let x = x as usize;
@@ -264,7 +264,11 @@ pub(crate) fn spot_heal_offset(
         for y in 0..wh {
             let y = y as usize;
             prefix[y + 1] = prefix[y]
-                + if near[y * ww as usize + x] { 1i64 } else { 0i64 };
+                + if near[y * ww as usize + x] {
+                    1i64
+                } else {
+                    0i64
+                };
         }
         for y in 0..wh {
             let y = y as usize;
@@ -298,7 +302,11 @@ pub(crate) fn spot_heal_offset(
                 if !score.is_finite() {
                     continue;
                 }
-                score *= if mode == 2 { 1.0 + 0.6 * f as f64 } else { 1.0 + 0.1 * f as f64 };
+                score *= if mode == 2 {
+                    1.0 + 0.6 * f as f64
+                } else {
+                    1.0 + 0.1 * f as f64
+                };
                 if score < best {
                     best = score;
                     ox = dx;
@@ -408,9 +416,7 @@ pub(crate) fn spot_heal_offset(
             let mut grain = 0.0f64;
             if !have_source {
                 let key = heal_hash(
-                    seed ^ heal_hash(
-                        ((iy as i64 + key_dy) * key_w + ix as i64 + key_dx) as u32,
-                    ),
+                    seed ^ heal_hash(((iy as i64 + key_dy) * key_w + ix as i64 + key_dx) as u32),
                 );
                 let u1 = heal_unit(key);
                 let u2 = heal_unit(key ^ 0x68e31da4);
@@ -621,7 +627,10 @@ mod tests {
         let left = img.pixel(18, 24)[0] as i32;
         let right = img.pixel(21, 24)[0] as i32;
         assert!(right > left + 15, "left={left} right={right}");
-        assert!(right > 215, "right column must pick up its own surround, got {right}");
+        assert!(
+            right > 215,
+            "right column must pick up its own surround, got {right}"
+        );
     }
 
     #[test]

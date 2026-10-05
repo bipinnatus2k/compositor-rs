@@ -30,14 +30,20 @@ pub enum PsdError {
 impl PsdError {
     pub fn error_description(&self) -> &'static str {
         match self {
-            PsdError::Truncated => "The Photoshop file could not be read. It may be damaged or incomplete.",
-            PsdError::UnsupportedVersion => "Large Document (.psb) Photoshop files aren\u{2019}t supported.",
+            PsdError::Truncated => {
+                "The Photoshop file could not be read. It may be damaged or incomplete."
+            }
+            PsdError::UnsupportedVersion => {
+                "Large Document (.psb) Photoshop files aren\u{2019}t supported."
+            }
             PsdError::UnsupportedColorMode => "Only 8-bit RGB Photoshop files can be imported.",
             PsdError::UnsupportedDepth => "Only 8-bit RGB Photoshop files can be imported.",
             PsdError::UnsupportedCompression => {
                 "This Photoshop file uses a layer compression method that isn\u{2019}t supported."
             }
-            PsdError::Unreadable => "The image could not be read. It may be damaged or unavailable.",
+            PsdError::Unreadable => {
+                "The image could not be read. It may be damaged or unavailable."
+            }
             PsdError::TooLarge => {
                 "This import exceeds the current 100-megapixel document budget or 30,000-pixel side limit."
             }

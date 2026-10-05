@@ -31,7 +31,9 @@ pub fn check_export_size(width: usize, height: usize) -> Result<(), &'static str
         || !(1..=30_000).contains(&height)
         || width * height > 100_000_000
     {
-        return Err("Image export supports canvases up to 100 megapixels and 30,000 pixels per side.");
+        return Err(
+            "Image export supports canvases up to 100 megapixels and 30,000 pixels per side.",
+        );
     }
     Ok(())
 }
@@ -53,8 +55,8 @@ pub fn flatten_on_matte(composite: &Bitmap, red: f64, green: f64, blue: f64) -> 
         }
         let rest = 255 - alpha;
         for (channel, m) in matte.iter().enumerate() {
-            pixel[channel] = (((pixel[channel] as u32 * 255 + m * rest + 127) / 255) as usize)
-                .min(255) as u8;
+            pixel[channel] =
+                (((pixel[channel] as u32 * 255 + m * rest + 127) / 255) as usize).min(255) as u8;
         }
         pixel[3] = 255;
     }
@@ -71,7 +73,10 @@ pub fn png_data(composite: &Bitmap) -> Option<Vec<u8>> {
     let image = to_rgba_image(composite);
     let mut buffer = Vec::new();
     image
-        .write_to(&mut std::io::Cursor::new(&mut buffer), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut buffer),
+            image::ImageFormat::Png,
+        )
         .ok()?;
     Some(buffer)
 }
@@ -137,8 +142,7 @@ pub fn jpeg_data(composite: &Bitmap, options: &JpegOptions) -> Option<Vec<u8>> {
     }
     let mut buffer = Vec::new();
     {
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
         encoder
             .encode(
                 &rgb,
@@ -191,7 +195,12 @@ pub fn preview_thumbnail(composite: &Bitmap) -> Bitmap {
     let scale = limit / longest;
     let width = ((composite.width as f64 * scale).round() as usize).max(1);
     let height = ((composite.height as f64 * scale).round() as usize).max(1);
-    crate::raster::resample(composite, width, height, crate::transform::LayerSampling::High)
+    crate::raster::resample(
+        composite,
+        width,
+        height,
+        crate::transform::LayerSampling::High,
+    )
 }
 
 fn to_rgba_image(composite: &Bitmap) -> image::RgbaImage {
@@ -248,7 +257,11 @@ mod tests {
         assert!(px[1] > 110 && px[1] < 130, "white shows through: {:?}", px);
         let dark = flatten_on_matte(&composite, 0.0, 0.0, 0.0);
         let px = dark.pixel(0, 0);
-        assert!(px[0] <= 130 && px[0] >= 120, "black matte keeps it dark: {:?}", px);
+        assert!(
+            px[0] <= 130 && px[0] >= 120,
+            "black matte keeps it dark: {:?}",
+            px
+        );
         assert!(px[1] <= 3, "{:?}", px);
     }
 
@@ -267,7 +280,14 @@ mod tests {
             pixel[2] = 250;
             pixel[3] = 255;
         }
-        let data = jpeg_data(&opaque, &JpegOptions { quality: 1.0, ..Default::default() }).unwrap();
+        let data = jpeg_data(
+            &opaque,
+            &JpegOptions {
+                quality: 1.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&data).unwrap().to_rgba8();
         let px = decoded.get_pixel(1, 1);
         assert!(px[0] > 230, "high quality keeps near-white: {:?}", px);
@@ -280,7 +300,11 @@ mod tests {
         assert_eq!(preview.width, 1000);
         assert_eq!(preview.height, 500);
         let small = Bitmap::new(800, 600);
-        assert_eq!(preview_thumbnail(&small).width, 800, "small canvases pass through");
+        assert_eq!(
+            preview_thumbnail(&small).width,
+            800,
+            "small canvases pass through"
+        );
     }
 
     #[test]

@@ -69,69 +69,393 @@ pub struct ShortcutSpec {
 /// (a test enforces that the two tables stay in lockstep).
 pub const CATALOG: &[ShortcutSpec] = &[
     // Tools (Swift group "Canvas & Layers", titles from ShortcutDefinition.all).
-    ShortcutSpec { id: "tool.move", title: "Move / Transform tool", group: Group::CanvasLayers, context: None, defaults: &["v"] },
-    ShortcutSpec { id: "tool.marquee", title: "Marquee / cycle shape", group: Group::CanvasLayers, context: None, defaults: &["m"] },
-    ShortcutSpec { id: "tool.lasso", title: "Lasso / cycle mode", group: Group::CanvasLayers, context: None, defaults: &["l"] },
-    ShortcutSpec { id: "tool.wand", title: "Magic Wand", group: Group::CanvasLayers, context: None, defaults: &["w"] },
-    ShortcutSpec { id: "tool.crop", title: "Crop tool", group: Group::CanvasLayers, context: None, defaults: &["c"] },
-    ShortcutSpec { id: "tool.brush", title: "Brush tool", group: Group::CanvasLayers, context: None, defaults: &["b"] },
-    ShortcutSpec { id: "tool.eraser", title: "Eraser", group: Group::CanvasLayers, context: None, defaults: &["e"] },
-    ShortcutSpec { id: "tool.healing", title: "Spot Healing", group: Group::CanvasLayers, context: None, defaults: &["j"] },
-    ShortcutSpec { id: "tool.clone", title: "Clone Stamp", group: Group::CanvasLayers, context: None, defaults: &["s"] },
-    ShortcutSpec { id: "tool.smear", title: "Blur / Smudge / Liquify", group: Group::CanvasLayers, context: None, defaults: &["r"] },
-    ShortcutSpec { id: "tool.gradient", title: "Gradient tool", group: Group::CanvasLayers, context: None, defaults: &["g"] },
-    ShortcutSpec { id: "tool.shape", title: "Shape tool", group: Group::CanvasLayers, context: None, defaults: &["u"] },
-    ShortcutSpec { id: "tool.type", title: "Type tool", group: Group::CanvasLayers, context: None, defaults: &["t"] },
-    ShortcutSpec { id: "tool.eyedropper", title: "Eyedropper tool", group: Group::CanvasLayers, context: None, defaults: &["i"] },
-    ShortcutSpec { id: "tool.hand", title: "Hand tool", group: Group::CanvasLayers, context: None, defaults: &["h"] },
-    ShortcutSpec { id: "tool.zoom", title: "Zoom tool", group: Group::CanvasLayers, context: None, defaults: &["z"] },
+    ShortcutSpec {
+        id: "tool.move",
+        title: "Move / Transform tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["v"],
+    },
+    ShortcutSpec {
+        id: "tool.marquee",
+        title: "Marquee / cycle shape",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["m"],
+    },
+    ShortcutSpec {
+        id: "tool.lasso",
+        title: "Lasso / cycle mode",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["l"],
+    },
+    ShortcutSpec {
+        id: "tool.wand",
+        title: "Magic Wand",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["w"],
+    },
+    ShortcutSpec {
+        id: "tool.crop",
+        title: "Crop tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["c"],
+    },
+    ShortcutSpec {
+        id: "tool.brush",
+        title: "Brush tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["b"],
+    },
+    ShortcutSpec {
+        id: "tool.eraser",
+        title: "Eraser",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["e"],
+    },
+    ShortcutSpec {
+        id: "tool.healing",
+        title: "Spot Healing",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["j"],
+    },
+    ShortcutSpec {
+        id: "tool.clone",
+        title: "Clone Stamp",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["s"],
+    },
+    ShortcutSpec {
+        id: "tool.smear",
+        title: "Blur / Smudge / Liquify",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["r"],
+    },
+    ShortcutSpec {
+        id: "tool.gradient",
+        title: "Gradient tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["g"],
+    },
+    ShortcutSpec {
+        id: "tool.shape",
+        title: "Shape tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["u"],
+    },
+    ShortcutSpec {
+        id: "tool.type",
+        title: "Type tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["t"],
+    },
+    ShortcutSpec {
+        id: "tool.eyedropper",
+        title: "Eyedropper tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["i"],
+    },
+    ShortcutSpec {
+        id: "tool.hand",
+        title: "Hand tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["h"],
+    },
+    ShortcutSpec {
+        id: "tool.zoom",
+        title: "Zoom tool",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["z"],
+    },
     // Palette
-    ShortcutSpec { id: "palette.swap", title: "Swap foreground/background", group: Group::CanvasLayers, context: None, defaults: &["x"] },
-    ShortcutSpec { id: "palette.reset", title: "Reset colors", group: Group::CanvasLayers, context: None, defaults: &["d"] },
-    ShortcutSpec { id: "tool.cycle-mode", title: "Cycle tool mode", group: Group::CanvasLayers, context: Some("Compositor"), defaults: &["tab"] },
+    ShortcutSpec {
+        id: "palette.swap",
+        title: "Swap foreground/background",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["x"],
+    },
+    ShortcutSpec {
+        id: "palette.reset",
+        title: "Reset colors",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["d"],
+    },
+    ShortcutSpec {
+        id: "tool.cycle-mode",
+        title: "Cycle tool mode",
+        group: Group::CanvasLayers,
+        context: Some("Compositor"),
+        defaults: &["tab"],
+    },
     // File
-    ShortcutSpec { id: "file.new", title: "New Canvas", group: Group::Menus, context: None, defaults: &["ctrl-n"] },
-    ShortcutSpec { id: "file.open", title: "Open Project", group: Group::Menus, context: None, defaults: &["ctrl-o"] },
-    ShortcutSpec { id: "file.save", title: "Save", group: Group::Menus, context: None, defaults: &["ctrl-s"] },
-    ShortcutSpec { id: "file.save-as", title: "Save As", group: Group::Menus, context: None, defaults: &["ctrl-shift-s"] },
-    ShortcutSpec { id: "file.export-png", title: "Export PNG", group: Group::Menus, context: None, defaults: &["ctrl-shift-e"] },
-    ShortcutSpec { id: "file.export-jpeg", title: "Export JPEG", group: Group::Menus, context: None, defaults: &["ctrl-alt-shift-s"] },
-    ShortcutSpec { id: "file.close", title: "Close Project", group: Group::Menus, context: None, defaults: &["ctrl-w"] },
-    ShortcutSpec { id: "file.quit", title: "Quit Compositor", group: Group::Menus, context: None, defaults: &["ctrl-q"] },
+    ShortcutSpec {
+        id: "file.new",
+        title: "New Canvas",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-n"],
+    },
+    ShortcutSpec {
+        id: "file.open",
+        title: "Open Project",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-o"],
+    },
+    ShortcutSpec {
+        id: "file.save",
+        title: "Save",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-s"],
+    },
+    ShortcutSpec {
+        id: "file.save-as",
+        title: "Save As",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-s"],
+    },
+    ShortcutSpec {
+        id: "file.export-png",
+        title: "Export PNG",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-e"],
+    },
+    ShortcutSpec {
+        id: "file.export-jpeg",
+        title: "Export JPEG",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-shift-s"],
+    },
+    ShortcutSpec {
+        id: "file.close",
+        title: "Close Project",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-w"],
+    },
+    ShortcutSpec {
+        id: "file.quit",
+        title: "Quit Compositor",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-q"],
+    },
     // Edit
-    ShortcutSpec { id: "edit.undo", title: "Undo", group: Group::Menus, context: None, defaults: &["ctrl-z"] },
-    ShortcutSpec { id: "edit.redo", title: "Redo", group: Group::Menus, context: None, defaults: &["ctrl-shift-z"] },
-    ShortcutSpec { id: "edit.free-transform", title: "Transform Layer / Selection", group: Group::Menus, context: None, defaults: &["ctrl-t"] },
-    ShortcutSpec { id: "edit.cut", title: "Cut", group: Group::Menus, context: None, defaults: &["ctrl-x"] },
-    ShortcutSpec { id: "edit.copy", title: "Copy", group: Group::Menus, context: None, defaults: &["ctrl-c"] },
-    ShortcutSpec { id: "edit.copy-merged", title: "Copy Merged", group: Group::Menus, context: None, defaults: &["ctrl-shift-c"] },
-    ShortcutSpec { id: "edit.paste", title: "Paste", group: Group::Menus, context: None, defaults: &["ctrl-v"] },
+    ShortcutSpec {
+        id: "edit.undo",
+        title: "Undo",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-z"],
+    },
+    ShortcutSpec {
+        id: "edit.redo",
+        title: "Redo",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-z"],
+    },
+    ShortcutSpec {
+        id: "edit.free-transform",
+        title: "Transform Layer / Selection",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-t"],
+    },
+    ShortcutSpec {
+        id: "edit.cut",
+        title: "Cut",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-x"],
+    },
+    ShortcutSpec {
+        id: "edit.copy",
+        title: "Copy",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-c"],
+    },
+    ShortcutSpec {
+        id: "edit.copy-merged",
+        title: "Copy Merged",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-c"],
+    },
+    ShortcutSpec {
+        id: "edit.paste",
+        title: "Paste",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-v"],
+    },
     // Photoshop's fill shortcuts: Option-Delete, Cmd-Delete, Shift-Delete
     // (the backspace variants are aliases of the same action).
-    ShortcutSpec { id: "edit.fill-foreground", title: "Fill with Foreground", group: Group::Menus, context: None, defaults: &["alt-delete", "alt-backspace"] },
-    ShortcutSpec { id: "edit.fill-background", title: "Fill with Background", group: Group::Menus, context: None, defaults: &["ctrl-delete", "ctrl-backspace"] },
-    ShortcutSpec { id: "edit.content-aware-fill", title: "Content-Aware Fill", group: Group::Menus, context: None, defaults: &["shift-delete", "shift-backspace"] },
-    ShortcutSpec { id: "view.transform-controls", title: "Show Transform Controls", group: Group::Menus, context: None, defaults: &["ctrl-h"] },
-    ShortcutSpec { id: "image.invert", title: "Invert Pixels / Mask", group: Group::Menus, context: None, defaults: &["ctrl-i"] },
-    ShortcutSpec { id: "image.curves", title: "Curves", group: Group::Menus, context: None, defaults: &["ctrl-m"] },
-    ShortcutSpec { id: "layer.clipping", title: "Toggle Clipping Mask", group: Group::Menus, context: None, defaults: &["ctrl-alt-g"] },
-    ShortcutSpec { id: "layer.move-down", title: "Move Layer Down", group: Group::Menus, context: None, defaults: &["ctrl-["] },
-    ShortcutSpec { id: "layer.move-up", title: "Move Layer Up", group: Group::Menus, context: None, defaults: &["ctrl-]"] },
+    ShortcutSpec {
+        id: "edit.fill-foreground",
+        title: "Fill with Foreground",
+        group: Group::Menus,
+        context: None,
+        defaults: &["alt-delete", "alt-backspace"],
+    },
+    ShortcutSpec {
+        id: "edit.fill-background",
+        title: "Fill with Background",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-delete", "ctrl-backspace"],
+    },
+    ShortcutSpec {
+        id: "edit.content-aware-fill",
+        title: "Content-Aware Fill",
+        group: Group::Menus,
+        context: None,
+        defaults: &["shift-delete", "shift-backspace"],
+    },
+    ShortcutSpec {
+        id: "view.transform-controls",
+        title: "Show Transform Controls",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-h"],
+    },
+    ShortcutSpec {
+        id: "image.invert",
+        title: "Invert Pixels / Mask",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-i"],
+    },
+    ShortcutSpec {
+        id: "image.curves",
+        title: "Curves",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-m"],
+    },
+    ShortcutSpec {
+        id: "layer.clipping",
+        title: "Toggle Clipping Mask",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-g"],
+    },
+    ShortcutSpec {
+        id: "layer.move-down",
+        title: "Move Layer Down",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-["],
+    },
+    ShortcutSpec {
+        id: "layer.move-up",
+        title: "Move Layer Up",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-]"],
+    },
     // Guides / grid / snapping. `ctrl-shift-r` is a Rust extra alias of
     // "Show Guides" (Swift only binds ⌘;).
-    ShortcutSpec { id: "view.guides", title: "Show Guides", group: Group::Menus, context: None, defaults: &["ctrl-;", "ctrl-shift-r"] },
-    ShortcutSpec { id: "view.snap", title: "Snap", group: Group::Menus, context: None, defaults: &["ctrl-shift-;"] },
-    ShortcutSpec { id: "view.lock-guides", title: "Lock Guides", group: Group::Menus, context: None, defaults: &["ctrl-alt-;"] },
-    ShortcutSpec { id: "image.levels", title: "Levels", group: Group::Menus, context: None, defaults: &["ctrl-l"] },
-    ShortcutSpec { id: "image.hue-saturation", title: "Hue/Saturation", group: Group::Menus, context: None, defaults: &["ctrl-u"] },
+    ShortcutSpec {
+        id: "view.guides",
+        title: "Show Guides",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-;", "ctrl-shift-r"],
+    },
+    ShortcutSpec {
+        id: "view.snap",
+        title: "Snap",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-;"],
+    },
+    ShortcutSpec {
+        id: "view.lock-guides",
+        title: "Lock Guides",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-;"],
+    },
+    ShortcutSpec {
+        id: "image.levels",
+        title: "Levels",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-l"],
+    },
+    ShortcutSpec {
+        id: "image.hue-saturation",
+        title: "Hue/Saturation",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-u"],
+    },
     // Image
-    ShortcutSpec { id: "image.image-size", title: "Image Size", group: Group::Menus, context: None, defaults: &["ctrl-alt-i"] },
-    ShortcutSpec { id: "image.canvas-size", title: "Canvas Size", group: Group::Menus, context: None, defaults: &["ctrl-alt-c"] },
+    ShortcutSpec {
+        id: "image.image-size",
+        title: "Image Size",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-i"],
+    },
+    ShortcutSpec {
+        id: "image.canvas-size",
+        title: "Canvas Size",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-c"],
+    },
     // Layer
-    ShortcutSpec { id: "layer.new", title: "New Blank Layer", group: Group::Menus, context: None, defaults: &["ctrl-shift-n"] },
-    ShortcutSpec { id: "layer.duplicate", title: "Duplicate / Layer via Copy", group: Group::Menus, context: None, defaults: &["ctrl-j"] },
-    ShortcutSpec { id: "layer.merge", title: "Merge Layers", group: Group::Menus, context: None, defaults: &["ctrl-e"] },
-    ShortcutSpec { id: "layer.group", title: "Group Layers", group: Group::Menus, context: None, defaults: &["ctrl-g"] },
+    ShortcutSpec {
+        id: "layer.new",
+        title: "New Blank Layer",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-n"],
+    },
+    ShortcutSpec {
+        id: "layer.duplicate",
+        title: "Duplicate / Layer via Copy",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-j"],
+    },
+    ShortcutSpec {
+        id: "layer.merge",
+        title: "Merge Layers",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-e"],
+    },
+    ShortcutSpec {
+        id: "layer.group",
+        title: "Group Layers",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-g"],
+    },
     ShortcutSpec {
         id: "layer.delete",
         title: "Delete selection / layer / effect / lasso point",
@@ -140,50 +464,278 @@ pub const CATALOG: &[ShortcutSpec] = &[
         defaults: &["delete", "backspace"],
     },
     // Select
-    ShortcutSpec { id: "select.all", title: "Select All", group: Group::Menus, context: None, defaults: &["ctrl-a"] },
-    ShortcutSpec { id: "select.deselect", title: "Deselect", group: Group::Menus, context: None, defaults: &["ctrl-d"] },
-    ShortcutSpec { id: "select.invert", title: "Inverse Selection", group: Group::Menus, context: None, defaults: &["ctrl-shift-i"] },
-    ShortcutSpec { id: "select.feather", title: "Feather", group: Group::Menus, context: None, defaults: &["ctrl-alt-d"] },
-    ShortcutSpec { id: "select.expand", title: "Expand", group: Group::Menus, context: None, defaults: &["ctrl-alt-e"] },
+    ShortcutSpec {
+        id: "select.all",
+        title: "Select All",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-a"],
+    },
+    ShortcutSpec {
+        id: "select.deselect",
+        title: "Deselect",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-d"],
+    },
+    ShortcutSpec {
+        id: "select.invert",
+        title: "Inverse Selection",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-shift-i"],
+    },
+    ShortcutSpec {
+        id: "select.feather",
+        title: "Feather",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-d"],
+    },
+    ShortcutSpec {
+        id: "select.expand",
+        title: "Expand",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-e"],
+    },
     // Contract used to be bound as `alt-ctrl-c`, which parses to the same
     // chord as Canvas Size's `ctrl-alt-c` (gpui modifiers are
     // order-insensitive) — one of the two was dead in the keymap and the
     // Swift conflict check rejected the default table. Shift disambiguates.
-    ShortcutSpec { id: "select.contract", title: "Contract", group: Group::Menus, context: None, defaults: &["ctrl-alt-shift-c"] },
+    ShortcutSpec {
+        id: "select.contract",
+        title: "Contract",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-alt-shift-c"],
+    },
     // View
-    ShortcutSpec { id: "view.rulers", title: "Show Rulers", group: Group::Menus, context: None, defaults: &["ctrl-r"] },
-    ShortcutSpec { id: "view.grid", title: "Show Grid", group: Group::Menus, context: None, defaults: &["ctrl-'"] },
-    ShortcutSpec { id: "view.zoom-in", title: "Zoom In", group: Group::Menus, context: None, defaults: &["ctrl-=", "ctrl-+"] },
-    ShortcutSpec { id: "view.zoom-out", title: "Zoom Out", group: Group::Menus, context: None, defaults: &["ctrl--"] },
-    ShortcutSpec { id: "view.zoom-fit", title: "Fit Canvas", group: Group::Menus, context: None, defaults: &["ctrl-0"] },
-    ShortcutSpec { id: "view.zoom-100", title: "Actual Pixels", group: Group::Menus, context: None, defaults: &["ctrl-1"] },
+    ShortcutSpec {
+        id: "view.rulers",
+        title: "Show Rulers",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-r"],
+    },
+    ShortcutSpec {
+        id: "view.grid",
+        title: "Show Grid",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-'"],
+    },
+    ShortcutSpec {
+        id: "view.zoom-in",
+        title: "Zoom In",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-=", "ctrl-+"],
+    },
+    ShortcutSpec {
+        id: "view.zoom-out",
+        title: "Zoom Out",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl--"],
+    },
+    ShortcutSpec {
+        id: "view.zoom-fit",
+        title: "Fit Canvas",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-0"],
+    },
+    ShortcutSpec {
+        id: "view.zoom-100",
+        title: "Actual Pixels",
+        group: Group::Menus,
+        context: None,
+        defaults: &["ctrl-1"],
+    },
     // Canvas keys
-    ShortcutSpec { id: "nudge.left", title: "Nudge Left 1 px", group: Group::CanvasLayers, context: None, defaults: &["left"] },
-    ShortcutSpec { id: "nudge.right", title: "Nudge Right 1 px", group: Group::CanvasLayers, context: None, defaults: &["right"] },
-    ShortcutSpec { id: "nudge.up", title: "Nudge Up 1 px", group: Group::CanvasLayers, context: None, defaults: &["up"] },
-    ShortcutSpec { id: "nudge.down", title: "Nudge Down 1 px", group: Group::CanvasLayers, context: None, defaults: &["down"] },
-    ShortcutSpec { id: "nudge.left-10", title: "Nudge Left 10 px", group: Group::CanvasLayers, context: None, defaults: &["shift-left"] },
-    ShortcutSpec { id: "nudge.right-10", title: "Nudge Right 10 px", group: Group::CanvasLayers, context: None, defaults: &["shift-right"] },
-    ShortcutSpec { id: "nudge.up-10", title: "Nudge Up 10 px", group: Group::CanvasLayers, context: None, defaults: &["shift-up"] },
-    ShortcutSpec { id: "nudge.down-10", title: "Nudge Down 10 px", group: Group::CanvasLayers, context: None, defaults: &["shift-down"] },
-    ShortcutSpec { id: "nudge.pixels-left", title: "Move Selection Pixels Left 1 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-left"] },
-    ShortcutSpec { id: "nudge.pixels-right", title: "Move Selection Pixels Right 1 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-right"] },
-    ShortcutSpec { id: "nudge.pixels-up", title: "Move Selection Pixels Up 1 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-up"] },
-    ShortcutSpec { id: "nudge.pixels-down", title: "Move Selection Pixels Down 1 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-down"] },
-    ShortcutSpec { id: "nudge.pixels-left-10", title: "Move Selection Pixels Left 10 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-shift-left"] },
-    ShortcutSpec { id: "nudge.pixels-right-10", title: "Move Selection Pixels Right 10 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-shift-right"] },
-    ShortcutSpec { id: "nudge.pixels-up-10", title: "Move Selection Pixels Up 10 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-shift-up"] },
-    ShortcutSpec { id: "nudge.pixels-down-10", title: "Move Selection Pixels Down 10 px", group: Group::CanvasLayers, context: None, defaults: &["ctrl-shift-down"] },
-    ShortcutSpec { id: "brush.smaller", title: "Decrease brush size", group: Group::CanvasLayers, context: None, defaults: &["["] },
-    ShortcutSpec { id: "brush.larger", title: "Increase brush size", group: Group::CanvasLayers, context: None, defaults: &["]"] },
-    ShortcutSpec { id: "brush.softer", title: "Decrease brush hardness", group: Group::CanvasLayers, context: None, defaults: &["shift-["] },
-    ShortcutSpec { id: "brush.harder", title: "Increase brush hardness", group: Group::CanvasLayers, context: None, defaults: &["shift-]"] },
-    ShortcutSpec { id: "blend.previous", title: "Previous blend mode", group: Group::CanvasLayers, context: None, defaults: &["shift--"] },
-    ShortcutSpec { id: "blend.next", title: "Next blend mode", group: Group::CanvasLayers, context: None, defaults: &["shift-="] },
-    ShortcutSpec { id: "shape.cycle", title: "Cycle shape kind", group: Group::CanvasLayers, context: None, defaults: &["shift-u"] },
-    ShortcutSpec { id: "view.levels-preview", title: "Toggle Levels preview", group: Group::CanvasLayers, context: None, defaults: &["alt-p"] },
-    ShortcutSpec { id: "canvas.apply", title: "Apply current canvas operation", group: Group::CanvasLayers, context: Some("Compositor"), defaults: &["enter"] },
-    ShortcutSpec { id: "canvas.cancel", title: "Cancel current canvas operation", group: Group::CanvasLayers, context: Some("Compositor"), defaults: &["escape"] },
+    ShortcutSpec {
+        id: "nudge.left",
+        title: "Nudge Left 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["left"],
+    },
+    ShortcutSpec {
+        id: "nudge.right",
+        title: "Nudge Right 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["right"],
+    },
+    ShortcutSpec {
+        id: "nudge.up",
+        title: "Nudge Up 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["up"],
+    },
+    ShortcutSpec {
+        id: "nudge.down",
+        title: "Nudge Down 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["down"],
+    },
+    ShortcutSpec {
+        id: "nudge.left-10",
+        title: "Nudge Left 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-left"],
+    },
+    ShortcutSpec {
+        id: "nudge.right-10",
+        title: "Nudge Right 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-right"],
+    },
+    ShortcutSpec {
+        id: "nudge.up-10",
+        title: "Nudge Up 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-up"],
+    },
+    ShortcutSpec {
+        id: "nudge.down-10",
+        title: "Nudge Down 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-down"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-left",
+        title: "Move Selection Pixels Left 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-left"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-right",
+        title: "Move Selection Pixels Right 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-right"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-up",
+        title: "Move Selection Pixels Up 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-up"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-down",
+        title: "Move Selection Pixels Down 1 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-down"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-left-10",
+        title: "Move Selection Pixels Left 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-shift-left"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-right-10",
+        title: "Move Selection Pixels Right 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-shift-right"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-up-10",
+        title: "Move Selection Pixels Up 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-shift-up"],
+    },
+    ShortcutSpec {
+        id: "nudge.pixels-down-10",
+        title: "Move Selection Pixels Down 10 px",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["ctrl-shift-down"],
+    },
+    ShortcutSpec {
+        id: "brush.smaller",
+        title: "Decrease brush size",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["["],
+    },
+    ShortcutSpec {
+        id: "brush.larger",
+        title: "Increase brush size",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["]"],
+    },
+    ShortcutSpec {
+        id: "brush.softer",
+        title: "Decrease brush hardness",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-["],
+    },
+    ShortcutSpec {
+        id: "brush.harder",
+        title: "Increase brush hardness",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-]"],
+    },
+    ShortcutSpec {
+        id: "blend.previous",
+        title: "Previous blend mode",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift--"],
+    },
+    ShortcutSpec {
+        id: "blend.next",
+        title: "Next blend mode",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-="],
+    },
+    ShortcutSpec {
+        id: "shape.cycle",
+        title: "Cycle shape kind",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["shift-u"],
+    },
+    ShortcutSpec {
+        id: "view.levels-preview",
+        title: "Toggle Levels preview",
+        group: Group::CanvasLayers,
+        context: None,
+        defaults: &["alt-p"],
+    },
+    ShortcutSpec {
+        id: "canvas.apply",
+        title: "Apply current canvas operation",
+        group: Group::CanvasLayers,
+        context: Some("Compositor"),
+        defaults: &["enter"],
+    },
+    ShortcutSpec {
+        id: "canvas.cancel",
+        title: "Cancel current canvas operation",
+        group: Group::CanvasLayers,
+        context: Some("Compositor"),
+        defaults: &["escape"],
+    },
 ];
 
 /// Looks up a catalog entry by id.
@@ -227,7 +779,11 @@ pub enum ShortcutProblem {
     Reserved(String),
     /// The same chord is assigned to two actions ("... is assigned to both
     /// ... and ...").
-    Conflict { chord: String, first: String, second: String },
+    Conflict {
+        chord: String,
+        first: String,
+        second: String,
+    },
 }
 
 impl fmt::Display for ShortcutProblem {
@@ -245,7 +801,11 @@ impl fmt::Display for ShortcutProblem {
                 "Text-editing shortcuts need Ctrl or Alt so they do not replace normal typing (got \"{keystroke}\")."
             ),
             ShortcutProblem::Reserved(chord) => write!(f, "{chord} is reserved by the system."),
-            ShortcutProblem::Conflict { chord, first, second } => {
+            ShortcutProblem::Conflict {
+                chord,
+                first,
+                second,
+            } => {
                 write!(f, "{chord} is assigned to both {first} and {second}.")
             }
         }
@@ -315,7 +875,10 @@ impl ShortcutRegistry {
     /// [`load`]: Self::load
     /// [`load_or_default`]: Self::load_or_default
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
-        ShortcutRegistry { path: Some(path.into()), ..Self::default() }
+        ShortcutRegistry {
+            path: Some(path.into()),
+            ..Self::default()
+        }
     }
 
     /// The registry's persistence target, if any.
@@ -346,7 +909,9 @@ impl ShortcutRegistry {
 
     /// The key-context predicate for one action (from the catalog).
     pub fn context_for(&self, id: &str) -> Option<&'static str> {
-        spec(id).unwrap_or_else(|| panic!("unknown shortcut id: {id}")).context
+        spec(id)
+            .unwrap_or_else(|| panic!("unknown shortcut id: {id}"))
+            .context
     }
 
     /// The user override for one action, if any.
@@ -409,8 +974,7 @@ impl ShortcutRegistry {
     /// may share a chord.
     pub fn validate(&self) -> Result<(), ShortcutProblem> {
         for (id, keystroke) in &self.overrides {
-            let entry = spec(id)
-                .ok_or_else(|| ShortcutProblem::UnknownAction(id.clone()))?;
+            let entry = spec(id).ok_or_else(|| ShortcutProblem::UnknownAction(id.clone()))?;
             let chord = normalize(keystroke).map_err(|_| ShortcutProblem::InvalidChord {
                 action: entry.title.to_string(),
                 keystroke: keystroke.clone(),
@@ -492,9 +1056,15 @@ impl ShortcutRegistry {
     }
 
     fn load_from(&mut self, path: Option<&Path>) {
-        let Some(path) = path.or(self.path.as_deref()) else { return };
-        let Ok(text) = fs::read_to_string(path) else { return };
-        let Ok(stored) = serde_json::from_str::<StoredShortcuts>(&text) else { return };
+        let Some(path) = path.or(self.path.as_deref()) else {
+            return;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(stored) = serde_json::from_str::<StoredShortcuts>(&text) else {
+            return;
+        };
         if stored.version != STORAGE_VERSION {
             return;
         }
@@ -525,7 +1095,9 @@ impl ShortcutRegistry {
     /// Persists without validation — for callers that already validated a
     /// draft and want the exact bytes they reviewed on disk.
     pub fn save_unchecked(&self) -> Result<(), ShortcutError> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let stored = StoredShortcuts {
             version: STORAGE_VERSION,
             overrides: self.overrides.clone(),
@@ -728,7 +1300,10 @@ mod tests {
             ("edit.redo", &["ctrl-shift-z"]),
             ("edit.fill-foreground", &["alt-delete", "alt-backspace"]),
             ("edit.fill-background", &["ctrl-delete", "ctrl-backspace"]),
-            ("edit.content-aware-fill", &["shift-delete", "shift-backspace"]),
+            (
+                "edit.content-aware-fill",
+                &["shift-delete", "shift-backspace"],
+            ),
             ("edit.free-transform", &["ctrl-t"]),
             ("image.curves", &["ctrl-m"]),
             ("image.levels", &["ctrl-l"]),
@@ -908,10 +1483,26 @@ mod tests {
             ("alt-right", "compositor::InlineTextTrackingLoosen", ""),
             ("alt-up", "compositor::InlineTextLeadingTighten", ""),
             ("alt-down", "compositor::InlineTextLeadingLoosen", ""),
-            ("alt-shift-left", "compositor::InlineTextTrackingTightenMore", ""),
-            ("alt-shift-right", "compositor::InlineTextTrackingLoosenMore", ""),
-            ("alt-shift-up", "compositor::InlineTextLeadingTightenMore", ""),
-            ("alt-shift-down", "compositor::InlineTextLeadingLoosenMore", ""),
+            (
+                "alt-shift-left",
+                "compositor::InlineTextTrackingTightenMore",
+                "",
+            ),
+            (
+                "alt-shift-right",
+                "compositor::InlineTextTrackingLoosenMore",
+                "",
+            ),
+            (
+                "alt-shift-up",
+                "compositor::InlineTextLeadingTightenMore",
+                "",
+            ),
+            (
+                "alt-shift-down",
+                "compositor::InlineTextLeadingLoosenMore",
+                "",
+            ),
         ];
 
         let registry = ShortcutRegistry::new();
@@ -929,7 +1520,11 @@ mod tests {
             assert_eq!(binding.action().name(), action, "action of {keystrokes}");
             assert_eq!(
                 binding.predicate().map(|predicate| predicate.to_string()),
-                if context.is_empty() { None } else { Some(context.to_string()) },
+                if context.is_empty() {
+                    None
+                } else {
+                    Some(context.to_string())
+                },
                 "context of {keystrokes} -> {action}"
             );
         }
@@ -966,8 +1561,16 @@ mod tests {
         assert_eq!(find(&bindings, "compositor::Undo"), vec!["ctrl-alt-z"]);
         assert_eq!(find(&bindings, "compositor::ToolBrush"), vec!["f"]);
         // The stale defaults are gone from the keymap.
-        assert!(!find(&bindings, "compositor::Undo").iter().any(|keys| keys == "ctrl-z"));
-        assert!(!find(&bindings, "compositor::ToolBrush").iter().any(|keys| keys == "b"));
+        assert!(
+            !find(&bindings, "compositor::Undo")
+                .iter()
+                .any(|keys| keys == "ctrl-z")
+        );
+        assert!(
+            !find(&bindings, "compositor::ToolBrush")
+                .iter()
+                .any(|keys| keys == "b")
+        );
     }
 
     #[test]
@@ -980,7 +1583,9 @@ mod tests {
     #[test]
     fn multi_keystroke_overrides_are_rejected() {
         let mut registry = ShortcutRegistry::new();
-        let error = registry.set_override("edit.cut", "ctrl-x ctrl-c").unwrap_err();
+        let error = registry
+            .set_override("edit.cut", "ctrl-x ctrl-c")
+            .unwrap_err();
         assert!(matches!(error, ShortcutProblem::InvalidChord { .. }));
         assert_eq!(registry.override_for("edit.cut"), None);
     }
@@ -988,8 +1593,13 @@ mod tests {
     #[test]
     fn unknown_actions_are_rejected() {
         let mut registry = ShortcutRegistry::new();
-        let error = registry.set_override("no.such.action", "ctrl-9").unwrap_err();
-        assert_eq!(error, ShortcutProblem::UnknownAction("no.such.action".into()));
+        let error = registry
+            .set_override("no.such.action", "ctrl-9")
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ShortcutProblem::UnknownAction("no.such.action".into())
+        );
     }
 
     #[test]
@@ -1010,7 +1620,9 @@ mod tests {
     #[test]
     fn conflicts_detect_duplicate_assignment() {
         let mut registry = ShortcutRegistry::new();
-        registry.set_override("palette.swap", "ctrl-shift-z").unwrap();
+        registry
+            .set_override("palette.swap", "ctrl-shift-z")
+            .unwrap();
         let problems = registry.conflicts();
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].chord, "ctrl-shift-z");
@@ -1071,12 +1683,17 @@ mod tests {
         let path = dir.join("compositor").join("shortcuts.json");
         let mut registry = ShortcutRegistry::with_path(&path);
         registry.set_override("edit.undo", "ctrl-alt-z").unwrap();
-        registry.set_override("layer.delete", "ctrl-shift-backspace").unwrap();
+        registry
+            .set_override("layer.delete", "ctrl-shift-backspace")
+            .unwrap();
         registry.save().unwrap();
 
         let loaded = ShortcutRegistry::load_or_default(&path);
         assert_eq!(loaded.keystrokes_for("edit.undo"), vec!["ctrl-alt-z"]);
-        assert_eq!(loaded.keystrokes_for("layer.delete"), vec!["ctrl-shift-backspace"]);
+        assert_eq!(
+            loaded.keystrokes_for("layer.delete"),
+            vec!["ctrl-shift-backspace"]
+        );
         assert_eq!(loaded.keystrokes_for("tool.brush"), vec!["b"]);
         assert!(loaded.validate().is_ok());
 
@@ -1084,7 +1701,10 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         let stored: StoredShortcuts = serde_json::from_str(&text).unwrap();
         assert_eq!(stored.version, 1);
-        assert_eq!(stored.overrides.get("edit.undo").map(String::as_str), Some("ctrl-alt-z"));
+        assert_eq!(
+            stored.overrides.get("edit.undo").map(String::as_str),
+            Some("ctrl-alt-z")
+        );
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1167,7 +1787,10 @@ mod tests {
 
     #[test]
     fn chord_labels_use_platform_notation() {
-        assert_eq!(chord_label(&normalize("ctrl-shift-s").unwrap()), "Ctrl+Shift+S");
+        assert_eq!(
+            chord_label(&normalize("ctrl-shift-s").unwrap()),
+            "Ctrl+Shift+S"
+        );
         assert_eq!(chord_label(&normalize("alt-ctrl-;").unwrap()), "Ctrl+Alt+;");
         assert_eq!(chord_label(&normalize("shift-u").unwrap()), "Shift+U");
         assert_eq!(chord_label(&normalize("escape").unwrap()), "Esc");

@@ -35,7 +35,11 @@ impl WarpStroke {
     /// document size (the composite of the layer's own pixels through its
     /// transform). Settings come from the brush: diameter, hardness, opacity
     /// (as strength).
-    pub fn new(surface: Bitmap, mode: BlurToolMode, settings: &crate::tools::brush::BrushSettings) -> WarpStroke {
+    pub fn new(
+        surface: Bitmap,
+        mode: BlurToolMode,
+        settings: &crate::tools::brush::BrushSettings,
+    ) -> WarpStroke {
         let diameter = settings.diameter.max(2.0);
         let hardness = settings.hardness.clamp(0.0, 0.98);
         let strength = settings.opacity.clamp(0.01, 1.0);
@@ -86,7 +90,13 @@ impl WarpStroke {
             return;
         };
         let distance = (point.x - from.x).hypot(point.y - from.y);
-        let spacing = (self.diameter * if self.mode == BlurToolMode::Smudge { 0.08 } else { 0.025 }).max(1.0);
+        let spacing = (self.diameter
+            * if self.mode == BlurToolMode::Smudge {
+                0.08
+            } else {
+                0.025
+            })
+        .max(1.0);
         if distance < spacing {
             return;
         }
@@ -231,9 +241,12 @@ impl WarpStroke {
                 let s01 = s00 + cw * 4;
                 let s11 = s01 + 4;
                 for k in 0..4 {
-                    let top = self.scratch[s00 + k] + (self.scratch[s10 + k] - self.scratch[s00 + k]) * fx;
-                    let bottom = self.scratch[s01 + k] + (self.scratch[s11 + k] - self.scratch[s01 + k]) * fx;
-                    self.pixels.data[p + k] = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+                    let top = self.scratch[s00 + k]
+                        + (self.scratch[s10 + k] - self.scratch[s00 + k]) * fx;
+                    let bottom = self.scratch[s01 + k]
+                        + (self.scratch[s11 + k] - self.scratch[s01 + k]) * fx;
+                    self.pixels.data[p + k] =
+                        (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -262,7 +275,11 @@ pub fn finish_warp_into_layer(
     canvas: CGSize,
     edit_name: &str,
     selection_clip: Option<crate::selection::SelectionClip>,
-) -> Option<(crate::raster::ImportedImage, crate::transform::LayerTransform, &'static str)> {
+) -> Option<(
+    crate::raster::ImportedImage,
+    crate::transform::LayerTransform,
+    &'static str,
+)> {
     if points.is_empty() {
         return None;
     }
@@ -303,8 +320,8 @@ fn static_name(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::LayerTransform;
     use crate::tools::brush::BrushSettings;
+    use crate::transform::LayerTransform;
 
     fn gray_surface(w: usize, h: usize, v: u8) -> Bitmap {
         Bitmap::new_clearing(w, h, [v, v, v, 255])
@@ -389,10 +406,23 @@ mod tests {
             points.push(CGPoint::new(10.0 + i as f64 * 8.0, 32.0));
         }
         let base = LayerTransform::new(CGPoint::ZERO, CGSize::new(64.0, 64.0));
-        let (image, _transform, name) =
-            finish_warp_into_layer(&warped, &points, 20.0, Some(gray_surface(64, 64, 200)), base, CGSize::new(64.0, 64.0), "Smudge", None).unwrap();
+        let (image, _transform, name) = finish_warp_into_layer(
+            &warped,
+            &points,
+            20.0,
+            Some(gray_surface(64, 64, 200)),
+            base,
+            CGSize::new(64.0, 64.0),
+            "Smudge",
+            None,
+        )
+        .unwrap();
         assert_eq!(name, "Smudge");
         // The result painted the warped pixels through the stroke path.
-        assert!(image.image.pixel(32, 32)[0] < 200, "{:?}", image.image.pixel(32, 32));
+        assert!(
+            image.image.pixel(32, 32)[0] < 200,
+            "{:?}",
+            image.image.pixel(32, 32)
+        );
     }
 }

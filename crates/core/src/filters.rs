@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::adjust::camera_raw::CameraRawSettings;
 use crate::adjust::pixel as pixel_adjust;
-use crate::adjust::{ExposureSettings, GradientMapSettings, GrainSettings};
 use crate::adjust::{BlackWhiteSettings, ColorBalanceSettings, CurvesSettings};
+use crate::adjust::{ExposureSettings, GradientMapSettings, GrainSettings};
 use crate::geometry::{CGAffineTransform, CGPoint, CGRect};
 use crate::raster::Bitmap;
 use crate::selection::SelectionClip;
@@ -81,7 +81,10 @@ impl FilterKind {
     }
 
     pub fn is_automatic(&self) -> bool {
-        matches!(self, FilterKind::ContentAwareFill | FilterKind::RemoveBackground)
+        matches!(
+            self,
+            FilterKind::ContentAwareFill | FilterKind::RemoveBackground
+        )
     }
 
     /// Color adjustments: in the Image menu (and editable as adjustment layers).
@@ -230,6 +233,8 @@ pub struct FilterJob<'a> {
 }
 
 /// `noise_add_at` (NoisePixels.c).
+// `6.2831853` is the C kernel's own literal — TAU has different bits.
+#[allow(clippy::approx_constant)]
 pub fn noise_add_at(
     bitmap: &mut Bitmap,
     amount: f32,
@@ -249,9 +254,17 @@ pub fn noise_add_at(
             }
             let px = (origin_x + x as i64) as u32;
             let py = (origin_y + y as i64) as u32;
-            let base = noise_hash(seed ^ noise_hash(px.wrapping_mul(0x9e3779b9) ^ noise_hash(py.wrapping_mul(0x85ebca6b))));
+            let base = noise_hash(
+                seed ^ noise_hash(
+                    px.wrapping_mul(0x9e3779b9) ^ noise_hash(py.wrapping_mul(0x85ebca6b)),
+                ),
+            );
             for c in 0..3usize {
-                let key = if monochromatic { base } else { base.wrapping_add((c as u32).wrapping_mul(0x9e3779b9)) };
+                let key = if monochromatic {
+                    base
+                } else {
+                    base.wrapping_add((c as u32).wrapping_mul(0x9e3779b9))
+                };
                 let n = if gaussian {
                     // Box–Muller: two uniform values make one normally distributed one.
                     let u1 = noise_unit(key);
@@ -368,7 +381,11 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
             job.sharpen_mask,
         ),
         // Grain sits in layer pixels; the job's seed gives each application its own pattern.
-        FilterKind::Grain => settings.grain.apply(image, CGPoint::ZERO, 1.0 / job.scale, Some(job.seed)),
+        FilterKind::Grain => {
+            settings
+                .grain
+                .apply(image, CGPoint::ZERO, 1.0 / job.scale, Some(job.seed))
+        }
         FilterKind::RemoveBackground => crate::tools::subject_removal::run(image, &settings),
         FilterKind::ContentAwareFill => crate::tools::content_fill::run(image),
         FilterKind::GaussianBlur => {
@@ -385,7 +402,12 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
             let blurred = crate::raster::gaussian_blur_rgba(&grown, sigma);
             crop_bitmap(
                 &blurred,
-                &CGRect::new(pad as f64, pad as f64, image.width as f64, image.height as f64),
+                &CGRect::new(
+                    pad as f64,
+                    pad as f64,
+                    image.width as f64,
+                    image.height as f64,
+                ),
             )
         }
         FilterKind::MotionBlur => motion_blur(image, settings.distance * job.scale, settings.angle),
@@ -402,7 +424,9 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
             );
             noisy
         }
-        FilterKind::LensCorrection => lens_distort(image, settings.distortion / 100.0 * LENS_STRENGTH),
+        FilterKind::LensCorrection => {
+            lens_distort(image, settings.distortion / 100.0 * LENS_STRENGTH)
+        }
     };
     if let Some(selection) = &job.selection {
         result = pixel_adjust::blend(&result, image, selection, &job.mapping);
@@ -472,7 +496,10 @@ pub fn motion_blur(image: &Bitmap, distance: f64, angle_degrees: f64) -> Bitmap 
 
 /// `PixelFilter.trimmed`: `image` cropped to the pixels that are actually
 /// there, with the transform that keeps them in place.
-pub fn trimmed(image: &Bitmap, placed: crate::transform::LayerTransform) -> (Bitmap, crate::transform::LayerTransform) {
+pub fn trimmed(
+    image: &Bitmap,
+    placed: crate::transform::LayerTransform,
+) -> (Bitmap, crate::transform::LayerTransform) {
     let full = image.bounds();
     let crop = match image.alpha_bounds() {
         Some(bounds) => bounds,
@@ -489,7 +516,10 @@ pub fn trimmed(image: &Bitmap, placed: crate::transform::LayerTransform) -> (Bit
     );
     let to_document = crate::raster::pixel_to_document(&placed, full.width(), full.height());
     let middle = CGPoint::new(crop.mid_x(), crop.mid_y()).applying(&to_document);
-    result.origin = CGPoint::new(middle.x - result.size.width / 2.0, middle.y - result.size.height / 2.0);
+    result.origin = CGPoint::new(
+        middle.x - result.size.width / 2.0,
+        middle.y - result.size.height / 2.0,
+    );
     (cropped, result)
 }
 
@@ -668,11 +698,19 @@ mod tests {
             }
         }
         let out = run_filter(&gaussian_job(&img, 6.0));
-        assert_eq!((out.width, out.height), (100, 100), "trim keeps the input size");
+        assert_eq!(
+            (out.width, out.height),
+            (100, 100),
+            "trim keeps the input size"
+        );
         // The block's core stays strongly opaque.
         assert!(out.pixel(50, 50)[3] > 180, "core: {:?}", out.pixel(50, 50));
         // Just outside the block the blur has spread into the transparent room.
-        assert!(out.pixel(63, 50)[3] > 0, "outward spread: {:?}", out.pixel(63, 50));
+        assert!(
+            out.pixel(63, 50)[3] > 0,
+            "outward spread: {:?}",
+            out.pixel(63, 50)
+        );
         // The far corner stays empty.
         assert_eq!(out.pixel(2, 2)[3], 0);
     }
@@ -712,8 +750,10 @@ mod tests {
         let far = out.pixel(50, 30)[0];
         // The Gaussian core keeps only ~1/3 of a 5px dot's energy at
         // sigma = radius = 6 — the taper is the point.
-        assert!(core > near && near > mid && mid >= far,
-            "taper decays: {core}/{near}/{mid}/{far}");
+        assert!(
+            core > near && near > mid && mid >= far,
+            "taper decays: {core}/{near}/{mid}/{far}"
+        );
         assert!(far <= 20, "far tail is nearly clear: {far}");
         assert!(
             i64::from(near) - i64::from(out.pixel(22, 30)[0]) <= 8,
@@ -763,7 +803,10 @@ mod tests {
         let mut img = Bitmap::new(10, 10);
         img.set_pixel(3, 4, [255, 255, 255, 255]);
         img.set_pixel(6, 7, [255, 255, 255, 255]);
-        let placed = crate::transform::LayerTransform::new(CGPoint::new(10.0, 10.0), crate::geometry::CGSize::new(10.0, 10.0));
+        let placed = crate::transform::LayerTransform::new(
+            CGPoint::new(10.0, 10.0),
+            crate::geometry::CGSize::new(10.0, 10.0),
+        );
         let (cropped, transform) = trimmed(&img, placed);
         assert_eq!(cropped.width, 4);
         assert_eq!(cropped.height, 4);
