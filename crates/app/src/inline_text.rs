@@ -13,19 +13,61 @@
 //! counterpart in gpui's text stack:
 //!
 //! - **Tracking is not shown while editing.** The core steps every glyph by
-//!   `advance + tracking` (tools/text.rs:283), but neither gpui's
-//!   `TextStyle` nor gpui-component's Input exposes a letter-spacing knob,
-//!   so the overlay always lays the text out at zero tracking
-//!   (`inline_text_line_ratio` fixes the row stride instead). The committed
-//!   raster keeps the style's tracking; the Option-arrow tracking steps
-//!   change only the draft and become visible at commit.
+//!   `advance + tracking` (tools/text.rs:287), but gpui's `TextStyle` has no
+//!   letter-spacing knob and its shaping (`TextSystem::shape_line`) takes no
+//!   tracking argument, so the overlay lays the text out at zero tracking.
+//!   Per-character drawing was weighed and rejected: the input engine paints
+//!   its own caret and selection quads at its zero-tracking positions and
+//!   neither can be hidden through the public API, so self-drawn glyphs would
+//!   sit next to an engine caret that drifts a full `step` per character.
+//!   The live feedback is instead the **measurement** the commit itself uses
+//!   (`EditorSession.textBoxSize`): the overlay recomputes its frame from the
+//!   draft every frame, so Option-arrow tracking steps move the editor box
+//!   (and flip the boxed text's overflow plus marker) immediately, at exactly
+//!   the box the commit will rasterize; the glyphs spread only at commit.
 //! - **Alignment** (`LayerTextStyle.alignment`) is likewise a commit-time
-//!   layout: the overlay's input is left-aligned.
+//!   layout. The engine knows how to *paint* centered or right-aligned lines
+//!   (`Line::paint` takes a `TextAlign`), but the only setter,
+//!   `InputBaseState::set_text_align` (gpui-base input/base/state.rs:637),
+//!   early-returns for multi-line inputs, and this overlay's `TextareaState`
+//!   is one — the styled `.text_align()` the component extracts reaches that
+//!   gate and stops. The overlay stays left-aligned; the draft carries the
+//!   alignment and the commit lays it out.
 
-use gpui_kit::component::input::{Textarea, TextareaState};
+/// A point in viewport pixels — where the editor box sits on screen.
+///
+/// The overlay's own geometry type: core's `CGPoint` is document space (f64),
+/// this is what the canvas paints at, after zoom and pan.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ScreenPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl ScreenPoint {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+/// A size in viewport pixels — the editor box's on-screen extent, or an
+/// inset measured along each axis.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ScreenSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl ScreenSize {
+    pub fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+}
+
+use gpui_kit::component::input::Textarea;
 use gpui_kit::{px, relative, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
 use gpui_kit::MouseButton;
-use gpui_kit::{Context, Entity, Window};
+use gpui_kit::{Context, Window};
 
 use compositor_core::document::LayerTextStyle;
 use compositor_core::geometry::{CGPoint, CGSize};
@@ -45,9 +87,9 @@ pub const INLINE_TEXT_MAX_CHARS: usize = 100_000;
 /// as a fraction of the font size, so the rows land where the commit's do.
 #[derive(Clone, PartialEq, Debug)]
 pub struct InlineTextOverlay {
-    pub origin: (f32, f32),
-    pub size: (f32, f32),
-    pub inset: (f32, f32),
+    pub origin: ScreenPoint,
+    pub size: ScreenSize,
+    pub inset: ScreenSize,
     pub line_ratio: f32,
     pub font_px: f32,
     pub color: u32,
@@ -134,21 +176,21 @@ pub fn inline_text_measured_size(style: &LayerTextStyle) -> CGSize {
 /// note on `render_inline_text_overlay`). A degenerate logical size falls
 /// back to the plain zoom.
 pub fn inline_text_content_inset(
-    box_screen: (f32, f32),
+    box_screen: ScreenSize,
     logical: CGSize,
     zoom: f64,
-) -> (f32, f32) {
+) -> ScreenSize {
     let scale_x = if logical.width > 0.0 {
-        box_screen.0 as f64 / logical.width
+        box_screen.width as f64 / logical.width
     } else {
         zoom
     };
     let scale_y = if logical.height > 0.0 {
-        box_screen.1 as f64 / logical.height
+        box_screen.height as f64 / logical.height
     } else {
         zoom
     };
-    (
+    ScreenSize::new(
         (LayerTextStyle::PADDING * scale_x) as f32,
         (LayerTextStyle::PADDING * scale_y) as f32,
     )
@@ -605,9 +647,9 @@ impl AppState {
             (a.max(*x), b.max(*y))
         });
         let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-        let size = ((max_x - min_x).max(24.0), (max_y - min_y).max(24.0));
+        let size = ScreenSize::new((max_x - min_x).max(24.0), (max_y - min_y).max(24.0));
         Some(InlineTextOverlay {
-            origin: (min_x, min_y),
+            origin: ScreenPoint::new(min_x, min_y),
             size,
             inset: inline_text_content_inset(size, logical, self.zoom),
             line_ratio: inline_text_line_ratio(&draft.style),
@@ -697,20 +739,20 @@ impl AppState {
         let engine = gpui_kit::component::Size::default();
         let engine_px = f32::from(engine.input_px());
         let engine_py = f32::from(engine.input_py());
-        let content_left = overlay.origin.0 + overlay.inset.0 - engine_px;
-        let content_top = overlay.origin.1 + overlay.inset.1 - engine_py;
-        let content_size = (
-            (overlay.size.0 - overlay.inset.0 * 2.0 + engine_px * 2.0).max(8.0),
-            (overlay.size.1 - overlay.inset.1 * 2.0 + engine_py * 2.0).max(8.0),
+        let content_left = overlay.origin.x + overlay.inset.width - engine_px;
+        let content_top = overlay.origin.y + overlay.inset.height - engine_py;
+        let content_size = ScreenSize::new(
+            (overlay.size.width - overlay.inset.width * 2.0 + engine_px * 2.0).max(8.0),
+            (overlay.size.height - overlay.inset.height * 2.0 + engine_py * 2.0).max(8.0),
         );
         Some(
             gpui_kit::div()
                 .id("inline-text-editor")
                 .absolute()
-                .left(px(overlay.origin.0))
-                .top(px(overlay.origin.1))
-                .w(px(overlay.size.0))
-                .h(px(overlay.size.1))
+                .left(px(overlay.origin.x))
+                .top(px(overlay.origin.y))
+                .w(px(overlay.size.width))
+                .h(px(overlay.size.height))
                 .on_mouse_down(MouseButton::Left, on_press)
                 .on_action(on_tracking_tighten)
                 .on_action(on_tracking_loosen)
@@ -725,8 +767,8 @@ impl AppState {
                         .absolute()
                         .left(px(content_left))
                         .top(px(content_top))
-                        .w(px(content_size.0))
-                        .h(px(content_size.1))
+                        .w(px(content_size.width))
+                        .h(px(content_size.height))
                         .child(
                             Textarea::new(&input)
                                 .appearance(false)
@@ -893,10 +935,10 @@ mod tests {
         inline_text_box, inline_text_box_corners, inline_text_content_inset, inline_text_handle_at,
         inline_text_handle_size, inline_text_key, inline_text_line_ratio, inline_text_local_point,
         inline_text_measured_size, inline_text_overflows, inline_text_resize,
-        inline_text_shown_transform, InlineTextKey,
+        inline_text_shown_transform, InlineTextKey, ScreenSize,
     };
     use crate::state::doc_to_screen_at;
-    use compositor_core::document::LayerTextStyle;
+    use compositor_core::document::{LayerTextStyle, TextAlignment};
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::{LayerTransform, HANDLES};
 
@@ -945,24 +987,154 @@ mod tests {
     fn content_inset_tracks_the_boxs_screen_scale() {
         // At 1:1 the 12-layer-px padding is 12 viewport px.
         assert_eq!(
-            inline_text_content_inset((200.0, 80.0), CGSize::new(200.0, 80.0), 1.0),
-            (12.0, 12.0)
+            inline_text_content_inset(ScreenSize::new(200.0, 80.0), CGSize::new(200.0, 80.0), 1.0),
+            ScreenSize::new(12.0, 12.0)
         );
         // Zoom scales it.
         assert_eq!(
-            inline_text_content_inset((400.0, 160.0), CGSize::new(200.0, 80.0), 2.0),
-            (24.0, 24.0)
+            inline_text_content_inset(ScreenSize::new(400.0, 160.0), CGSize::new(200.0, 80.0), 2.0),
+            ScreenSize::new(24.0, 24.0)
         );
         // A layer scaled 2x doubles it at the same zoom: the box is twice
         // the logical size on screen.
         assert_eq!(
-            inline_text_content_inset((400.0, 160.0), CGSize::new(200.0, 80.0), 1.0),
-            (24.0, 24.0)
+            inline_text_content_inset(ScreenSize::new(400.0, 160.0), CGSize::new(200.0, 80.0), 1.0),
+            ScreenSize::new(24.0, 24.0)
         );
         // A degenerate logical size falls back to the zoom.
         assert_eq!(
-            inline_text_content_inset((100.0, 50.0), CGSize::ZERO, 3.0),
-            (36.0, 36.0)
+            inline_text_content_inset(ScreenSize::new(100.0, 50.0), CGSize::ZERO, 3.0),
+            ScreenSize::new(36.0, 36.0)
+        );
+    }
+
+    #[test]
+    fn tracking_steps_move_the_shown_box_like_the_commit() {
+        // Option-right steps the tracking; the overlay's frame (the measured
+        // point-text box, recomputed from the draft every frame) grows by the
+        // step for every character in the widest line — and the committed
+        // raster grows by exactly the same amount, so what moved on screen
+        // while editing is the box the commit makes.
+        let base = LayerTextStyle {
+            content: "Hi".into(),
+            font_size: 40.0,
+            ..LayerTextStyle::default()
+        };
+        let mut stepped = base.clone();
+        stepped.tracking = 2.0;
+        let mut tightened = base.clone();
+        tightened.tracking = -2.0;
+        let base_box = inline_text_measured_size(&base);
+        let stepped_box = inline_text_measured_size(&stepped);
+        let tightened_box = inline_text_measured_size(&tightened);
+        // Two characters, one +2 step each.
+        assert!((stepped_box.width - base_box.width - 4.0).abs() < 0.001);
+        assert!((base_box.width - tightened_box.width - 4.0).abs() < 0.001);
+        // Height is a row stride: tracking never moves it.
+        assert_eq!(stepped_box.height, base_box.height);
+        // The commit's rasters land on the same boxes the overlay shows.
+        let base_raster = compositor_core::tools::text::text_image(&base).unwrap();
+        let stepped_raster = compositor_core::tools::text::text_image(&stepped).unwrap();
+        assert_eq!(
+            stepped_raster.width as f64 - base_raster.width as f64,
+            4.0,
+            "commit raster tracks the same step"
+        );
+        assert_eq!(stepped_raster.height, base_raster.height);
+    }
+
+    #[test]
+    fn the_overflow_marker_flips_with_tracking() {
+        // Boxed text that fits its container at zero tracking picks up a
+        // step's width per character; past the container width the overflow
+        // plus marker appears live (`draw`'s glyph-range check), without
+        // waiting for a commit.
+        let fits = LayerTextStyle {
+            content: "AAAAAAAAAAAAAAAAAAAA".into(),
+            font_size: 12.0,
+            box_size: Some(CGSize::new(200.0, 100.0)),
+            ..LayerTextStyle::default()
+        };
+        assert!(!inline_text_overflows(&fits));
+        let mut spread = fits.clone();
+        spread.tracking = 2.0;
+        assert!(
+            inline_text_overflows(&spread),
+            "20 characters at +2 tracking pass the 176px container"
+        );
+    }
+
+    #[test]
+    fn tracked_right_aligned_draft_commits_into_the_shown_box() {
+        // The commit/cancel round trip: the geometry the overlay shows (the
+        // measured box and its content inset) is the geometry the commit
+        // rasterizes into, with the draft's tracking and alignment carried
+        // through — ink lands inside the raster exactly where the inset and
+        // the box say the content lives.
+        let mut style = LayerTextStyle {
+            content: "Hi there".into(),
+            font_size: 40.0,
+            tracking: 3.0,
+            alignment: TextAlignment::Right,
+            ..LayerTextStyle::default()
+        };
+        let measured = inline_text_measured_size(&style);
+        let inset = inline_text_content_inset(
+            ScreenSize::new(measured.width as f32, measured.height as f32),
+            measured,
+            1.0,
+        );
+        // 1:1 the inset is the style's padding — the first glyph's left edge.
+        assert_eq!(inset.width, LayerTextStyle::PADDING as f32);
+        let raster = compositor_core::tools::text::text_image(&style).unwrap();
+        assert_eq!(raster.width as f64, measured.width);
+        assert_eq!(raster.height as f64, measured.height);
+        let padding = LayerTextStyle::PADDING;
+        // Where the ink actually sits.
+        let ink_bounds = |raster: &compositor_core::raster::Bitmap| {
+            let mut min_x = raster.width;
+            let mut max_x = 0usize;
+            for y in 0..raster.height {
+                for x in 0..raster.width {
+                    if raster.pixel(x, y)[3] > 0 {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                    }
+                }
+            }
+            (min_x, max_x)
+        };
+        // Right-aligned: the line's advance ends at the container's right
+        // inset edge (pen = padding + (container - width) + width), so the
+        // ink ends there minus at most the last glyph's advance and the
+        // trailing tracking the box adds.
+        let (_, max_x) = ink_bounds(&raster);
+        let slack = 0.5 * style.font_size + 2.0 * style.tracking + 4.0;
+        assert!(
+            (max_x + 1) as f64 >= raster.width as f64 - padding - slack,
+            "right-aligned ink reaches the right inset edge: max_x {max_x} of {}",
+            raster.width
+        );
+        // The same draft left-aligned starts its ink at the inset itself.
+        let mut left = style.clone();
+        left.alignment = TextAlignment::Left;
+        left.tracking = 0.0;
+        let left_raster = compositor_core::tools::text::text_image(&left).unwrap();
+        let (min_x, _) = ink_bounds(&left_raster);
+        assert!(
+            min_x as f64 >= padding - 1.0,
+            "no ink in the left padding: min_x {min_x}"
+        );
+        assert!(
+            min_x as f64 <= padding + 0.75 * left.font_size,
+            "left-aligned ink starts at the inset: min_x {min_x}"
+        );
+        // And the alignment switch is commit-visible: the right-aligned
+        // raster of the same draft keeps its ink off the left padding.
+        let (right_min_x, _) = ink_bounds(&raster);
+        assert!(
+            right_min_x as f64 >= padding - 1.0,
+            "right-aligned ink clears the left padding: {right_min_x}"
         );
     }
 
