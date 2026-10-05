@@ -3,16 +3,15 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{
-    px, prelude::FluentBuilder as _, rgb, AnyElement, Context, ClickEvent, IntoElement,
-    InteractiveElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement,
-    Styled, Window,
-};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::{
+    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, RenderImage,
+    SharedString, StatefulInteractiveElement, Styled, Window, prelude::FluentBuilder as _, px, rgb,
+};
 
 use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::blend::LayerBlendMode;
@@ -21,7 +20,7 @@ use compositor_core::effects::LayerEffectKind;
 use compositor_core::selection::SelectionMode;
 
 use crate::state::AppState;
-use crate::ui::{dropdown, text_label, MenuEntry};
+use crate::ui::{MenuEntry, dropdown, text_label};
 
 const THUMB: f32 = 30.0;
 
@@ -82,11 +81,17 @@ fn thumbnail_cell(
 impl AppState {
     /// Puts the active layer's opacity into the header slider.
     pub fn sync_opacity_slider(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        let Some(layer) = self.tab().session.active_layer() else { return };
+        let Some(layer) = self.tab().session.active_layer() else {
+            return;
+        };
         let value = (layer.opacity * 100.0) as f32;
         let slider = self.opacity_slider.clone();
         slider.update(cx, |state, cx| {
-            state.set_value(gpui_kit::component::slider::SliderValue::Single(value), window, cx)
+            state.set_value(
+                gpui_kit::component::slider::SliderValue::Single(value),
+                window,
+                cx,
+            )
         });
     }
 
@@ -108,7 +113,8 @@ impl AppState {
             .session
             .active_layer()
             .map(|layer| {
-                session.session
+                session
+                    .session
                     .displayed_blend_mode(layer)
                     .label()
                     .to_string()
@@ -149,11 +155,9 @@ impl AppState {
                             self.blend_menu_entries(),
                         ))
                         .child(text_label("Opacity", true))
-                        .child(
-                            gpui_kit::div().w(px(60.0)).child(gpui_kit::component::slider::Slider::new(
-                                &self.opacity_slider,
-                            )),
-                        )
+                        .child(gpui_kit::div().w(px(60.0)).child(
+                            gpui_kit::component::slider::Slider::new(&self.opacity_slider),
+                        ))
                         .child(text_label(format!("{:.0}%", opacity * 100.0), false)),
                 ),
         );
@@ -181,11 +185,7 @@ impl AppState {
                 list = list.child(row);
             }
         } else {
-            list = list.child(
-                gpui_kit::div()
-                    .p_3()
-                    .child(text_label("No document", true)),
-            );
+            list = list.child(gpui_kit::div().p_3().child(text_label("No document", true)));
         }
         panel = panel.child(list);
 
@@ -218,27 +218,36 @@ impl AppState {
                 .py_1()
                 .border_t_1()
                 .border_color(gpui_kit::black().opacity(0.4))
-                .child(footer_button("layer-add", IconName::Plus, "New Blank Layer", cx.listener(
-                    |this, _, _, cx| {
+                .child(footer_button(
+                    "layer-add",
+                    IconName::Plus,
+                    "New Blank Layer",
+                    cx.listener(|this, _, _, cx| {
                         this.tab().session.add_blank_layer();
                         this.touch(cx);
-                    },
-                )))
-                .child(footer_button("layer-mask", IconName::SquareDashedBottom, "Add Reveal-All Mask", cx.listener(
-                    |this, _, _, cx| {
+                    }),
+                ))
+                .child(footer_button(
+                    "layer-mask",
+                    IconName::SquareDashedBottom,
+                    "Add Reveal-All Mask",
+                    cx.listener(|this, _, _, cx| {
                         this.tab().session.add_layer_mask(true);
                         this.touch(cx);
-                    },
-                )))
-                .child(footer_button("layer-group", IconName::FolderPlus, "Group selected layers (⌘G)", cx.listener(
-                    |this, _, _, cx| {
+                    }),
+                ))
+                .child(footer_button(
+                    "layer-group",
+                    IconName::FolderPlus,
+                    "Group selected layers (⌘G)",
+                    cx.listener(|this, _, _, cx| {
                         // The footer groups the SELECTION (LayerGroups.swift:
                         // 119 groupSelectedLayers), not an empty folder above
                         // the active layer.
                         this.tab().session.group_selected_layers();
                         this.touch(cx);
-                    },
-                )))
+                    }),
+                ))
                 // The effects menu (LayersPanel.swift's sparkles): one entry
                 // per effect kind; choosing one adds it to the active layer
                 // and opens its editor sheet.
@@ -267,16 +276,17 @@ impl AppState {
                         .dropdown_caret(true)
                         .dropdown_menu({
                             let app = app.clone();
-                            move |menu, _, _| {
-                                crate::ui::build_menu(&app, menu, &adjustment_entries)
-                            }
+                            move |menu, _, _| crate::ui::build_menu(&app, menu, &adjustment_entries)
                         }),
                 )
                 // deleteLayerOrMask (SelectionEdits.swift:71-75): a selected
                 // effect goes first; a targeted mask goes alone; otherwise
                 // every selected layer, through the live-mask ask.
-                .child(footer_button("layer-del", IconName::Trash, delete_tooltip, cx.listener(
-                    |this, _, window, cx| {
+                .child(footer_button(
+                    "layer-del",
+                    IconName::Trash,
+                    delete_tooltip,
+                    cx.listener(|this, _, window, cx| {
                         if this.tab().session.effect_selection.is_some() {
                             this.tab().session.remove_selected_effect();
                             this.touch(cx);
@@ -296,8 +306,8 @@ impl AppState {
                         } else {
                             this.request_delete_layer(window, cx);
                         }
-                    },
-                ))),
+                    }),
+                )),
         );
 
         let _ = (&app, can_edit);
@@ -340,7 +350,8 @@ impl AppState {
     /// The 24 blend modes, grouped with separators like the original menu.
     fn blend_menu_entries(&self) -> Vec<MenuEntry> {
         let current = self
-            .current_tab().session
+            .current_tab()
+            .session
             .active_layer()
             .map(|layer| layer.blend_mode);
         let mut entries = Vec::new();
@@ -379,9 +390,11 @@ impl AppState {
         let collapsed = self.tab().session.collapsed_group_ids.contains(&id);
         let in_folder = layer.parent_id.is_some();
         let rename_input = self.rename == Some(id);
-        // Swift indents one 24px step per hierarchy level, capped at 8
-        // (NativeLayerList.swift:625-631).
-        let indent = (depth.min(8) as f32) * 24.0;
+        // Swift indents one 24px step per hierarchy level, capped at 8, and
+        // a clipped layer steps in another 24 — the same distance a folder
+        // step takes, and the two add up (NativeLayerList.swift:625-631).
+        let clipped_to = layer.mask_source_id;
+        let indent = (depth.min(8) as f32) * 24.0 + if clipped_to.is_some() { 24.0 } else { 0.0 };
         let app = cx.entity().downgrade();
 
         let mut row = gpui_kit::div()
@@ -409,9 +422,7 @@ impl AppState {
                 }
                 this.touch(cx);
             }))
-            .when(is_active, |row| {
-                row.bg(gpui_kit::rgba(0x4da6ff33))
-            });
+            .when(is_active, |row| row.bg(gpui_kit::rgba(0x4da6ff33)));
 
         // Indent: one 24px step per level; the folder's chevron closes the
         // indent region.
@@ -461,13 +472,17 @@ impl AppState {
                     this.touch(cx);
                 }))
                 .child(
-                    Icon::new(if visible { IconName::Eye } else { IconName::EyeOff })
-                        .size(px(14.0))
-                        .text_color(if visible {
-                            gpui_kit::rgb(crate::ui::FG_TEXT)
-                        } else {
-                            gpui_kit::rgb(0x555555)
-                        }),
+                    Icon::new(if visible {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    })
+                    .size(px(14.0))
+                    .text_color(if visible {
+                        gpui_kit::rgb(crate::ui::FG_TEXT)
+                    } else {
+                        gpui_kit::rgb(0x555555)
+                    }),
                 ),
         );
 
@@ -567,23 +582,68 @@ impl AppState {
                 );
             }
         } else {
-            let name = layer.name.clone();
+            // The name carries the clip arrow; the subtitle reads what the
+            // row holds, or what it clips to (NativeLayerList.swift:682-688).
+            let name = format!(
+                "{}{}",
+                if clipped_to.is_some() { "↳ " } else { "" },
+                layer.name
+            );
+            let subtitle = if let Some(source) = clipped_to {
+                let source_name = self
+                    .tab()
+                    .session
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.layer(source))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "Missing source".to_string());
+                format!("Clipped to {source_name}")
+            } else if layer.text.is_some() {
+                "Text".to_string()
+            } else if layer.adjustment.is_some() {
+                "Adjustment · Double-click to edit".to_string()
+            } else if is_group {
+                "Folder".to_string()
+            } else {
+                format!(
+                    "{} × {} px",
+                    layer.transform.size.width.round() as i64,
+                    layer.transform.size.height.round() as i64
+                )
+            };
             name_cell = name_cell.child(
                 gpui_kit::div()
                     .id(SharedString::from(format!("layer-name-{}", index)))
-                    .text_size(px(11.0))
-                    .text_color(gpui_kit::rgb(crate::ui::FG_TEXT))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            this.begin_rename(id, window, cx);
-                            // A double-click on the name is a rename, not the
-                            // row's folder toggle.
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(SharedString::from(name)),
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .on_click(
+                        cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                this.begin_rename(id, window, cx);
+                                // A double-click on the name is a rename, not the
+                                // row's folder toggle.
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                    .child(
+                        gpui_kit::div()
+                            .text_size(px(11.0))
+                            .text_color(gpui_kit::rgb(crate::ui::FG_TEXT))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(name)),
+                    )
+                    .child(
+                        gpui_kit::div()
+                            .text_size(px(10.0))
+                            .text_color(gpui_kit::rgb(crate::ui::FG_DIM))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(subtitle)),
+                    ),
             );
         }
         row = row.child(name_cell);
@@ -597,7 +657,8 @@ impl AppState {
                 .item(PopupMenuItem::new("Rename…").on_click({
                     let app = app.clone();
                     move |_, window, cx| {
-                        app.update(cx, |state, cx| state.begin_rename(id, window, cx)).ok();
+                        app.update(cx, |state, cx| state.begin_rename(id, window, cx))
+                            .ok();
                     }
                 }))
                 .item({
@@ -661,6 +722,19 @@ impl AppState {
                     })
                 })
             };
+            // Release Clipping Mask sits after the mask items for every row
+            // (NativeLayerList.swift:607); the session no-ops when the layer
+            // clips nothing.
+            let menu = menu.item({
+                let app = app.clone();
+                PopupMenuItem::new("Release Clipping Mask").on_click(move |_, _, cx| {
+                    app.update(cx, |state, cx| {
+                        state.tab().session.remove_live_mask(id);
+                        state.touch(cx);
+                    })
+                    .ok();
+                })
+            });
             let menu = menu.separator();
             let menu = if in_folder {
                 menu.item({
@@ -678,17 +752,7 @@ impl AppState {
             };
             menu.item({
                 let app = app.clone();
-                PopupMenuItem::new("Duplicate Layer").on_click(move |_, _, cx| {
-                    app.update(cx, |state, cx| {
-                        state.tab().session.layer_via_copy();
-                        state.touch(cx);
-                    })
-                    .ok();
-                })
-            })
-            .item({
-                let app = app.clone();
-                PopupMenuItem::new("Delete Layer").on_click(move |_, window, cx| {
+                PopupMenuItem::new("Delete Layer / Folder").on_click(move |_, window, cx| {
                     // deleteLayerOrMask: deletes the mask when it is the target,
                     // and asks about live-mask dependents otherwise
                     // (request_delete_layer).
@@ -707,15 +771,10 @@ impl AppState {
     fn mask_thumbnail_image(&self, layer: &ImageLayer) -> Option<Arc<RenderImage>> {
         let mask = layer.mask.as_ref()?;
         let document = self.current_tab().session.document.as_ref()?;
-        let canvas = compositor_core::geometry::CGSize::new(
-            document.width as f64,
-            document.height as f64,
-        );
-        let thumbnail = compositor_core::render::mask_canvas_thumbnail(
-            mask,
-            &layer.mask_transform(),
-            canvas,
-        )?;
+        let canvas =
+            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
+        let thumbnail =
+            compositor_core::render::mask_canvas_thumbnail(mask, &layer.mask_transform(), canvas)?;
         Some(crate::state::bgra_render_image(&thumbnail))
     }
 
@@ -769,9 +828,15 @@ mod tests {
     /// modifiers ride along (NativeLayerList.swift:785-789).
     #[test]
     fn selection_mode_follows_shift_then_alt() {
-        assert!(matches!(selection_mode(false, false), SelectionMode::Replace));
+        assert!(matches!(
+            selection_mode(false, false),
+            SelectionMode::Replace
+        ));
         assert!(matches!(selection_mode(true, false), SelectionMode::Add));
-        assert!(matches!(selection_mode(false, true), SelectionMode::Subtract));
+        assert!(matches!(
+            selection_mode(false, true),
+            SelectionMode::Subtract
+        ));
         assert!(matches!(selection_mode(true, true), SelectionMode::Add));
     }
 }
