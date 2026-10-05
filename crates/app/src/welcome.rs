@@ -6,7 +6,7 @@
 
 use gpui_kit::{
     div, px, rgb, Context, DragMoveEvent, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, Styled,
+    KeyDownEvent, ParentElement, Styled,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -22,6 +22,14 @@ use crate::ui::text_label;
 /// Swift's `CanvasDocument.validDimension`).
 const MAX_DIMENSION: usize = 30_000;
 
+/// The sheet's copy, verbatim from Swift (NewCanvasSheet.swift:20-21, 31-34)
+/// — the ticket forbids inventing titles.
+pub(crate) const WELCOME_TITLE: &str = "New canvas";
+pub(crate) const WELCOME_SUBTITLE: &str = "A blank space for your next composition.";
+pub(crate) const OPEN_PROJECT_LABEL: &str = "Open project";
+pub(crate) const IMPORT_IMAGE_LABEL: &str = "Import image";
+pub(crate) const CREATE_CANVAS_LABEL: &str = "Create canvas";
+
 /// One welcome form field: a whole number from 1 to 30,000.
 pub(crate) fn valid_dimension(value: usize) -> bool {
     (1..=MAX_DIMENSION).contains(&value)
@@ -36,13 +44,43 @@ pub(crate) fn welcome_dimension(text: &str) -> Option<usize> {
         .filter(|value| valid_dimension(*value))
 }
 
+/// Both fields parsed (`NewCanvasSheet.valid`, :14-16): the Create gate the
+/// button and the Return key share.
+pub(crate) fn welcome_can_create(width: &str, height: &str) -> Option<(usize, usize)> {
+    Some((welcome_dimension(width)?, welcome_dimension(height)?))
+}
+
+/// The form-level disable (NewCanvasSheet.swift:45, `.disabled(session.
+/// isImporting || session.showsBusy)`): an import in flight or any project
+/// operation (the port's `is_project_busy`) freezes the whole sheet.
+pub(crate) fn welcome_disabled(busy: &crate::tabs::ProjectBusy) -> bool {
+    busy.is_importing || busy.is_project_busy
+}
+
 impl AppState {
     /// Both form fields parsed; `None` while either is not a valid
     /// dimension (the Create button's disabled state).
     fn welcome_size(&self, cx: &gpui_kit::App) -> Option<(usize, usize)> {
         let width = self.welcome_width_input.read(cx).value().to_string();
         let height = self.welcome_height_input.read(cx).value().to_string();
-        Some((welcome_dimension(&width)?, welcome_dimension(&height)?))
+        welcome_can_create(&width, &height)
+    }
+
+    /// The Create action, shared by the button and the Return key
+    /// (NewCanvasSheet.swift:34-39: `createDocument` with an empty layer —
+    /// the tab gains its Layer 1 — and the viewport refits to the new size).
+    /// Both gates live here: the fields must parse and the sheet must not be
+    /// busy, so a Return can never slip past a disabled button.
+    fn welcome_submit(&mut self, cx: &mut Context<Self>) {
+        if welcome_disabled(&self.tab().busy) {
+            return;
+        }
+        let Some((width, height)) = self.welcome_size(cx) else {
+            return;
+        };
+        self.tab().session.create_document(width, height, true);
+        self.request_refit();
+        self.touch(cx);
     }
 
     /// The welcome view an empty tab renders instead of the canvas. The form
@@ -50,6 +88,9 @@ impl AppState {
     /// over the canvas background, and keeps the canvas's file-drop import.
     pub fn render_welcome(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let valid = self.welcome_size(cx).is_some();
+        // The sheet-level disable (NewCanvasSheet.swift:45): an import in
+        // flight or a project operation freezes the whole form.
+        let disabled = welcome_disabled(&self.tab().busy);
 
         // The sheet's title bar (sheet_title/text sizes follow the other
         // sheets; the subtitle is NewCanvasSheet's secondary line).
@@ -61,8 +102,8 @@ impl AppState {
             .py_2()
             .border_b_1()
             .border_color(rgb(0x4a4a4a))
-            .child(text_label("Welcome", false).text_size(px(14.0)))
-            .child(text_label("A blank space for your next composition.", true));
+            .child(text_label(WELCOME_TITLE, false).text_size(px(14.0)))
+            .child(text_label(WELCOME_SUBTITLE, true));
 
         // The two dimension fields (NewCanvasSheet's Width/Height TextFields
         // defaulting to 1920×1080) plus its validity hint line.
@@ -76,13 +117,15 @@ impl AppState {
                 "Width",
                 Input::new(&self.welcome_width_input)
                     .id("welcome-width")
-                    .w(px(140.0)),
+                    .w(px(140.0))
+                    .disabled(disabled),
             ))
             .child(sheet_row(
                 "Height",
                 Input::new(&self.welcome_height_input)
                     .id("welcome-height")
-                    .w(px(140.0)),
+                    .w(px(140.0))
+                    .disabled(disabled),
             ))
             .child(if valid {
                 text_label("Transparent canvas · sRGB", true)
@@ -105,8 +148,9 @@ impl AppState {
             // open dialog and the pending flow plays the file picker's part.
             .child(
                 Button::new("welcome-open")
-                    .label("Open…")
+                    .label(OPEN_PROJECT_LABEL)
                     .small()
+                    .disabled(disabled)
                     .on_click(cx.listener(|this, _, window, cx| {
                         match this.workspace.open(None) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
@@ -114,67 +158,28 @@ impl AppState {
                         }
                     })),
             )
-            // File > Import Images' entry point, exactly as the menu action
-            // runs it (workspace.rs `on_import_images`): the native
-            // multi-select panel importing into this tab.
+            // File > Import Images' entry point: the same shared flow the
+            // menu action runs (workspace.rs `prompt_import_images`), so the
+            // picker, the import and the refit cannot drift apart.
             .child(
                 Button::new("welcome-import")
-                    .label("Import Images…")
+                    .label(IMPORT_IMAGE_LABEL)
                     .small()
-                    .on_click(cx.listener(|_this, _, _, cx| {
-                        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-                            files: true,
-                            directories: false,
-                            multiple: true,
-                            prompt: None,
-                        });
-                        cx.spawn(async move |this, cx| {
-                            let picked = receiver
-                                .await
-                                .ok()
-                                .and_then(|r| r.ok())
-                                .unwrap_or_default()
-                                .unwrap_or_default();
-                            this.update(cx, |this, cx| {
-                                if picked.is_empty() {
-                                    return;
-                                }
-                                let failures = this.tab().session.import_images(&picked, None);
-                                if failures.is_empty() {
-                                    this.set_status(
-                                        format!("Imported {} images", picked.len()),
-                                        cx,
-                                    );
-                                } else {
-                                    this.set_status(failures.join("; "), cx);
-                                }
-                                this.fit_for = (0, 0);
-                                this.touch(cx);
-                            })
-                            .ok();
-                        })
-                        .detach();
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.prompt_import_images(cx);
                     })),
             )
             // The primary action sits on the row's end, as in Swift.
             .child(div().flex_1())
             .child(
                 Button::new("welcome-create")
-                    .label("Create canvas")
+                    .label(CREATE_CANVAS_LABEL)
                     .small()
                     .primary()
-                    .disabled(!valid)
+                    .disabled(!valid || disabled)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let Some((width, height)) = this.welcome_size(cx) else {
-                            return;
-                        };
-                        // The startup document's shape (`createDocument` with
-                        // an empty layer: the tab gains its Layer 1)...
-                        this.tab().session.create_document(width, height, true);
-                        // ...and the viewport refits to the new size, like
-                        // every other document-arrives path.
-                        this.request_refit();
-                        this.touch(cx);
+                        this.welcome_submit(cx);
                     })),
             );
 
@@ -219,6 +224,25 @@ impl AppState {
                             .border_color(rgb(0x4a4a4a))
                             .bg(rgb(0x2d2d2d))
                             .overflow_hidden()
+                            // Create supports Return (NewCanvasSheet.swift:40,
+                            // the button's `.configuredNativeShortcut(.return)`):
+                            // keys typed in either field bubble past the text
+                            // system (a single-line input propagates Enter), so
+                            // the panel sees the bare Return and submits. The
+                            // validity and busy gates live in `welcome_submit`,
+                            // matching the disabled button this mirrors.
+                            .on_key_down(cx.listener(
+                                |this, event: &KeyDownEvent, _, cx| {
+                                    if event.keystroke.key != "enter" {
+                                        return;
+                                    }
+                                    let m = &event.keystroke.modifiers;
+                                    if m.control || m.alt || m.platform || m.shift {
+                                        return;
+                                    }
+                                    this.welcome_submit(cx);
+                                },
+                            ))
                             .child(header)
                             .child(body)
                             .child(footer),
@@ -230,6 +254,11 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        welcome_can_create, welcome_disabled, CREATE_CANVAS_LABEL, IMPORT_IMAGE_LABEL,
+        OPEN_PROJECT_LABEL, WELCOME_SUBTITLE, WELCOME_TITLE,
+    };
+    use crate::tabs::ProjectBusy;
     use super::{valid_dimension, welcome_dimension};
 
     #[test]
@@ -253,5 +282,49 @@ mod tests {
         assert!(valid_dimension(30_000));
         assert!(!valid_dimension(0));
         assert!(!valid_dimension(30_001));
+    }
+
+    /// The copy is Swift's own (NewCanvasSheet.swift:20-21, 31-34), not an
+    /// invented title — ticket 10's 文案 alignment.
+    #[test]
+    fn welcome_labels_are_swifts_verbatim_strings() {
+        assert_eq!(WELCOME_TITLE, "New canvas");
+        assert_eq!(WELCOME_SUBTITLE, "A blank space for your next composition.");
+        assert_eq!(OPEN_PROJECT_LABEL, "Open project");
+        assert_eq!(IMPORT_IMAGE_LABEL, "Import image");
+        assert_eq!(CREATE_CANVAS_LABEL, "Create canvas");
+    }
+
+    /// The Create gate (`NewCanvasSheet.valid`, :14-16): both fields must
+    /// parse, for the button and the Return key alike.
+    #[test]
+    fn welcome_can_create_needs_both_fields_valid() {
+        assert_eq!(welcome_can_create("1920", "1080"), Some((1920, 1080)));
+        assert_eq!(welcome_can_create(" 64 ", "9"), Some((64, 9)));
+        // Either field invalid blocks the submit.
+        assert_eq!(welcome_can_create("1920", "abc"), None);
+        assert_eq!(welcome_can_create("", "1080"), None);
+        assert_eq!(welcome_can_create("0", "1080"), None);
+        assert_eq!(welcome_can_create("1920", "30001"), None);
+    }
+
+    /// The form-level disable (NewCanvasSheet.swift:45): an import in flight
+    /// or a project operation freezes the sheet; a brush stroke (not in
+    /// Swift's guard) does not.
+    #[test]
+    fn welcome_disabled_follows_the_swift_busy_flags() {
+        assert!(!welcome_disabled(&ProjectBusy::default()));
+        assert!(welcome_disabled(&ProjectBusy {
+            is_importing: true,
+            ..ProjectBusy::default()
+        }));
+        assert!(welcome_disabled(&ProjectBusy {
+            is_project_busy: true,
+            ..ProjectBusy::default()
+        }));
+        assert!(!welcome_disabled(&ProjectBusy {
+            has_brush_stroke: true,
+            ..ProjectBusy::default()
+        }));
     }
 }

@@ -582,36 +582,7 @@ impl AppState {
         }
     }
     fn on_import_images(&mut self, _: &keys::ImportImages, _w: &mut Window, cx: &mut Context<Self>) {
-        // The native multi-select panel (Swift's showsImporter flow).
-        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let picked = receiver
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default()
-                .unwrap_or_default();
-            this.update(cx, |this, cx| {
-                if picked.is_empty() {
-                    return;
-                }
-                let failures = this.tab().session.import_images(&picked, None);
-                if failures.is_empty() {
-                    this.set_status(format!("Imported {} images", picked.len()), cx);
-                } else {
-                    this.set_status(failures.join("; "), cx);
-                }
-                this.fit_for = (0, 0);
-                this.touch(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.prompt_import_images(cx);
     }
     fn on_close_document(&mut self, _: &keys::CloseDocument, w: &mut Window, cx: &mut Context<Self>) {
         // `close(_:)` (:89-96): confirm unsaved changes, then remove the tab.
@@ -805,7 +776,7 @@ impl AppState {
             self.touch(cx);
         }
     }
-    fn add_adjustment(&mut self, kind: AdjustmentKind, cx: &mut Context<Self>) {
+    pub(crate) fn add_adjustment(&mut self, kind: AdjustmentKind, cx: &mut Context<Self>) {
         self.tab().session.add_adjustment(kind);
         self.touch(cx);
     }
@@ -1181,6 +1152,56 @@ impl AppState {
     }
     fn on_cancel(&mut self, _: &keys::CancelAction, w: &mut Window, cx: &mut Context<Self>) {
         self.cancel_active(w, cx);
+    }
+
+    // MARK: Shared flows
+
+    /// The one "import images" entry (ticket 02): File > Import Images and
+    /// the welcome form's Import image button both land here, so the two
+    /// stay behaviorally identical — the native multi-select panel, the
+    /// import into the current tab, the status line and the viewport refit
+    /// (Swift's `showsImporter` flow, NewCanvasSheet.swift:32).
+    pub(crate) fn prompt_import_images(&mut self, cx: &mut Context<Self>) {
+        // While an import is in flight the welcome form disables; a second
+        // trigger must not stack a second picker (`isImporting`).
+        if self.tab().busy.is_importing {
+            return;
+        }
+        self.tab().busy.is_importing = true;
+        // The native multi-select panel (Swift's showsImporter flow).
+        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = receiver
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default()
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                // The flag clears on every path — cancel included — so the
+                // form re-enables as soon as the panel closes.
+                this.tab().busy.is_importing = false;
+                if picked.is_empty() {
+                    this.touch(cx);
+                    return;
+                }
+                let failures = this.tab().session.import_images(&picked, None);
+                if failures.is_empty() {
+                    this.set_status(format!("Imported {} images", picked.len()), cx);
+                } else {
+                    this.set_status(failures.join("; "), cx);
+                }
+                this.fit_for = (0, 0);
+                this.touch(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // MARK: Shared handler helpers
