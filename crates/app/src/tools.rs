@@ -13,7 +13,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, Window, px,
 };
 
-use compositor_core::document::NavigationTool;
+use compositor_core::document::{NavigationTool, ShapeKind};
 use compositor_core::geometry::CGRect;
 use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
@@ -115,76 +115,6 @@ fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{crop_entry_preset, font_menu_names, tool_title};
-    use compositor_core::document::NavigationTool;
-    use compositor_core::geometry::CGRect;
-    use compositor_core::session::EditorSession;
-
-    #[test]
-    fn tool_title_names_tools_and_eraser_variant() {
-        assert_eq!(tool_title(NavigationTool::Move, false), "Move");
-        assert_eq!(tool_title(NavigationTool::Idle, false), "No tool");
-        // The brush has two modes depending on the eraser toggle.
-        assert_eq!(tool_title(NavigationTool::Brush, false), "Brush");
-        assert_eq!(tool_title(NavigationTool::Brush, true), "Eraser");
-    }
-
-    /// EditorSession.swift:347-351: entering Crop with no frame presets the
-    /// full-document frame AND resets the ratio choice to Free — a ratio
-    /// left over from an earlier crop must not reshape the preset.
-    #[test]
-    fn crop_entry_preset_resets_a_stale_ratio_choice() {
-        let mut session = EditorSession::new();
-        session.create_document(800, 600, false);
-        session.crop_ratio_choice = "4:3".to_string();
-
-        crop_entry_preset(&mut session, NavigationTool::Crop);
-        assert_eq!(session.crop_ratio_choice, "Free");
-        assert_eq!(session.crop_rect, Some(CGRect::new(0.0, 0.0, 800.0, 600.0)));
-
-        // An existing frame is never replaced, and its ratio choice stands.
-        let framed = CGRect::new(10.0, 10.0, 100.0, 100.0);
-        session.crop_rect = Some(framed);
-        session.crop_ratio_choice = "1:1".to_string();
-        crop_entry_preset(&mut session, NavigationTool::Crop);
-        assert_eq!(session.crop_rect, Some(framed));
-        assert_eq!(session.crop_ratio_choice, "1:1");
-    }
-
-    #[test]
-    fn font_menu_names_include_the_current_face_once() {
-        let catalog = vec![
-            "Arial".to_string(),
-            "Calibri".to_string(),
-            "segoeui".to_string(),
-        ];
-        // A catalog face: the list stays sorted, no duplicate.
-        let names = font_menu_names("Calibri", &catalog, 250);
-        assert_eq!(names, vec!["Arial", "Calibri", "segoeui"]);
-        // A face the catalog lacks (Helvetica on this host): it is added and
-        // sorted in.
-        let names = font_menu_names("Helvetica", &catalog, 250);
-        assert_eq!(names, vec!["Arial", "Calibri", "Helvetica", "segoeui"]);
-    }
-
-    #[test]
-    fn font_menu_names_keep_the_current_face_under_the_cap() {
-        let catalog: Vec<String> = ["ahab", "bob", "zed", "zig"]
-            .iter()
-            .map(|name| name.to_string())
-            .collect();
-        // The cap keeps the first faces plus the current one at the end.
-        let names = font_menu_names("yarr", &catalog, 3);
-        assert_eq!(names, vec!["ahab", "bob", "yarr"]);
-        // The current face is always present, even when it would overflow.
-        let names = font_menu_names("zed", &catalog, 2);
-        assert_eq!(names, vec!["ahab", "zed"]);
-        assert_eq!(font_menu_names("only", &[], 1), vec!["only"]);
-    }
-}
-
 /// EditorSession.swift:347-351: entering Crop with no frame presets the
 /// full-document frame and resets the ratio choice to Free, so a ratio
 /// left over from an earlier crop never reshapes the preset.
@@ -202,6 +132,34 @@ fn crop_entry_preset(session: &mut EditorSession, tool: NavigationTool) {
         document.width as f64,
         document.height as f64,
     ));
+}
+
+/// The options header's shared "(value, label) → checked menu entry"
+/// dropdown shape: one entry per value in the given order, the checkmark
+/// on the entry matching `current` (a `String` field compares against its
+/// `&'static str` presets), and a click assigning the value to the session
+/// field `set` names.
+fn menu_entries<V, C, S>(
+    values: impl IntoIterator<Item = (V, &'static str)>,
+    current: C,
+    set: S,
+) -> Vec<MenuEntry>
+where
+    V: Copy + 'static,
+    C: PartialEq<V>,
+    S: Fn(&mut EditorSession, V) + Clone + 'static,
+{
+    values
+        .into_iter()
+        .map(|(value, label)| {
+            let assign = set.clone();
+            MenuEntry::new(label, move |state, _, cx| {
+                assign(&mut state.tab().session, value);
+                state.touch(cx);
+            })
+            .checked(current == value)
+        })
+        .collect()
 }
 
 impl AppState {
@@ -384,23 +342,20 @@ impl AppState {
                         px(60.0),
                     ));
                 if tool == NavigationTool::Brush {
+                    let mode = self.tab().session.brush_mode;
                     header = header.child(dropdown(
                         &app,
                         "brush-mode",
                         if erasing { "Erase" } else { "Paint" },
                         px(80.0),
-                        vec![
-                            crate::ui::MenuEntry::new("Paint", |state, _, cx| {
-                                state.tab().session.brush_mode = BrushToolMode::Paint;
-                                state.touch(cx);
-                            })
-                            .checked(!erasing),
-                            crate::ui::MenuEntry::new("Erase", |state, _, cx| {
-                                state.tab().session.brush_mode = BrushToolMode::Erase;
-                                state.touch(cx);
-                            })
-                            .checked(erasing),
-                        ],
+                        menu_entries(
+                            [
+                                (BrushToolMode::Paint, "Paint"),
+                                (BrushToolMode::Erase, "Erase"),
+                            ],
+                            mode,
+                            |session, value| session.brush_mode = value,
+                        ),
                     ));
                 }
                 if tool == NavigationTool::SpotHealing {
@@ -415,21 +370,15 @@ impl AppState {
                         "heal-mode",
                         label(mode),
                         px(150.0),
-                        [
-                            (SpotHealingMode::ContentAware, "Content Aware"),
-                            (SpotHealingMode::CreateTexture, "Create Texture"),
-                            (SpotHealingMode::ProximityMatch, "Proximity Match"),
-                        ]
-                        .iter()
-                        .map(|(value, name)| {
-                            let value = *value;
-                            crate::ui::MenuEntry::new(*name, move |state, _, cx| {
-                                state.tab().session.spot_healing_mode = value;
-                                state.touch(cx);
-                            })
-                            .checked(mode == value)
-                        })
-                        .collect(),
+                        menu_entries(
+                            [
+                                (SpotHealingMode::ContentAware, "Content Aware"),
+                                (SpotHealingMode::CreateTexture, "Create Texture"),
+                                (SpotHealingMode::ProximityMatch, "Proximity Match"),
+                            ],
+                            mode,
+                            |session, value| session.spot_healing_mode = value,
+                        ),
                     ));
                 }
                 if tool == NavigationTool::Blur {
@@ -444,21 +393,15 @@ impl AppState {
                         "blur-mode",
                         label(mode),
                         px(96.0),
-                        [
-                            (BlurToolMode::Liquify, "Liquify"),
-                            (BlurToolMode::Blur, "Blur"),
-                            (BlurToolMode::Smudge, "Smudge"),
-                        ]
-                        .iter()
-                        .map(|(value, name)| {
-                            let value = *value;
-                            crate::ui::MenuEntry::new(*name, move |state, _, cx| {
-                                state.tab().session.blur_mode = value;
-                                state.touch(cx);
-                            })
-                            .checked(mode == value)
-                        })
-                        .collect(),
+                        menu_entries(
+                            [
+                                (BlurToolMode::Liquify, "Liquify"),
+                                (BlurToolMode::Blur, "Blur"),
+                                (BlurToolMode::Smudge, "Smudge"),
+                            ],
+                            mode,
+                            |session, value| session.blur_mode = value,
+                        ),
                     ));
                 }
                 if tool == NavigationTool::CloneStamp {
@@ -499,18 +442,14 @@ impl AppState {
                         "Rectangle"
                     },
                     px(100.0),
-                    vec![
-                        crate::ui::MenuEntry::new("Rectangle", |state, _, cx| {
-                            state.tab().session.marquee_kind = LassoKind::Rectangle;
-                            state.touch(cx);
-                        })
-                        .checked(kind == LassoKind::Rectangle),
-                        crate::ui::MenuEntry::new("Ellipse", |state, _, cx| {
-                            state.tab().session.marquee_kind = LassoKind::Ellipse;
-                            state.touch(cx);
-                        })
-                        .checked(kind == LassoKind::Ellipse),
-                    ],
+                    menu_entries(
+                        [
+                            (LassoKind::Rectangle, "Rectangle"),
+                            (LassoKind::Ellipse, "Ellipse"),
+                        ],
+                        kind,
+                        |session, value| session.marquee_kind = value,
+                    ),
                 ));
             }
             NavigationTool::Lasso => {
@@ -524,18 +463,14 @@ impl AppState {
                         "Freehand"
                     },
                     px(100.0),
-                    vec![
-                        crate::ui::MenuEntry::new("Freehand", |state, _, cx| {
-                            state.tab().session.lasso_kind = LassoKind::Freehand;
-                            state.touch(cx);
-                        })
-                        .checked(kind == LassoKind::Freehand),
-                        crate::ui::MenuEntry::new("Polygonal", |state, _, cx| {
-                            state.tab().session.lasso_kind = LassoKind::Polygonal;
-                            state.touch(cx);
-                        })
-                        .checked(kind == LassoKind::Polygonal),
-                    ],
+                    menu_entries(
+                        [
+                            (LassoKind::Freehand, "Freehand"),
+                            (LassoKind::Polygonal, "Polygonal"),
+                        ],
+                        kind,
+                        |session, value| session.lasso_kind = value,
+                    ),
                 ));
             }
             NavigationTool::Wand => {
@@ -550,18 +485,11 @@ impl AppState {
                             WandMode::Object => "Object",
                         },
                         px(84.0),
-                        vec![
-                            crate::ui::MenuEntry::new("Wand", |state, _, cx| {
-                                state.tab().session.wand_mode = WandMode::Wand;
-                                state.touch(cx);
-                            })
-                            .checked(mode == WandMode::Wand),
-                            crate::ui::MenuEntry::new("Object", |state, _, cx| {
-                                state.tab().session.wand_mode = WandMode::Object;
-                                state.touch(cx);
-                            })
-                            .checked(mode == WandMode::Object),
-                        ],
+                        menu_entries(
+                            [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
+                            mode,
+                            |session, value| session.wand_mode = value,
+                        ),
                     ))
                     .child(labeled_slider(
                         "Tolerance",
@@ -601,18 +529,14 @@ impl AppState {
                             GradientShape::Radial => "Radial",
                         },
                         px(84.0),
-                        vec![
-                            crate::ui::MenuEntry::new("Linear", |state, _, cx| {
-                                state.tab().session.gradient_settings.shape = GradientShape::Linear;
-                                state.touch(cx);
-                            })
-                            .checked(settings.shape == GradientShape::Linear),
-                            crate::ui::MenuEntry::new("Radial", |state, _, cx| {
-                                state.tab().session.gradient_settings.shape = GradientShape::Radial;
-                                state.touch(cx);
-                            })
-                            .checked(settings.shape == GradientShape::Radial),
-                        ],
+                        menu_entries(
+                            [
+                                (GradientShape::Linear, "Linear"),
+                                (GradientShape::Radial, "Radial"),
+                            ],
+                            settings.shape,
+                            |session, value| session.gradient_settings.shape = value,
+                        ),
                     ))
                     .child(checkbox(
                         &app,
@@ -647,32 +571,25 @@ impl AppState {
             }
             NavigationTool::Zoom => {
                 header = header
-                    .child(zoom_button(&app, "zoom-fit", "Fit"))
-                    .child(zoom_button(&app, "zoom-100", "100%"))
-                    .child(zoom_button(&app, "zoom-in", "+"))
-                    .child(zoom_button(&app, "zoom-out", "-"));
+                    .child(zoom_button(&app, "zoom-fit", ZoomCommand::Fit))
+                    .child(zoom_button(&app, "zoom-100", ZoomCommand::ActualSize))
+                    .child(zoom_button(&app, "zoom-in", ZoomCommand::In))
+                    .child(zoom_button(&app, "zoom-out", ZoomCommand::Out));
             }
             NavigationTool::Crop => {
                 let choice = self.tab().session.crop_ratio_choice.clone();
                 let has_crop = self.tab().session.crop_rect.is_some();
-                let entries = [
-                    ("Free", "Free"),
-                    ("Original", "Original"),
-                    ("1:1", "1:1"),
-                    ("4:3", "4:3"),
-                    ("16:9", "16:9"),
-                ]
-                .iter()
-                .map(|(value, label)| {
-                    let checked = choice == *value;
-                    let value = value.to_string();
-                    crate::ui::MenuEntry::new(*label, move |state, _, cx| {
-                        state.tab().session.crop_ratio_choice = value.clone();
-                        state.touch(cx);
-                    })
-                    .checked(checked)
-                })
-                .collect();
+                let entries = menu_entries(
+                    [
+                        ("Free", "Free"),
+                        ("Original", "Original"),
+                        ("1:1", "1:1"),
+                        ("4:3", "4:3"),
+                        ("16:9", "16:9"),
+                    ],
+                    choice.as_str(),
+                    |session, value| session.crop_ratio_choice = value.to_string(),
+                );
                 header = header
                     .child(dropdown(
                         &app,
@@ -974,11 +891,11 @@ impl AppState {
         }
         if tool == NavigationTool::Shape {
             let kind = self.tab().session.shape_kind;
-            let label = |kind: compositor_core::document::ShapeKind| match kind {
-                compositor_core::document::ShapeKind::Rectangle => "Rectangle",
-                compositor_core::document::ShapeKind::RoundedRectangle => "Rounded Rectangle",
-                compositor_core::document::ShapeKind::Ellipse => "Ellipse",
-                compositor_core::document::ShapeKind::Line => "Line",
+            let label = |kind: ShapeKind| match kind {
+                ShapeKind::Rectangle => "Rectangle",
+                ShapeKind::RoundedRectangle => "Rounded Rectangle",
+                ShapeKind::Ellipse => "Ellipse",
+                ShapeKind::Line => "Line",
             };
             header = header
                 .child(dropdown(
@@ -986,32 +903,16 @@ impl AppState {
                     "shape-kind",
                     label(kind),
                     px(150.0),
-                    vec![
-                        crate::ui::MenuEntry::new("Rectangle", |state, _, cx| {
-                            state.tab().session.shape_kind =
-                                compositor_core::document::ShapeKind::Rectangle;
-                            state.touch(cx);
-                        })
-                        .checked(kind == compositor_core::document::ShapeKind::Rectangle),
-                        crate::ui::MenuEntry::new("Rounded Rectangle", |state, _, cx| {
-                            state.tab().session.shape_kind =
-                                compositor_core::document::ShapeKind::RoundedRectangle;
-                            state.touch(cx);
-                        })
-                        .checked(kind == compositor_core::document::ShapeKind::RoundedRectangle),
-                        crate::ui::MenuEntry::new("Ellipse", |state, _, cx| {
-                            state.tab().session.shape_kind =
-                                compositor_core::document::ShapeKind::Ellipse;
-                            state.touch(cx);
-                        })
-                        .checked(kind == compositor_core::document::ShapeKind::Ellipse),
-                        crate::ui::MenuEntry::new("Line", |state, _, cx| {
-                            state.tab().session.shape_kind =
-                                compositor_core::document::ShapeKind::Line;
-                            state.touch(cx);
-                        })
-                        .checked(kind == compositor_core::document::ShapeKind::Line),
-                    ],
+                    menu_entries(
+                        [
+                            (ShapeKind::Rectangle, "Rectangle"),
+                            (ShapeKind::RoundedRectangle, "Rounded Rectangle"),
+                            (ShapeKind::Ellipse, "Ellipse"),
+                            (ShapeKind::Line, "Line"),
+                        ],
+                        kind,
+                        |session, value| session.shape_kind = value,
+                    ),
                 ))
                 .child(text_label(
                     "Drag on the canvas · Shift-U switches shape",
@@ -1263,40 +1164,177 @@ fn swatch(
         .bg(gpui_kit::rgb(value))
 }
 
+/// What one zoom header button does (the zoom toolbar's Fit / 100% / +
+/// / -). The command is explicit; the label is only the button's face.
+#[derive(Clone, Copy)]
+enum ZoomCommand {
+    Fit,
+    ActualSize,
+    In,
+    Out,
+}
+
+impl ZoomCommand {
+    fn label(self) -> &'static str {
+        match self {
+            ZoomCommand::Fit => "Fit",
+            ZoomCommand::ActualSize => "100%",
+            ZoomCommand::In => "+",
+            ZoomCommand::Out => "-",
+        }
+    }
+}
+
 fn zoom_button(
     app: &gpui_kit::WeakEntity<AppState>,
     id: &'static str,
-    label: &'static str,
+    command: ZoomCommand,
 ) -> Button {
     let app = app.clone();
-    let factor: f64 = if label == "+" {
-        2.0
-    } else if label == "-" {
-        0.5
-    } else {
-        1.0
-    };
     Button::new(id)
-        .label(label)
+        .label(command.label())
         .outline()
         .small()
         .on_click(move |_, _, cx| {
-            app.update(cx, |state, cx| match label {
-                "Fit" => {
+            app.update(cx, |state, cx| match command {
+                ZoomCommand::Fit => {
                     let viewport = state.viewport_size();
                     state.zoom_fit(viewport);
                     state.touch(cx);
                 }
-                "100%" => {
+                ZoomCommand::ActualSize => {
                     state.zoom = 1.0;
                     state.revision += 1;
                     state.touch(cx);
                 }
-                _ => {
-                    state.zoom_at_viewport(factor);
+                ZoomCommand::In => {
+                    state.zoom_at_viewport(2.0);
+                    state.touch(cx);
+                }
+                ZoomCommand::Out => {
+                    state.zoom_at_viewport(0.5);
                     state.touch(cx);
                 }
             })
             .ok();
         })
+}
+
+// MARK: Tests
+
+#[cfg(test)]
+mod tests {
+    use super::{crop_entry_preset, font_menu_names, menu_entries, tool_title};
+    use compositor_core::document::NavigationTool;
+    use compositor_core::geometry::CGRect;
+    use compositor_core::session::EditorSession;
+
+    #[test]
+    fn tool_title_names_tools_and_eraser_variant() {
+        assert_eq!(tool_title(NavigationTool::Move, false), "Move");
+        assert_eq!(tool_title(NavigationTool::Idle, false), "No tool");
+        // The brush has two modes depending on the eraser toggle.
+        assert_eq!(tool_title(NavigationTool::Brush, false), "Brush");
+        assert_eq!(tool_title(NavigationTool::Brush, true), "Eraser");
+    }
+
+    /// The shared dropdown builder yields the same menu items and checked
+    /// state as the per-tool constructions it replaced: one entry per
+    /// value in the given order, the checkmark on the current one, every
+    /// entry enabled and no separators.
+    #[test]
+    fn menu_entries_keep_the_item_order_and_checked_state() {
+        use compositor_core::session::SpotHealingMode;
+
+        let entries = menu_entries(
+            [
+                (SpotHealingMode::ContentAware, "Content Aware"),
+                (SpotHealingMode::CreateTexture, "Create Texture"),
+                (SpotHealingMode::ProximityMatch, "Proximity Match"),
+            ],
+            SpotHealingMode::CreateTexture,
+            |session, value| session.spot_healing_mode = value,
+        );
+        let labels: Vec<_> = entries.iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Content Aware", "Create Texture", "Proximity Match"]
+        );
+        let checked: Vec<_> = entries.iter().map(|entry| entry.checked).collect();
+        assert_eq!(checked, [false, true, false]);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.enabled && !entry.separator)
+        );
+
+        // A String field compares by content against its &'static str
+        // presets, exactly like the inline crop construction did.
+        let entries = menu_entries(
+            [
+                ("Free", "Free"),
+                ("Original", "Original"),
+                ("1:1", "1:1"),
+                ("4:3", "4:3"),
+                ("16:9", "16:9"),
+            ],
+            "4:3".to_string(),
+            |session, value| session.crop_ratio_choice = value.to_string(),
+        );
+        let checked: Vec<_> = entries.iter().map(|entry| entry.checked).collect();
+        assert_eq!(checked, [false, false, false, true, false]);
+    }
+
+    /// EditorSession.swift:347-351: entering Crop with no frame presets the
+    /// full-document frame AND resets the ratio choice to Free — a ratio
+    /// left over from an earlier crop must not reshape the preset.
+    #[test]
+    fn crop_entry_preset_resets_a_stale_ratio_choice() {
+        let mut session = EditorSession::new();
+        session.create_document(800, 600, false);
+        session.crop_ratio_choice = "4:3".to_string();
+
+        crop_entry_preset(&mut session, NavigationTool::Crop);
+        assert_eq!(session.crop_ratio_choice, "Free");
+        assert_eq!(session.crop_rect, Some(CGRect::new(0.0, 0.0, 800.0, 600.0)));
+
+        // An existing frame is never replaced, and its ratio choice stands.
+        let framed = CGRect::new(10.0, 10.0, 100.0, 100.0);
+        session.crop_rect = Some(framed);
+        session.crop_ratio_choice = "1:1".to_string();
+        crop_entry_preset(&mut session, NavigationTool::Crop);
+        assert_eq!(session.crop_rect, Some(framed));
+        assert_eq!(session.crop_ratio_choice, "1:1");
+    }
+
+    #[test]
+    fn font_menu_names_include_the_current_face_once() {
+        let catalog = vec![
+            "Arial".to_string(),
+            "Calibri".to_string(),
+            "segoeui".to_string(),
+        ];
+        // A catalog face: the list stays sorted, no duplicate.
+        let names = font_menu_names("Calibri", &catalog, 250);
+        assert_eq!(names, vec!["Arial", "Calibri", "segoeui"]);
+        // A face the catalog lacks (Helvetica on this host): it is added and
+        // sorted in.
+        let names = font_menu_names("Helvetica", &catalog, 250);
+        assert_eq!(names, vec!["Arial", "Calibri", "Helvetica", "segoeui"]);
+    }
+
+    #[test]
+    fn font_menu_names_keep_the_current_face_under_the_cap() {
+        let catalog: Vec<String> = ["ahab", "bob", "zed", "zig"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        // The cap keeps the first faces plus the current one at the end.
+        let names = font_menu_names("yarr", &catalog, 3);
+        assert_eq!(names, vec!["ahab", "bob", "yarr"]);
+        // The current face is always present, even when it would overflow.
+        let names = font_menu_names("zed", &catalog, 2);
+        assert_eq!(names, vec!["ahab", "zed"]);
+        assert_eq!(font_menu_names("only", &[], 1), vec!["only"]);
+    }
 }

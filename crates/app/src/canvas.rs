@@ -1215,18 +1215,7 @@ impl AppState {
             return;
         }
         let kind = self.tab().session.shape_kind;
-        let color = self.tab().session.palette_color(false);
-        let shape = compositor_core::document::LayerShape {
-            kind,
-            corner_radius: self.tab().session.shape_corner_radius,
-            line_width: self.tab().session.shape_line_width,
-            red: color.red,
-            green: color.green,
-            blue: color.blue,
-            filled: kind != compositor_core::document::ShapeKind::Line,
-            start: CGPoint::ZERO,
-            end: CGPoint::new(1.0, 1.0),
-        };
+        let shape = self.build_shape_for_drag(rect);
         let name = self.tab().session.next_shape_name(kind);
         self.tab().session.add_shape_layer(shape, rect, name);
         self.touch(cx);
@@ -2237,7 +2226,6 @@ mod tests {
             .layer_mut(id)
             .unwrap()
             .is_visible = true;
-        let document = session.document.clone().unwrap();
 
         // An explicitly empty selection paints nothing; a absent selection
         // paints everywhere (:6).
@@ -2319,7 +2307,7 @@ mod tests {
         // blurSample(mask: true): the mask's coverage in the document grid,
         // not the layer's masked pixels — and a disabled mask blocks the tool
         // (BlurTool.swift:11-28; beginBrush's guard).
-        let mut document = CanvasDocument::new(40, 40);
+        let document = CanvasDocument::new(40, 40);
         let mut layer = opaque_layer(40, 40, [255, 0, 0, 255], CGPoint::ZERO);
         let mut mask_image = Bitmap::new(40, 40);
         for px in mask_image.data.chunks_exact_mut(4) {

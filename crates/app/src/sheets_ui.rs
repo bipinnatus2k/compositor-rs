@@ -1620,24 +1620,16 @@ fn anchor_picker(anchor: usize, cx: &mut Context<AppState>) -> gpui_kit::AnyElem
     grid.into_any_element()
 }
 
-/// A labeled slider row bound to one of the sheet's sliders.
+/// A labeled slider row bound to one of the sheet's sliders: the shared
+/// spine ([`crate::ui::labeled_slider_row`]) with the sheets' fixed 110px
+/// label column, vertical padding, and a full-width slider. (Shape frozen
+/// by panels_ui's call sites.)
 pub(crate) fn labeled_slider(
     sliders: &[Entity<SliderState>],
     index: usize,
     label: &str,
 ) -> gpui_kit::AnyElement {
-    let row = gpui_kit::div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .py_0p5()
-        .child(
-            gpui_kit::div()
-                .w(px(110.0))
-                .flex_shrink_0()
-                .child(text_label(label.to_string(), true)),
-        );
+    let row = crate::ui::labeled_slider_row(label, Some(px(110.0))).py_0p5();
     match sliders.get(index) {
         Some(slider) => row
             .child(gpui_kit::div().flex_1().child(Slider::new(slider)))

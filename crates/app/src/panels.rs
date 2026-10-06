@@ -217,13 +217,10 @@ impl FloatingPanels {
         true
     }
 
-    /// The open panel's current title (for `refocus` re-showing).
+    /// The open panel's current title (for `refocus` re-showing); empty
+    /// when the panel is not open.
     fn title(&self, name: &str) -> SharedString {
-        self.open
-            .iter()
-            .find(|p| p.name == name)
-            .map(|p| p.title.clone())
-            .unwrap_or_default()
+        self.title_of(name).unwrap_or_default()
     }
 }
 
@@ -323,6 +320,8 @@ pub fn render_panel<E: 'static>(
         .child(
             Button::new(SharedString::from(format!("panel-close-{cookie}")))
                 .label("✕")
+                // The ✕ glyph alone announces as nothing to a screen reader.
+                .accessibility_label("Close panel")
                 .small()
                 .ghost()
                 .on_click(move |_event: &ClickEvent, window, cx| {

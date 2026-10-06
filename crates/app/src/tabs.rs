@@ -369,18 +369,24 @@ impl ProjectWorkspace {
         }
     }
 
-    /// The close flow's alert answer.
-    pub fn resolve_close(&mut self, choice: UnsavedChoice) -> Step<()> {
+    /// The close flow's shared scaffold: both resume points
+    /// (`resolve_close`, `close_after_save`) hand their answer to the
+    /// pending tab's controller through `ask` and interpret it the same
+    /// way — approval removes the tab and releases the guard, refusal just
+    /// releases it, a nested save panel keeps both until it resolves.
+    fn resume_close_flow(&mut self, ask: impl FnOnce(&mut ProjectTab) -> Step<bool>) -> Step<()> {
         let Some(id) = self.pending_close else {
             return Step::Done(());
         };
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            // The tab vanished mid-flow: release the guard with nothing to
+            // remove.
             self.pending_close = None;
             self.is_managing = false;
             return Step::Done(());
         };
-        let tab = &mut self.tabs[index];
-        match tab.controller.resolve_confirm(&mut tab.session, choice) {
+        let answer = ask(&mut self.tabs[index]);
+        match answer {
             Step::Done(true) => {
                 self.pending_close = None;
                 self.is_managing = false;
@@ -396,32 +402,17 @@ impl ProjectWorkspace {
         }
     }
 
+    /// The close flow's alert answer.
+    pub fn resolve_close(&mut self, choice: UnsavedChoice) -> Step<()> {
+        self.resume_close_flow(|tab| tab.controller.resolve_confirm(&mut tab.session, choice))
+    }
+
     /// Second half of a save panel raised by the close flow's `Save` button
     /// (after `finish_save` on the tab's controller).
     pub fn close_after_save(&mut self, saved: bool) -> Step<()> {
-        let Some(id) = self.pending_close else {
-            return Step::Done(());
-        };
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
-            self.pending_close = None;
-            self.is_managing = false;
-            return Step::Done(());
-        };
-        let tab = &mut self.tabs[index];
-        match tab.controller.confirm_after_save(&mut tab.session, saved) {
-            Step::Done(true) => {
-                self.pending_close = None;
-                self.is_managing = false;
-                self.remove_tab(id);
-                Step::Done(())
-            }
-            Step::Done(false) => {
-                self.pending_close = None;
-                self.is_managing = false;
-                Step::Done(())
-            }
-            Step::Pending(pending) => Step::Pending(pending),
-        }
+        self.resume_close_flow(move |tab| {
+            tab.controller.confirm_after_save(&mut tab.session, saved)
+        })
     }
 
     /// `removeTab(_:)` (:97-102): remove; refill an emptied workspace; a
@@ -534,18 +525,12 @@ impl ProjectWorkspace {
         }
     }
 
-    /// The quit flow's alert answer.
-    pub fn resolve_quit(&mut self, choice: UnsavedChoice) -> Step<bool> {
-        let Some(run) = self.quit_run.as_ref() else {
-            return Step::Done(false);
-        };
-        let tab_id = run.order[run.index];
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            self.quit_run.as_mut().unwrap().index += 1;
-            return self.advance_quit();
-        };
-        let tab = &mut self.tabs[index];
-        match tab.controller.resolve_confirm(&mut tab.session, choice) {
+    /// The quit flow's shared scaffold: both resume points
+    /// (`resolve_quit`, `quit_after_save`) interpret the asked tab's
+    /// controller answer the same way — approval walks on to the next tab,
+    /// refusal aborts the whole quit.
+    fn resume_quit_flow(&mut self, answer: Step<bool>) -> Step<bool> {
+        match answer {
             Step::Done(true) => {
                 self.quit_run.as_mut().unwrap().index += 1;
                 self.advance_quit()
@@ -559,6 +544,24 @@ impl ProjectWorkspace {
         }
     }
 
+    /// The quit flow's alert answer.
+    pub fn resolve_quit(&mut self, choice: UnsavedChoice) -> Step<bool> {
+        let Some(run) = self.quit_run.as_ref() else {
+            return Step::Done(false);
+        };
+        let tab_id = run.order[run.index];
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            // The asked tab vanished mid-flow: skip it and keep going.
+            self.quit_run.as_mut().unwrap().index += 1;
+            return self.advance_quit();
+        };
+        let answer = {
+            let tab = &mut self.tabs[index];
+            tab.controller.resolve_confirm(&mut tab.session, choice)
+        };
+        self.resume_quit_flow(answer)
+    }
+
     /// Second half of a save panel raised by the quit flow's `Save` button
     /// (after `finish_save` on the asked tab's controller).
     pub fn quit_after_save(&mut self, saved: bool) -> Step<bool> {
@@ -567,23 +570,17 @@ impl ProjectWorkspace {
         };
         let tab_id = run.order[run.index];
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            // The asked tab vanished mid-flow: the panel's own result stands
+            // and the quit aborts.
             self.quit_run = None;
             self.is_managing = false;
             return Step::Done(saved);
         };
-        let tab = &mut self.tabs[index];
-        match tab.controller.confirm_after_save(&mut tab.session, saved) {
-            Step::Done(true) => {
-                self.quit_run.as_mut().unwrap().index += 1;
-                self.advance_quit()
-            }
-            Step::Done(false) => {
-                self.quit_run = None;
-                self.is_managing = false;
-                Step::Done(false)
-            }
-            Step::Pending(pending) => Step::Pending(pending),
-        }
+        let answer = {
+            let tab = &mut self.tabs[index];
+            tab.controller.confirm_after_save(&mut tab.session, saved)
+        };
+        self.resume_quit_flow(answer)
     }
 
     // MARK: Receiving files (`receive` :123-141)
@@ -1107,7 +1104,7 @@ mod tests {
     #[test]
     fn confirm_quit_walks_the_order_and_aborts_on_cancel() {
         let mut workspace = ProjectWorkspace::new();
-        let first = workspace.selected_id();
+        let _first = workspace.selected_id();
         let second = workspace.add_tab(false).id;
         workspace
             .tab_mut(second)

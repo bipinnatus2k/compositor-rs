@@ -139,14 +139,8 @@ pub fn labeled_slider(
     value: String,
     slider_width: Pixels,
 ) -> impl IntoElement {
-    div_row()
-        .child(
-            gpui_kit::div()
-                // ToolHeaderStyle.swift:7: the control font is 12.
-                .text_size(px(12.0))
-                .text_color(rgb_u32(FG_DIM))
-                .child(SharedString::from(label.to_string())),
-        )
+    labeled_slider_row(label, None)
+        .flex_shrink_0()
         .child(gpui_kit::div().w(slider_width).child(Slider::new(state)))
         .child(
             gpui_kit::div()
@@ -156,6 +150,28 @@ pub fn labeled_slider(
                 .text_color(rgb_u32(FG_TEXT))
                 .child(SharedString::from(value)),
         )
+}
+
+/// The labeled-slider row both slider surfaces share: a flex row whose
+/// leading child is the dim control-font label, in a fixed-width column
+/// when `label_width` is given. The options header adds a pixel-width
+/// slider and the value readout ([`labeled_slider`]); the sheets and
+/// panels add vertical padding and a full-width slider (sheets_ui.rs's
+/// wrapper, whose shape is frozen by panels_ui's call sites).
+pub(crate) fn labeled_slider_row(label: &str, label_width: Option<Pixels>) -> gpui_kit::Div {
+    let mut label_cell = gpui_kit::div()
+        // ToolHeaderStyle.swift:7: the control font is 12.
+        .text_size(px(12.0))
+        .text_color(rgb_u32(FG_DIM));
+    if let Some(width) = label_width {
+        label_cell = label_cell.w(width).flex_shrink_0();
+    }
+    gpui_kit::div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(label_cell.child(SharedString::from(label.to_string())))
 }
 
 /// A checkbox with a label that writes the new value back through `handler`.

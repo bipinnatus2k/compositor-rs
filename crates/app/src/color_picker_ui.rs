@@ -9,15 +9,14 @@
 //! Layout divergence: Swift also has R/G/B number entry fields. They are not
 //! in this cut because `PickerUi`'s shape is fixed by `state.rs`
 //! (`build_picker_ui`), which leaves nowhere to keep three more input
-//! entities; the hue/saturation/brightness sliders that predate this view are
-//! likewise still constructed but no longer rendered.
+//! entities. The hue/saturation/brightness sliders that predated the drawn
+//! field are gone — the field and the hue strip feed the same state.
 
 use std::sync::Arc;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
     AnyElement, AppContext, Bounds, Context, Corners, Entity, Focusable, Global,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -48,14 +47,11 @@ const HUE_ARROW_H: f32 = 10.0;
 /// down on paint, staying sharp at 2× backing scale.
 const BACKING_SCALE: f32 = 2.0;
 
-/// The open picker's widgets; `None` while no picker is open. The three
-/// sliders predate the drawn field and are no longer rendered, but the struct
-/// keeps them because `state.rs`'s `build_picker_ui` (the Type toolbar's
-/// entry point) constructs it with all four fields.
+/// The open picker's widgets; `None` while no picker is open. The drawn
+/// field and the hue strip write the session's `color_picker.hsb`
+/// directly ([`AppState::picker_apply`]); only the hex entry stays an
+/// entity.
 pub struct PickerUi {
-    pub hue: Entity<SliderState>,
-    pub saturation: Entity<SliderState>,
-    pub brightness: Entity<SliderState>,
     pub hex: Entity<InputState>,
 }
 
@@ -75,39 +71,10 @@ impl AppState {
         let Some(picker) = self.tab().session.color_picker.as_ref() else {
             return;
         };
-        let hsb = picker.hsb;
-        // Sliders are no longer rendered (the drawn field and hue strip
-        // replaced them); they exist only to satisfy PickerUi's shape above.
-        let hue = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(360.0)
-                .step(1.0)
-                .default_value(hsb.hue as f32)
-        });
-        let saturation = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(100.0)
-                .step(1.0)
-                .default_value((hsb.saturation * 100.0) as f32)
-        });
-        let brightness = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(100.0)
-                .step(1.0)
-                .default_value((hsb.brightness * 100.0) as f32)
-        });
         let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
         // A stale drag from a previous open must not survive.
         cx.default_global::<PickerFieldState>().drag = None;
-        self.picker_ui = Some(PickerUi {
-            hue,
-            saturation,
-            brightness,
-            hex,
-        });
+        self.picker_ui = Some(PickerUi { hex });
         // The picker lives in the shared floating panel
         // (ColorPickerSheet.swift:167-181): first opened centered on the
         // canvas, afterwards wherever it was last left.
@@ -222,11 +189,11 @@ impl AppState {
         self.picker_apply(|hsb| hsb.hue = hue, window, cx);
     }
 
-    /// The one path every picker edit takes — the former slider
-    /// subscription: mutate `color_picker.hsb`, preview an effect's color
-    /// live (ColorPalette.swift:113-116), keep the hex field on the working
-    /// color when it is not being edited (Swift's `onChange(of: color)`),
-    /// then redraw.
+    /// The one path every picker edit takes — the field and hue strip
+    /// drags (the former sliders' subscription): mutate `color_picker.hsb`,
+    /// preview an effect's color live (ColorPalette.swift:113-116), keep
+    /// the hex field on the working color when it is not being edited
+    /// (Swift's `onChange(of: color)`), then redraw.
     fn picker_apply(
         &mut self,
         apply: impl FnOnce(&mut PickerHSB),

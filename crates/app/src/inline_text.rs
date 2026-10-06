@@ -1079,7 +1079,7 @@ mod tests {
         // rasterizes into, with the draft's tracking and alignment carried
         // through — ink lands inside the raster exactly where the inset and
         // the box say the content lives.
-        let mut style = LayerTextStyle {
+        let style = LayerTextStyle {
             content: "Hi there".into(),
             font_size: 40.0,
             tracking: 3.0,
@@ -1400,10 +1400,11 @@ mod tests {
     #[test]
     fn handle_hits_follow_the_edge_bands() {
         // handle(at:): a band along each edge counts as that edge
-        // (InlineTextEditor.swift:276-293); the reach is handleSize * 10/6.
+        // (InlineTextEditor.swift:276-293); the reach is handleSize * 10/6
+        // (= 10 at this size), which the bands below exercise through the
+        // `handle_size` argument alone.
         let bounds = CGSize::new(300.0, 200.0);
         let handle_size = 6.0;
-        let reach = handle_size * 10.0 / 6.0; // 10
         // Corners.
         assert_eq!(
             inline_text_handle_at(CGPoint::new(2.0, 3.0), bounds, handle_size),
