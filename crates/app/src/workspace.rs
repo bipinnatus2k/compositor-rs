@@ -1,6 +1,8 @@
 //! The workspace: window layout, the action dispatch for every menu item and
 //! keyboard shortcut, and the status bar.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
 };
@@ -17,18 +19,23 @@ use crate::ui::{FG_DIM, text_label};
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Startup load of the persisted tool toggles (ToolDefaults.swift):
-        // the first render of the freshly opened window is the earliest point
-        // this file owns, and it runs before any input can reach the app.
-        // Once per process; a no-op afterwards.
+        // Startup load of the persisted tool toggles (ToolDefaults.swift).
+        // Swift applies them where the session is constructed: the
+        // `EditorSession` property defaults read `ToolDefaults` at init
+        // (EditorSession.swift:198-279). The call therefore belongs on the
+        // init path — `AppState::new` — which lives in state.rs, outside
+        // this file; the head of the first render is the earliest point
+        // this file owns, and it still runs before any input can reach the
+        // app. Once per process; a no-op afterwards.
         crate::settings::apply_startup_defaults(
             &mut self.workspace.current_mut().session,
             &mut self.transform_auto_select,
         );
-        // Drains: workspace-level errors (failed opens) surface as the Alert
-        // sheet; queued file receives run once the guards cleared.
-        self.drain_workspace_errors(window, cx);
-        self.drain_queued_receives();
+        // Workspace errors (failed opens → the Alert sheet) and queued file
+        // receives progress on the async drain pump, never during draw;
+        // rendering stays a pure function of state and only requests a pump
+        // when state says work is pending.
+        self.schedule_drain_pump(window, cx);
         div()
             .id("workspace")
             .key_context("Compositor")
@@ -219,6 +226,65 @@ impl Render for AppState {
     }
 }
 
+/// Guards against stacking drain pumps: set when a pump is spawned, cleared
+/// when it runs out of work (or its window went away). Renders that find
+/// work pending while a pump is already polling are no-ops.
+static DRAIN_PUMP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+impl AppState {
+    /// Spawns the workspace drain pump when state says work is pending. The
+    /// pump — not `render` — drains workspace-level errors into the Alert
+    /// sheet and runs queued file receives once the guards cleared, the two
+    /// side effects the render head used to carry. Spawning is idempotent:
+    /// one pump at a time, and a pump that finds nothing left to do exits
+    /// without ever holding entity state across an await.
+    fn schedule_drain_pump(&mut self, window: &Window, cx: &Context<Self>) {
+        if self.workspace.errors.is_empty() && !self.workspace.has_queued_receives() {
+            return;
+        }
+        if DRAIN_PUMP_RUNNING.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                // One drain pass, with the same order and guards the render
+                // head used: errors first (the Alert sheet), then queued
+                // receives. A pass that changed state asks for a frame, the
+                // way the old same-frame drains showed their result.
+                let mut waiting_on_guards = false;
+                let window_open = this.update_in(cx, |this, window, cx| {
+                    let sheet_free = this.sheet.is_none();
+                    let had_errors = !this.workspace.errors.is_empty();
+                    let had_receives = this.workspace.has_queued_receives();
+                    this.drain_workspace_errors(window, cx);
+                    this.drain_queued_receives();
+                    let alert_opened = sheet_free && had_errors && this.sheet.is_some();
+                    let receives_ran = had_receives && !this.workspace.has_queued_receives();
+                    if alert_opened || receives_ran {
+                        cx.notify();
+                    }
+                    // Receives still queued mean the guards block them (a
+                    // floating panel or a mid-flow dialog): keep Swift's
+                    // `while !canSwitch` 30 ms poll going
+                    // (ProjectWorkspace.swift:126-129) until they clear.
+                    // Errors left behind an open Alert wait for its
+                    // dismissal — the close notifies, and the next render
+                    // re-requests a pump.
+                    waiting_on_guards = this.workspace.has_queued_receives();
+                });
+                if window_open.is_err() || !waiting_on_guards {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(30))
+                    .await;
+            }
+            DRAIN_PUMP_RUNNING.store(false, Ordering::Release);
+        })
+        .detach();
+    }
+}
+
 /// The layer's adjustment settings as the filter-sheet editor reads them:
 /// every slot present on the adjustment overrides the default.
 fn filter_settings_from_adjustment(
@@ -288,32 +354,6 @@ pub fn project_tab_pill_width(title: &str, modified: bool) -> f32 {
     project_tab_label_width(title, modified) + 40.0
 }
 
-#[cfg(test)]
-mod tab_width_tests {
-    use super::{project_tab_label_width, project_tab_pill_width};
-
-    /// The clamp from ProjectTabs.swift:59-64.
-    #[test]
-    fn tab_label_width_clamps_like_swift() {
-        // Short titles bottom out at 35.
-        assert_eq!(project_tab_label_width("", false), 35.0);
-        assert_eq!(project_tab_label_width("Untitled", false), 56.0);
-        // The unsaved dot adds 10 (5px dot and 5px gap).
-        assert_eq!(project_tab_label_width("Untitled", true), 66.0);
-        // Long titles cap at 155.
-        let long = "a".repeat(40);
-        assert_eq!(project_tab_label_width(&long, true), 155.0);
-    }
-
-    /// The pill adds 40 for padding + the close button (:66-69).
-    #[test]
-    fn tab_pill_width_adds_forty() {
-        assert_eq!(project_tab_pill_width("Untitled", false), 96.0);
-        assert_eq!(project_tab_pill_width("Untitled", true), 106.0);
-        assert_eq!(project_tab_pill_width(&"x".repeat(60), false), 195.0);
-    }
-}
-
 impl AppState {
     /// The 34px project tab strip (`ProjectTabs.swift`'s `ProjectTabStrip`):
     /// one pill per tab — title, unsaved dot, close button — plus a "New"
@@ -359,6 +399,10 @@ impl AppState {
                     .ghost()
                     .compact()
                     .disabled(!can_switch)
+                    // Swift's close button carries `help("Close \(title)")`
+                    // (ProjectTabs.swift:242); the port's icon-only button
+                    // says the same to assistive tech.
+                    .accessibility_label(format!("Close {title}"))
                     .on_click(cx.listener(
                         move |this, _, window, cx| match this.workspace.close(id) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
@@ -1630,9 +1674,13 @@ impl AppState {
         } else {
             "Redo: \u{2014}".to_string()
         };
-        let import_error = self.workspace.current_mut().import_error.take();
-        let message = import_error
-            .or_else(|| self.status.clone())
+        // The status line reads state; it never consumes it. Import
+        // failures surface at the receiving event (`receive_dropped_files`,
+        // `prompt_import_images` both write the status themselves), not by
+        // a render-time drain.
+        let message = self
+            .status
+            .clone()
             .or_else(|| self.current_tab().session.brush_error.clone())
             .unwrap_or_default();
 
@@ -1677,5 +1725,31 @@ impl AppState {
                     .child(text_label(redo_text, true)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tab_width_tests {
+    use super::{project_tab_label_width, project_tab_pill_width};
+
+    /// The clamp from ProjectTabs.swift:59-64.
+    #[test]
+    fn tab_label_width_clamps_like_swift() {
+        // Short titles bottom out at 35.
+        assert_eq!(project_tab_label_width("", false), 35.0);
+        assert_eq!(project_tab_label_width("Untitled", false), 56.0);
+        // The unsaved dot adds 10 (5px dot and 5px gap).
+        assert_eq!(project_tab_label_width("Untitled", true), 66.0);
+        // Long titles cap at 155.
+        let long = "a".repeat(40);
+        assert_eq!(project_tab_label_width(&long, true), 155.0);
+    }
+
+    /// The pill adds 40 for padding + the close button (:66-69).
+    #[test]
+    fn tab_pill_width_adds_forty() {
+        assert_eq!(project_tab_pill_width("Untitled", false), 96.0);
+        assert_eq!(project_tab_pill_width("Untitled", true), 106.0);
+        assert_eq!(project_tab_pill_width(&"x".repeat(60), false), 195.0);
     }
 }
