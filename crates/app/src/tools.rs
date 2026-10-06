@@ -2,16 +2,16 @@
 
 use std::rc::Rc;
 
-use gpui_kit::{
-    px, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window,
-};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Disableable, Selectable, Sizable};
+use gpui_kit::{
+    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, px,
+};
 
 use compositor_core::document::NavigationTool;
 use compositor_core::geometry::CGRect;
@@ -21,27 +21,69 @@ use compositor_core::tools::brush::GradientShape;
 use compositor_core::transform::LayerSampling;
 
 use crate::state::{AppState, CanvasDrag};
-use crate::ui::{div_row, dropdown, labeled_slider, text_label, MenuEntry};
+use crate::ui::{MenuEntry, div_row, dropdown, labeled_slider, text_label};
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
 /// eraser-variant flag). The letter only names the button element (kept so
 /// existing element ids are stable); the glyph comes from the bundled
 /// Lucide set (`gpui_kit::assets`). Brush and Eraser share the Brush tool.
 const TOOLS: [(NavigationTool, &str, IconName, &str, bool); 16] = [
-    (NavigationTool::Move, "V", IconName::Move, "Move / Transform", false),
-    (NavigationTool::Marquee, "M", IconName::SquareDashed, "Marquee", false),
+    (
+        NavigationTool::Move,
+        "V",
+        IconName::Move,
+        "Move / Transform",
+        false,
+    ),
+    (
+        NavigationTool::Marquee,
+        "M",
+        IconName::SquareDashed,
+        "Marquee",
+        false,
+    ),
     (NavigationTool::Lasso, "L", IconName::Lasso, "Lasso", false),
-    (NavigationTool::Wand, "W", IconName::WandSparkles, "Magic Wand", false),
+    (
+        NavigationTool::Wand,
+        "W",
+        IconName::WandSparkles,
+        "Magic Wand",
+        false,
+    ),
     (NavigationTool::Crop, "C", IconName::Crop, "Crop", false),
     (NavigationTool::Brush, "B", IconName::Brush, "Brush", false),
     (NavigationTool::Brush, "E", IconName::Eraser, "Eraser", true),
-    (NavigationTool::SpotHealing, "J", IconName::Bandage, "Spot Healing Brush", false),
-    (NavigationTool::CloneStamp, "S", IconName::Stamp, "Clone Stamp", false),
+    (
+        NavigationTool::SpotHealing,
+        "J",
+        IconName::Bandage,
+        "Spot Healing Brush",
+        false,
+    ),
+    (
+        NavigationTool::CloneStamp,
+        "S",
+        IconName::Stamp,
+        "Clone Stamp",
+        false,
+    ),
     (NavigationTool::Blur, "R", IconName::Droplet, "Smear", false),
-    (NavigationTool::Gradient, "G", IconName::Blend, "Gradient", false),
+    (
+        NavigationTool::Gradient,
+        "G",
+        IconName::Blend,
+        "Gradient",
+        false,
+    ),
     (NavigationTool::Shape, "U", IconName::Square, "Shape", false),
     (NavigationTool::Type, "T", IconName::Type, "Type", false),
-    (NavigationTool::Eyedropper, "I", IconName::Pipette, "Eyedropper", false),
+    (
+        NavigationTool::Eyedropper,
+        "I",
+        IconName::Pipette,
+        "Eyedropper",
+        false,
+    ),
     (NavigationTool::Hand, "H", IconName::Hand, "Hand", false),
     (NavigationTool::Zoom, "Z", IconName::ZoomIn, "Zoom", false),
 ];
@@ -234,7 +276,15 @@ impl AppState {
             } else {
                 active == tool
             };
-            rail = rail.child(tool_button(tool, letter, icon, name, eraser_entry, selected, cx));
+            rail = rail.child(tool_button(
+                tool,
+                letter,
+                icon,
+                name,
+                eraser_entry,
+                selected,
+                cx,
+            ));
         }
 
         // Foreground / background swatches: clicking either opens the color
@@ -570,7 +620,11 @@ impl AppState {
                         "Foreground to Background",
                         settings.foreground_to_background,
                         |state, checked, _, cx| {
-                            state.tab().session.gradient_settings.foreground_to_background = checked;
+                            state
+                                .tab()
+                                .session
+                                .gradient_settings
+                                .foreground_to_background = checked;
                             state.touch(cx);
                         },
                     ))
@@ -620,7 +674,13 @@ impl AppState {
                 })
                 .collect();
                 header = header
-                    .child(dropdown(&app, "crop-ratio", choice.clone(), px(92.0), entries))
+                    .child(dropdown(
+                        &app,
+                        "crop-ratio",
+                        choice.clone(),
+                        px(92.0),
+                        entries,
+                    ))
                     .child(
                         Button::new("crop-apply")
                             .label("Apply")
@@ -655,11 +715,10 @@ impl AppState {
             let mask = edit.map(|edit| edit.mask).unwrap_or_else(|| {
                 self.tab().session.is_mask_selected
                     && self
-                        .tab().session
+                        .tab()
+                        .session
                         .active_layer()
-                        .and_then(|layer| {
-                            layer.mask.as_ref().map(|mask| !mask.is_linked)
-                        })
+                        .and_then(|layer| layer.mask.as_ref().map(|mask| !mask.is_linked))
                         .unwrap_or(false)
             });
             // The fields gray out while nothing can transform, or while a
@@ -696,10 +755,30 @@ impl AppState {
                         state.touch(cx);
                     },
                 ))
-                .child(number_field("transform-x", "X", &self.transform_x_input, px(52.0)))
-                .child(number_field("transform-y", "Y", &self.transform_y_input, px(52.0)))
-                .child(number_field("transform-w", "W", &self.transform_w_input, px(52.0)))
-                .child(number_field("transform-h", "H", &self.transform_h_input, px(52.0)))
+                .child(number_field(
+                    "transform-x",
+                    "X",
+                    &self.transform_x_input,
+                    px(52.0),
+                ))
+                .child(number_field(
+                    "transform-y",
+                    "Y",
+                    &self.transform_y_input,
+                    px(52.0),
+                ))
+                .child(number_field(
+                    "transform-w",
+                    "W",
+                    &self.transform_w_input,
+                    px(52.0),
+                ))
+                .child(number_field(
+                    "transform-h",
+                    "H",
+                    &self.transform_h_input,
+                    px(52.0),
+                ))
                 .child(checkbox(
                     &app,
                     "transform-lock-ratio",
@@ -722,7 +801,11 @@ impl AppState {
                     &self.transform_rotation_input,
                     px(48.0),
                 ))
-                .child(sampling_dropdown(&app, self.transform_displayed(), fields_enabled))
+                .child(sampling_dropdown(
+                    &app,
+                    self.transform_displayed(),
+                    fields_enabled,
+                ))
                 .child(
                     Button::new("transform-flip-h")
                         .label("Flip H")
@@ -792,12 +875,12 @@ impl AppState {
                 .collect();
             let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
             let color = self.tab().session.type_color();
-            let color_rgb =
-                (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
+            let color_rgb = (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
             let has_document = self.tab().session.document.is_some();
             let has_draft = self.tab().session.text_draft.is_some();
             let active_is_text = self
-                .tab().session
+                .tab()
+                .session
                 .active_layer()
                 .and_then(|layer| layer.live_text())
                 .is_some();
@@ -809,7 +892,12 @@ impl AppState {
                     // than the row's control spacing.
                     div_row()
                         .gap_1()
-                        .child(Input::new(&self.type_size_input).id("type-size").small().w(px(52.0)))
+                        .child(
+                            Input::new(&self.type_size_input)
+                                .id("type-size")
+                                .small()
+                                .w(px(52.0)),
+                        )
                         .child(text_label("px", true)),
                 )
                 .child(
@@ -827,24 +915,20 @@ impl AppState {
                 )
                 .child(alignment_buttons(&app, style.alignment))
                 .child(
-                    div_row()
-                        .child(text_label("Tracking", true))
-                        .child(
-                            Input::new(&self.type_tracking_input)
-                                .id("type-tracking")
-                                .small()
-                                .w(px(48.0)),
-                        ),
+                    div_row().child(text_label("Tracking", true)).child(
+                        Input::new(&self.type_tracking_input)
+                            .id("type-tracking")
+                            .small()
+                            .w(px(48.0)),
+                    ),
                 )
                 .child(
-                    div_row()
-                        .child(text_label("Leading", true))
-                        .child(
-                            Input::new(&self.type_leading_input)
-                                .id("type-leading")
-                                .small()
-                                .w(px(52.0)),
-                        ),
+                    div_row().child(text_label("Leading", true)).child(
+                        Input::new(&self.type_leading_input)
+                            .id("type-leading")
+                            .small()
+                            .w(px(52.0)),
+                    ),
                 );
             if has_draft {
                 header = header
@@ -879,12 +963,12 @@ impl AppState {
                         .label("Edit Text")
                         .small()
                         .disabled(!has_document || !active_is_text)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.tab().session.edit_active_text();
-                                this.sync_inline_text(window, cx);
-                                this.sync_text_style_inputs(window, cx);
-                                this.touch(cx);
-                            })),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.tab().session.edit_active_text();
+                            this.sync_inline_text(window, cx);
+                            this.sync_text_style_inputs(window, cx);
+                            this.touch(cx);
+                        })),
                 );
             }
         }
@@ -922,13 +1006,17 @@ impl AppState {
                         })
                         .checked(kind == compositor_core::document::ShapeKind::Ellipse),
                         crate::ui::MenuEntry::new("Line", |state, _, cx| {
-                            state.tab().session.shape_kind = compositor_core::document::ShapeKind::Line;
+                            state.tab().session.shape_kind =
+                                compositor_core::document::ShapeKind::Line;
                             state.touch(cx);
                         })
                         .checked(kind == compositor_core::document::ShapeKind::Line),
                     ],
                 ))
-                .child(text_label("Drag on the canvas · Shift-U switches shape", true));
+                .child(text_label(
+                    "Drag on the canvas · Shift-U switches shape",
+                    true,
+                ));
         }
 
         header.into_any_element()
@@ -1038,18 +1126,9 @@ fn alignment_buttons(
 ) -> gpui_kit::Div {
     let mut row = gpui_kit::div().flex().flex_row().gap_0p5().flex_shrink_0();
     for (alignment, label) in [
-        (
-            compositor_core::document::TextAlignment::Left,
-            "Left",
-        ),
-        (
-            compositor_core::document::TextAlignment::Center,
-            "Center",
-        ),
-        (
-            compositor_core::document::TextAlignment::Right,
-            "Right",
-        ),
+        (compositor_core::document::TextAlignment::Left, "Left"),
+        (compositor_core::document::TextAlignment::Center, "Center"),
+        (compositor_core::document::TextAlignment::Right, "Right"),
     ] {
         row = row.child(
             Button::new(SharedString::from(format!("type-align-{}", label)))
@@ -1164,7 +1243,11 @@ fn tool_button(
         }))
 }
 
-fn swatch(offset_x: f32, offset_y: f32, color: compositor_core::document::PaletteColor) -> gpui_kit::Div {
+fn swatch(
+    offset_x: f32,
+    offset_y: f32,
+    color: compositor_core::document::PaletteColor,
+) -> gpui_kit::Div {
     let value = ((color.red * 255.0).round() as u32) << 16
         | ((color.green * 255.0).round() as u32) << 8
         | (color.blue * 255.0).round() as u32;
@@ -1180,7 +1263,11 @@ fn swatch(offset_x: f32, offset_y: f32, color: compositor_core::document::Palett
         .bg(gpui_kit::rgb(value))
 }
 
-fn zoom_button(app: &gpui_kit::WeakEntity<AppState>, id: &'static str, label: &'static str) -> Button {
+fn zoom_button(
+    app: &gpui_kit::WeakEntity<AppState>,
+    id: &'static str,
+    label: &'static str,
+) -> Button {
     let app = app.clone();
     let factor: f64 = if label == "+" {
         2.0

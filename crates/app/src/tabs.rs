@@ -16,7 +16,7 @@ use compositor_core::session::EditorSession;
 use uuid::Uuid;
 
 pub use crate::project::{Pending, Step, TabId, UnsavedChoice};
-use crate::project::{is_project_file, ProjectController};
+use crate::project::{ProjectController, is_project_file};
 
 /// The app-side half of `canStartProjectOperation`
 /// (EditorSession.swift:150-152). Core does not model these flags (see
@@ -300,8 +300,7 @@ impl ProjectWorkspace {
                 .project_url
                 .as_ref()
                 .map(|project_url| {
-                    std::fs::canonicalize(project_url)
-                        .unwrap_or_else(|_| project_url.to_path_buf())
+                    std::fs::canonicalize(project_url).unwrap_or_else(|_| project_url.to_path_buf())
                 })
                 .as_deref()
                 == Some(&resolved)
@@ -315,10 +314,7 @@ impl ProjectWorkspace {
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".to_string());
         let mut tab = ProjectTab::new(name);
-        match tab
-            .controller
-            .open(&mut tab.session, &mut tab.busy, url)
-        {
+        match tab.controller.open(&mut tab.session, &mut tab.busy, url) {
             Step::Done(true) => {}
             Step::Done(false) | Step::Pending(_) => {
                 // Surface the failure's alert instruction, then drop the
@@ -353,7 +349,10 @@ impl ProjectWorkspace {
         // (:89-96): the confirm resolves through `pending_close`, never
         // through the selection, so the user's tab stays put.
         let tab = &mut self.tabs[index];
-        match tab.controller.confirm_close(&mut tab.session, &mut tab.busy) {
+        match tab
+            .controller
+            .confirm_close(&mut tab.session, &mut tab.busy)
+        {
             Step::Done(true) => {
                 self.is_managing = false;
                 self.remove_tab(id);
@@ -447,7 +446,12 @@ impl ProjectWorkspace {
     pub fn quit_order(&self) -> Vec<TabId> {
         let current = self.current().id;
         let mut order = vec![current];
-        order.extend(self.tabs.iter().map(|tab| tab.id).filter(|id| *id != current));
+        order.extend(
+            self.tabs
+                .iter()
+                .map(|tab| tab.id)
+                .filter(|id| *id != current),
+        );
         order
     }
 
@@ -595,8 +599,7 @@ impl ProjectWorkspace {
         at: Option<CGPoint>,
     ) -> Vec<String> {
         if !self.can_switch() {
-            self.pending_receives
-                .push((urls.to_vec(), into, at));
+            self.pending_receives.push((urls.to_vec(), into, at));
             return Vec::new();
         }
         self.run_receive(urls, into, at)
@@ -647,7 +650,11 @@ impl ProjectWorkspace {
             };
             self.selected_id = tab_id;
             let index = self.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
-            failures.extend(self.tabs[index].session.import_images(std::slice::from_ref(url), at));
+            failures.extend(
+                self.tabs[index]
+                    .session
+                    .import_images(std::slice::from_ref(url), at),
+            );
         }
         failures
     }
@@ -821,7 +828,13 @@ mod tests {
         assert!(!workspace.current().session.shows_new_document);
         assert!(workspace.can_switch());
         assert_eq!(
-            workspace.tab(original).unwrap().session.document_size().unwrap().width,
+            workspace
+                .tab(original)
+                .unwrap()
+                .session
+                .document_size()
+                .unwrap()
+                .width,
             4000.0
         );
 
@@ -836,24 +849,54 @@ mod tests {
     fn tabs_keep_independent_documents_and_undo() {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
-        workspace.tab_mut(first).unwrap().session.create_document(4000, 4000, false);
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(4000, 4000, false);
         workspace.tab_mut(first).unwrap().session.add_blank_layer();
         let second = workspace.add_tab(true).id;
-        workspace.tab_mut(second).unwrap().session.create_document(640, 480, false);
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(640, 480, false);
         workspace.tab_mut(second).unwrap().session.add_blank_layer();
         workspace.tab_mut(second).unwrap().session.undo();
         assert_eq!(
-            workspace.tab(first).unwrap().session.document.as_ref().unwrap().layers.len(),
+            workspace
+                .tab(first)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .len(),
             1
         );
         assert!(
-            workspace.tab(second).unwrap().session.document.as_ref().unwrap().layers.is_empty()
+            workspace
+                .tab(second)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .is_empty()
         );
 
         assert!(workspace.select(first));
         assert_eq!(workspace.selected_id(), first);
         assert_eq!(
-            workspace.tab(first).unwrap().session.document_size().unwrap().width,
+            workspace
+                .tab(first)
+                .unwrap()
+                .session
+                .document_size()
+                .unwrap()
+                .width,
             4000.0
         );
 
@@ -869,31 +912,93 @@ mod tests {
     fn cross_project_copy_remaps_identity_and_has_independent_undo() {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
-        workspace.tab_mut(first).unwrap().session.create_document(100, 100, true);
-        let original = workspace.tab(first).unwrap().session.active_layer_id.unwrap();
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(100, 100, true);
+        let original = workspace
+            .tab(first)
+            .unwrap()
+            .session
+            .active_layer_id
+            .unwrap();
         let second = workspace.add_tab(false).id;
-        workspace.tab_mut(second).unwrap().session.create_document(200, 200, false);
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(200, 200, false);
 
         assert!(workspace.copy_layer(original, Some(second), None));
-        let copied_id = workspace.tab(second).unwrap().session.document.as_ref().unwrap().layers[0].id;
-        let copied_center = workspace.tab(second).unwrap().session.document.as_ref().unwrap().layers[0].transform.center();
+        let copied_id = workspace
+            .tab(second)
+            .unwrap()
+            .session
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .id;
+        let copied_center = workspace
+            .tab(second)
+            .unwrap()
+            .session
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .transform
+            .center();
         assert_ne!(copied_id, original);
         assert_eq!(copied_center, CGPoint::new(100.0, 100.0));
         assert_eq!(
-            workspace.tab(first).unwrap().session.document.as_ref().unwrap().layers.len(),
+            workspace
+                .tab(first)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .len(),
             1
         );
 
         workspace.tab_mut(second).unwrap().session.undo();
         assert!(
-            workspace.tab(second).unwrap().session.document.as_ref().unwrap().layers.is_empty()
+            workspace
+                .tab(second)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .is_empty()
         );
         assert_eq!(
-            workspace.tab(first).unwrap().session.document.as_ref().unwrap().layers.len(),
+            workspace
+                .tab(first)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .len(),
             1
         );
         workspace.tab_mut(second).unwrap().session.redo();
-        let restored_id = workspace.tab(second).unwrap().session.document.as_ref().unwrap().layers[0].id;
+        let restored_id = workspace
+            .tab(second)
+            .unwrap()
+            .session
+            .document
+            .as_ref()
+            .unwrap()
+            .layers[0]
+            .id;
         assert_eq!(restored_id, copied_id);
 
         // Copying onto the source's own tab is refused (:161); `into: None`
@@ -923,11 +1028,25 @@ mod tests {
         assert_eq!(workspace.tabs().len(), 2);
         assert_eq!(workspace.selected_id(), first);
         assert_eq!(
-            workspace.tab(first).unwrap().session.document.as_ref().unwrap().layers.len(),
+            workspace
+                .tab(first)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .len(),
             2
         );
         assert_eq!(
-            workspace.tabs()[1].session.document.as_ref().unwrap().layers.len(),
+            workspace.tabs()[1]
+                .session
+                .document
+                .as_ref()
+                .unwrap()
+                .layers
+                .len(),
             1
         );
 
@@ -940,12 +1059,22 @@ mod tests {
         let dir = temp_dir("comp");
         let mut workspace = ProjectWorkspace::new();
         let source = workspace.selected_id();
-        workspace.tab_mut(source).unwrap().session.create_document(50, 50, true);
+        workspace
+            .tab_mut(source)
+            .unwrap()
+            .session
+            .create_document(50, 50, true);
         workspace.tab_mut(source).unwrap().session.add_blank_layer();
 
         let path = dir.join("Saved.comp");
         let snapshot = compositor_core::project::project_from_document(
-            workspace.tab(source).unwrap().session.document.as_ref().unwrap(),
+            workspace
+                .tab(source)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap(),
         );
         compositor_core::project::save(&path, &snapshot).unwrap();
 
@@ -980,7 +1109,11 @@ mod tests {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
         let second = workspace.add_tab(false).id;
-        workspace.tab_mut(second).unwrap().session.create_document(10, 10, true);
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(10, 10, true);
         workspace.tab_mut(second).unwrap().session.add_blank_layer();
         // `second` is already the tab on screen (add_tab selected it).
 
@@ -990,11 +1123,18 @@ mod tests {
                 // Swift :255 names the project URL, falling back to
                 // "Untitled" — not the tab's display name.
                 assert_eq!(message, "Save changes to Untitled?");
-                assert_eq!(workspace.selected_id(), second, "the asked tab comes on screen");
+                assert_eq!(
+                    workspace.selected_id(),
+                    second,
+                    "the asked tab comes on screen"
+                );
             }
             other => panic!("expected a confirmation, got {other:?}"),
         }
-        assert!(!workspace.can_switch(), "is_managing blocks switching mid-quit");
+        assert!(
+            !workspace.can_switch(),
+            "is_managing blocks switching mid-quit"
+        );
 
         assert!(matches!(
             workspace.resolve_quit(UnsavedChoice::DontSave),
@@ -1026,7 +1166,10 @@ mod tests {
         {
             let tab = workspace.tab_mut(first).unwrap();
             let ProjectTab {
-                session, busy, controller, ..
+                session,
+                busy,
+                controller,
+                ..
             } = tab;
             assert!(controller.finish_save(session, busy, Some(path.clone())));
         }
@@ -1058,11 +1201,24 @@ mod tests {
             }
             other => panic!("expected a confirmation, got {other:?}"),
         }
-        assert_eq!(workspace.selected_id(), first, "the asked tab comes on screen");
-        assert!(!workspace.can_switch(), "is_managing blocks switching mid-close");
+        assert_eq!(
+            workspace.selected_id(),
+            first,
+            "the asked tab comes on screen"
+        );
+        assert!(
+            !workspace.can_switch(),
+            "is_managing blocks switching mid-close"
+        );
 
-        assert!(matches!(workspace.resolve_close(UnsavedChoice::DontSave), Step::Done(())));
-        assert!(workspace.can_switch(), "the guard releases when the flow ends");
+        assert!(matches!(
+            workspace.resolve_close(UnsavedChoice::DontSave),
+            Step::Done(())
+        ));
+        assert!(
+            workspace.can_switch(),
+            "the guard releases when the flow ends"
+        );
         assert!(workspace.close_pending_tab().is_none());
     }
 
@@ -1105,15 +1261,20 @@ mod tests {
         {
             let tab = workspace.tab_mut(first).unwrap();
             let ProjectTab {
-                session, busy, controller, ..
+                session,
+                busy,
+                controller,
+                ..
             } = tab;
             assert!(!controller.finish_save(session, busy, None));
         }
         assert!(matches!(workspace.close_after_save(false), Step::Done(())));
         assert!(workspace.can_switch(), "the guard releases on panel Cancel");
         assert_eq!(workspace.close_pending_tab(), None);
-        assert!(workspace.tabs().iter().any(|tab| tab.id == first),
-            "the tab survives a cancelled close");
+        assert!(
+            workspace.tabs().iter().any(|tab| tab.id == first),
+            "the tab survives a cancelled close"
+        );
         assert!(workspace.current().session.is_modified());
     }
 
@@ -1124,9 +1285,17 @@ mod tests {
     fn close_asks_without_foregrounding_the_target_tab() {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
-        workspace.tab_mut(first).unwrap().session.create_document(10, 10, true);
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(10, 10, true);
         let second = workspace.add_tab(true).id;
-        workspace.tab_mut(second).unwrap().session.create_document(20, 20, true);
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(20, 20, true);
         workspace.tab_mut(second).unwrap().session.add_blank_layer();
         assert!(workspace.select(first));
         assert_eq!(workspace.selected_id(), first);
@@ -1163,7 +1332,11 @@ mod tests {
     fn close_window_resets_to_one_empty_tab() {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
-        workspace.tab_mut(first).unwrap().session.create_document(10, 10, true);
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(10, 10, true);
         workspace.tab_mut(first).unwrap().session.add_blank_layer();
         let _second = workspace.add_tab(false).id;
 
@@ -1207,11 +1380,21 @@ mod tests {
         let dir = temp_dir("dedup");
         let mut workspace = ProjectWorkspace::new();
         let source = workspace.selected_id();
-        workspace.tab_mut(source).unwrap().session.create_document(50, 50, true);
+        workspace
+            .tab_mut(source)
+            .unwrap()
+            .session
+            .create_document(50, 50, true);
 
         let path = dir.join("Again.comp");
         let snapshot = compositor_core::project::project_from_document(
-            workspace.tab(source).unwrap().session.document.as_ref().unwrap(),
+            workspace
+                .tab(source)
+                .unwrap()
+                .session
+                .document
+                .as_ref()
+                .unwrap(),
         );
         compositor_core::project::save(&path, &snapshot).unwrap();
 
@@ -1232,7 +1415,11 @@ mod tests {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
         let second = workspace.add_tab(false).id;
-        workspace.tab_mut(second).unwrap().session.create_document(100, 100, true);
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(100, 100, true);
 
         // No pending transform: select proceeds (add_tab already selected
         // the new tab, so switch back and forth).
@@ -1242,12 +1429,11 @@ mod tests {
         assert!(workspace.can_switch());
 
         // A blocked session refuses to switch (:48).
-        workspace.tab_mut(first).unwrap().session.color_picker = Some(
-            compositor_core::session::ColorPickerState::new(
+        workspace.tab_mut(first).unwrap().session.color_picker =
+            Some(compositor_core::session::ColorPickerState::new(
                 compositor_core::session::ColorPickerTarget::Palette { background: false },
                 PaletteColor::WHITE,
-            ),
-        );
+            ));
         assert!(!workspace.select(second));
         assert_eq!(workspace.selected_id(), first);
         workspace.tab_mut(first).unwrap().session.color_picker = None;
@@ -1269,7 +1455,11 @@ mod tests {
         assert_eq!(tab.id, first);
         assert_eq!(workspace.tabs().len(), 1);
 
-        workspace.tab_mut(first).unwrap().session.create_document(10, 10, true);
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(10, 10, true);
         let second = workspace.add_tab(true).id;
         assert_ne!(second, first);
         assert_eq!(workspace.tabs().len(), 2);
@@ -1323,14 +1513,27 @@ mod tests {
     fn cross_project_copy_budget_error_surfaces_on_the_target() {
         let mut workspace = ProjectWorkspace::new();
         let first = workspace.selected_id();
-        workspace.tab_mut(first).unwrap().session.create_document(200, 200, true);
+        workspace
+            .tab_mut(first)
+            .unwrap()
+            .session
+            .create_document(200, 200, true);
         workspace.tab_mut(first).unwrap().session.add_blank_layer();
         // No way to hit 100 MP with a blank layer; assert the happy path's
         // error channel stays clean and the actual budget lives in core
         // (project::copy_layers_between tests).
         let second = workspace.add_tab(false).id;
-        workspace.tab_mut(second).unwrap().session.create_document(50, 50, true);
-        let layer = workspace.tab(first).unwrap().session.active_layer_id.unwrap();
+        workspace
+            .tab_mut(second)
+            .unwrap()
+            .session
+            .create_document(50, 50, true);
+        let layer = workspace
+            .tab(first)
+            .unwrap()
+            .session
+            .active_layer_id
+            .unwrap();
         assert!(workspace.copy_layer(layer, Some(second), None));
         assert!(workspace.tab(second).unwrap().import_error.is_none());
     }

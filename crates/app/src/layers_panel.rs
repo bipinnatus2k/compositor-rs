@@ -312,8 +312,8 @@ impl AppState {
                     "layer-del",
                     IconName::Trash,
                     delete_tooltip,
-                    cx.listener(|this, _, window, cx| {
-                        match delete_target(&this.tab().session) {
+                    cx.listener(
+                        |this, _, window, cx| match delete_target(&this.tab().session) {
                             DeleteTarget::Effect => {
                                 this.tab().session.remove_selected_effect();
                                 this.touch(cx);
@@ -323,8 +323,8 @@ impl AppState {
                                 this.touch(cx);
                             }
                             DeleteTarget::Layers => this.request_delete_layer(window, cx),
-                        }
-                    }),
+                        },
+                    ),
                 )),
         );
 
