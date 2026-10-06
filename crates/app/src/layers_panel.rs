@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Disableable;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -18,6 +19,7 @@ use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
 use compositor_core::effects::LayerEffectKind;
 use compositor_core::selection::SelectionMode;
+use compositor_core::session::EditorSession;
 
 use crate::state::AppState;
 use crate::ui::{MenuEntry, dropdown, text_label};
@@ -40,6 +42,21 @@ fn selection_mode(shift: bool, alt: bool) -> SelectionMode {
         SelectionMode::Subtract
     } else {
         SelectionMode::Replace
+    }
+}
+
+/// The footer mask button's disabled line (LayerMaskMenu.swift): the active
+/// layer must be editable as a mask and carry none yet.
+fn footer_mask_disabled(session: &EditorSession) -> bool {
+    !session.can_edit_mask() || session.active_layer().is_some_and(|l| l.mask.is_some())
+}
+
+/// LayerMaskMenu.swift's help line: with a selection it becomes black.
+fn footer_mask_tooltip(has_selection: bool) -> &'static str {
+    if has_selection {
+        "Add layer mask (the selection becomes black)"
+    } else {
+        "Add layer mask"
     }
 }
 
@@ -132,7 +149,6 @@ impl AppState {
             .border_color(gpui_kit::black().opacity(0.4));
 
         // Header: title + blend mode + opacity.
-        let can_edit = self.tab().session.can_edit_appearance();
         let session = self.current_tab();
         let blend_label = session
             .session
@@ -233,6 +249,15 @@ impl AppState {
                 }
             }
         };
+        // The footer's disabled lines are Swift's (LayersPanel.swift:38-60,
+        // LayerMaskMenu.swift): edit guards per button, the mask retiring
+        // once the active layer carries one.
+        let footer = &self.current_tab().session;
+        let layers_enabled = footer.can_edit_layers();
+        let fx_enabled = footer.can_edit_effects();
+        let mask_disabled = footer_mask_disabled(footer);
+        let mask_tooltip = footer_mask_tooltip(footer.selection().is_some());
+        let trash_disabled = !layers_enabled || footer.active_layer().is_none();
         panel = panel.child(
             gpui_kit::div()
                 .flex()
@@ -247,7 +272,8 @@ impl AppState {
                 .child(footer_button(
                     "layer-add",
                     IconName::Plus,
-                    "New Blank Layer",
+                    "New blank layer (⇧⌘N)",
+                    !layers_enabled,
                     cx.listener(|this, _, _, cx| {
                         this.tab().session.add_blank_layer();
                         this.touch(cx);
@@ -257,6 +283,7 @@ impl AppState {
                     "layer-group",
                     IconName::FolderPlus,
                     "Group selected layers (⌘G)",
+                    !layers_enabled,
                     cx.listener(|this, _, _, cx| {
                         // The footer groups the SELECTION (LayerGroups.swift:
                         // 119 groupSelectedLayers), not an empty folder above
@@ -268,9 +295,12 @@ impl AppState {
                 .child(footer_button(
                     "layer-mask",
                     IconName::SquareDashedBottom,
-                    "Add Reveal-All Mask",
+                    mask_tooltip,
+                    mask_disabled,
                     cx.listener(|this, _, _, cx| {
-                        this.tab().session.add_layer_mask(true);
+                        // addMask (LayerMask.swift:233): all white, or with a
+                        // selection, the selection black.
+                        this.tab().session.add_mask_from_selection(true);
                         this.touch(cx);
                     }),
                 ))
@@ -280,10 +310,11 @@ impl AppState {
                 .child(
                     Button::new("layer-fx")
                         .icon(Icon::new(IconName::Sparkles))
-                        .accessibility_label("Layer Effects")
+                        .accessibility_label("Layer effects")
                         .ghost()
                         .small()
-                        .tooltip("Layer Effects")
+                        .tooltip("Layer effects: stroke and drop shadow")
+                        .disabled(!fx_enabled)
                         // Same caret affordance as the ui::dropdown helper
                         // (gpui-component button.rs dropdown_caret).
                         .dropdown_caret(true)
@@ -299,6 +330,7 @@ impl AppState {
                         .ghost()
                         .small()
                         .tooltip("New adjustment layer")
+                        .disabled(!layers_enabled)
                         .dropdown_caret(true)
                         .dropdown_menu({
                             let app = app.clone();
@@ -312,6 +344,7 @@ impl AppState {
                     "layer-del",
                     IconName::Trash,
                     delete_tooltip,
+                    trash_disabled,
                     cx.listener(
                         |this, _, window, cx| match delete_target(&this.tab().session) {
                             DeleteTarget::Effect => {
@@ -328,7 +361,6 @@ impl AppState {
                 )),
         );
 
-        let _ = (&app, can_edit);
         panel.into_any_element()
     }
 
@@ -863,6 +895,7 @@ fn footer_button(
     id: &'static str,
     icon: IconName,
     tooltip: &'static str,
+    disabled: bool,
     listener: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> Button {
     Button::new(id)
@@ -873,13 +906,43 @@ fn footer_button(
         .ghost()
         .small()
         .tooltip(tooltip)
+        .disabled(disabled)
         .on_click(listener)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::selection_mode;
+    use super::{footer_mask_disabled, footer_mask_tooltip, selection_mode};
     use compositor_core::selection::SelectionMode;
+    use compositor_core::session::EditorSession;
+
+    /// The footer mask button's three retired states (LayerMaskMenu.swift):
+    /// no active layer, a layer already carrying a mask, or a session that
+    /// cannot edit masks.
+    #[test]
+    fn footer_mask_button_disabled_states() {
+        let mut session = EditorSession::new();
+        // No document, no active layer: nothing to mask.
+        assert!(footer_mask_disabled(&session));
+
+        session.create_document(10, 10, true);
+        session.add_blank_layer();
+        // A bare layer takes a mask...
+        assert!(!footer_mask_disabled(&session));
+        // ...and once it carries one, the button retires.
+        session.add_layer_mask(true);
+        assert!(footer_mask_disabled(&session));
+    }
+
+    /// LayerMaskMenu.swift's help line: with a selection it becomes black.
+    #[test]
+    fn footer_mask_tooltip_follows_selection() {
+        assert_eq!(footer_mask_tooltip(false), "Add layer mask");
+        assert_eq!(
+            footer_mask_tooltip(true),
+            "Add layer mask (the selection becomes black)"
+        );
+    }
 
     /// Shift adds, Option subtracts, plain replaces; shift wins when both
     /// modifiers ride along (NativeLayerList.swift:785-789).
