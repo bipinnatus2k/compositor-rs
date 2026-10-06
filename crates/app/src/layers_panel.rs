@@ -60,6 +60,13 @@ fn footer_mask_tooltip(has_selection: bool) -> &'static str {
     }
 }
 
+/// A layer-row element's stable key (coding-guides "Stable identity"):
+/// derived from the layer's UUID, never the mutable list index — a reorder
+/// must not rebind a row's element state.
+fn layer_key(part: &str, id: uuid::Uuid) -> SharedString {
+    SharedString::from(format!("layer-{part}-{}", id))
+}
+
 /// What the trash acts on (`deleteLayerOrMask`, SelectionEdits.swift:
 /// 71-75): a selected effect goes first, a targeted mask goes alone,
 /// everything else deletes through the live-mask ask.
@@ -89,7 +96,7 @@ fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTar
 /// ring marks the edit target, a disabled mask reads dimmed, and an image
 /// fills the cell when one is on hand.
 fn thumbnail_cell(
-    element_id: String,
+    element_id: SharedString,
     is_target: bool,
     dimmed: bool,
     image: Option<Arc<RenderImage>>,
@@ -97,7 +104,7 @@ fn thumbnail_cell(
     cx: &Context<AppState>,
 ) -> AnyElement {
     gpui_kit::div()
-        .id(SharedString::from(element_id))
+        .id(element_id)
         .w(px(THUMB))
         .h(px(THUMB))
         .flex_shrink_0()
@@ -221,8 +228,7 @@ impl AppState {
                 let layer = entry.layer;
                 let id = layer.id;
                 let is_active = active_id == Some(id);
-                let index = document.layer_index(id).unwrap_or(0);
-                let row = self.render_layer_row(layer, is_active, index, entry.depth, cx);
+                let row = self.render_layer_row(layer, is_active, entry.depth, cx);
                 list = list.child(row);
             }
         } else {
@@ -427,7 +433,6 @@ impl AppState {
         &mut self,
         layer: &ImageLayer,
         is_active: bool,
-        index: usize,
         depth: usize,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -448,7 +453,7 @@ impl AppState {
         let app = cx.entity().downgrade();
 
         let mut row = gpui_kit::div()
-            .id(SharedString::from(format!("layer-row-{}", index)))
+            .id(layer_key("row", id))
             .flex()
             .flex_row()
             .items_center()
@@ -480,7 +485,7 @@ impl AppState {
         if is_group {
             row = row.child(
                 gpui_kit::div()
-                    .id(SharedString::from(format!("layer-chevron-{}", index)))
+                    .id(layer_key("chevron", id))
                     // A generous hit area: an 18px box inside a 24px indent
                     // step is easy to miss (Swift widens footer hit areas
                     // for the same reason, NativeLayerList.swift:79-82).
@@ -510,7 +515,7 @@ impl AppState {
         // Eye (Lucide eye / eye-off, both in the bundled set).
         row = row.child(
             gpui_kit::div()
-                .id(SharedString::from(format!("layer-eye-{}", index)))
+                .id(layer_key("eye", id))
                 .w(px(18.0))
                 .h(px(18.0))
                 .flex()
@@ -551,7 +556,7 @@ impl AppState {
             .map(|a| a.kind.is_editable())
             .unwrap_or(false);
         row = row.child(thumbnail_cell(
-            format!("layer-thumb-{}", index),
+            layer_key("thumb", id),
             layer_is_target,
             false,
             thumbnail,
@@ -601,7 +606,7 @@ impl AppState {
         if layer.mask.is_some() {
             let mask_image = self.mask_thumbnail_image(layer);
             row = row.child(thumbnail_cell(
-                format!("layer-mask-thumb-{}", index),
+                layer_key("mask-thumb", id),
                 is_active && mask_selected,
                 !mask_enabled,
                 mask_image,
@@ -685,7 +690,7 @@ impl AppState {
             };
             name_cell = name_cell.child(
                 gpui_kit::div()
-                    .id(SharedString::from(format!("layer-name-{}", index)))
+                    .id(layer_key("name", id))
                     .flex()
                     .flex_col()
                     .min_w_0()
@@ -709,7 +714,7 @@ impl AppState {
                     )
                     .child({
                         let mut line = gpui_kit::div()
-                            .id(SharedString::from(format!("layer-subtitle-{}", index)))
+                            .id(layer_key("subtitle", id))
                             .text_size(px(10.0))
                             .text_color(gpui_kit::rgb(crate::ui::FG_DIM))
                             .overflow_hidden()
@@ -912,9 +917,10 @@ fn footer_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_mask_disabled, footer_mask_tooltip, selection_mode};
+    use super::{footer_mask_disabled, footer_mask_tooltip, layer_key, selection_mode};
     use compositor_core::selection::SelectionMode;
     use compositor_core::session::EditorSession;
+    use gpui_kit::SharedString;
 
     /// The footer mask button's three retired states (LayerMaskMenu.swift):
     /// no active layer, a layer already carrying a mask, or a session that
@@ -941,6 +947,20 @@ mod tests {
         assert_eq!(
             footer_mask_tooltip(true),
             "Add layer mask (the selection becomes black)"
+        );
+    }
+
+    /// Row keys come from the layer's UUID (coding-guides "Stable
+    /// identity"), so a reorder can never rebind a row's state.
+    #[test]
+    fn layer_keys_come_from_ids_not_positions() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        assert_eq!(layer_key("row", a), layer_key("row", a));
+        assert_ne!(layer_key("row", a), layer_key("row", b));
+        assert_eq!(
+            layer_key("row", a),
+            SharedString::from(format!("layer-row-{a}"))
         );
     }
 
