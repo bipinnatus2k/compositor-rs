@@ -19,18 +19,6 @@ use crate::ui::{FG_DIM, text_label};
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Startup load of the persisted tool toggles (ToolDefaults.swift).
-        // Swift applies them where the session is constructed: the
-        // `EditorSession` property defaults read `ToolDefaults` at init
-        // (EditorSession.swift:198-279). The call therefore belongs on the
-        // init path — `AppState::new` — which lives in state.rs, outside
-        // this file; the head of the first render is the earliest point
-        // this file owns, and it still runs before any input can reach the
-        // app. Once per process; a no-op afterwards.
-        crate::settings::apply_startup_defaults(
-            &mut self.workspace.current_mut().session,
-            &mut self.transform_auto_select,
-        );
         // Workspace errors (failed opens → the Alert sheet) and queued file
         // receives progress on the async drain pump, never during draw;
         // rendering stays a pure function of state and only requests a pump

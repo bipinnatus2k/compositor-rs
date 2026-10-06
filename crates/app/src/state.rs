@@ -535,6 +535,16 @@ impl AppState {
             .current_mut()
             .session
             .create_document(1280, 800, true);
+        // Startup load of the persisted tool toggles (ToolDefaults.swift):
+        // Swift applies them where the session is constructed
+        // (EditorSession.swift:198-279), so they land here, before the panel
+        // sliders seed themselves from the session's settings. Once per
+        // process; a no-op afterwards.
+        let mut transform_auto_select = false;
+        crate::settings::apply_startup_defaults(
+            &mut workspace.current_mut().session,
+            &mut transform_auto_select,
+        );
         let brush = workspace.current().session.brush_settings;
         let wand_tolerance = workspace.current().session.wand_settings.tolerance;
         let gradient_opacity = workspace.current().session.gradient_settings.opacity;
@@ -606,7 +616,7 @@ impl AppState {
             space_saved_tool: None,
             picker_ui: None,
             curves_editor: None,
-            transform_auto_select: false,
+            transform_auto_select,
             type_size_input,
             type_tracking_input,
             type_leading_input,
@@ -1106,80 +1116,11 @@ impl AppState {
         let Some(picker) = self.tab().session.color_picker.as_ref() else {
             return;
         };
-        let hsb = picker.hsb;
         // The text color's picker lives in the same floating panel as the
         // palette one (ColorPickerSheet.swift:170-182).
         let title = picker.target.title();
-        let hue = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(360.0)
-                .step(1.0)
-                .default_value(hsb.hue as f32)
-        });
-        let saturation = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(100.0)
-                .step(1.0)
-                .default_value((hsb.saturation * 100.0) as f32)
-        });
-        let brightness = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(100.0)
-                .step(1.0)
-                .default_value((hsb.brightness * 100.0) as f32)
-        });
         let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
-        for (slider, apply) in [
-            (
-                hue.clone(),
-                (|hsb: &mut compositor_core::document::PickerHSB, v: f64| hsb.hue = v)
-                    as fn(&mut compositor_core::document::PickerHSB, f64),
-            ),
-            (
-                saturation.clone(),
-                |hsb: &mut compositor_core::document::PickerHSB, v: f64| {
-                    hsb.saturation = v / 100.0;
-                },
-            ),
-            (
-                brightness.clone(),
-                |hsb: &mut compositor_core::document::PickerHSB, v: f64| {
-                    hsb.brightness = v / 100.0;
-                },
-            ),
-        ] {
-            let subscription = cx.subscribe(
-                &slider,
-                move |state: &mut Self, _slider, event: &SliderEvent, cx: &mut Context<Self>| {
-                    let value = match event {
-                        SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-                    };
-                    let Some(picker) = state.tab().session.color_picker.as_mut() else {
-                        return;
-                    };
-                    apply(&mut picker.hsb, value as f64);
-                    // An effect's color previews live on the layer
-                    // (ColorPalette.swift:113-118).
-                    if matches!(
-                        picker.target,
-                        compositor_core::session::ColorPickerTarget::Effect { .. }
-                    ) {
-                        state.tab().session.preview_effect_color();
-                    }
-                    state.touch(cx);
-                },
-            );
-            self.subscriptions.push(subscription);
-        }
-        self.picker_ui = Some(crate::color_picker_ui::PickerUi {
-            hue,
-            saturation,
-            brightness,
-            hex,
-        });
+        self.picker_ui = Some(crate::color_picker_ui::PickerUi { hex });
         self.panels.show(
             crate::panels::panel_names::COLOR_PICKER_PANEL,
             title,
