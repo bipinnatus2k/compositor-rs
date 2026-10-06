@@ -214,22 +214,169 @@ impl FilterSettings {
     }
 }
 
-/// A filter run request, mirroring `FilterJob`.
+/// A filter run request, mirroring `FilterJob` — built through
+/// [`FilterJob::builder`], read through its accessors (AGENTS §5 seam rule).
 pub struct FilterJob<'a> {
-    pub kind: FilterKind,
-    pub image: &'a Bitmap,
-    pub settings: FilterSettings,
+    kind: FilterKind,
+    image: &'a Bitmap,
+    settings: FilterSettings,
     /// Pixels in `image` per original layer pixel.
-    pub scale: f64,
-    pub selection: Option<SelectionClip>,
-    pub mapping: CGAffineTransform,
+    scale: f64,
+    selection: Option<SelectionClip>,
+    mapping: CGAffineTransform,
     /// Add Noise's random pattern.
-    pub seed: u32,
+    seed: u32,
     /// Canvas-space origin used by live adjustment layers.
-    pub noise_origin: CGPoint,
-    pub camera_raw_clipping: Option<crate::adjust::camera_raw::CameraRawClipping>,
-    pub visualize_point_color: i32,
-    pub sharpen_mask: bool,
+    noise_origin: CGPoint,
+    camera_raw_clipping: Option<crate::adjust::camera_raw::CameraRawClipping>,
+    visualize_point_color: i32,
+    sharpen_mask: bool,
+}
+
+impl<'a> FilterJob<'a> {
+    /// A job starting from the neutral request: scale 1, no selection,
+    /// identity mapping, seed 0, no clipping, no visualization (`-1`,
+    /// CameraRaw.swift:221), no sharpen mask.
+    pub fn builder(
+        kind: FilterKind,
+        image: &'a Bitmap,
+        settings: FilterSettings,
+    ) -> FilterJobBuilder<'a> {
+        FilterJobBuilder {
+            kind,
+            image,
+            settings,
+            scale: 1.0,
+            selection: None,
+            mapping: CGAffineTransform::IDENTITY,
+            seed: 0,
+            noise_origin: CGPoint::ZERO,
+            camera_raw_clipping: None,
+            visualize_point_color: -1,
+            sharpen_mask: false,
+        }
+    }
+
+    pub fn kind(&self) -> FilterKind {
+        self.kind
+    }
+
+    pub fn image(&self) -> &'a Bitmap {
+        self.image
+    }
+
+    pub fn settings(&self) -> &FilterSettings {
+        &self.settings
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    pub fn selection(&self) -> Option<&SelectionClip> {
+        self.selection.as_ref()
+    }
+
+    pub fn mapping(&self) -> CGAffineTransform {
+        self.mapping
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    pub fn noise_origin(&self) -> CGPoint {
+        self.noise_origin
+    }
+
+    pub fn camera_raw_clipping(&self) -> Option<crate::adjust::camera_raw::CameraRawClipping> {
+        self.camera_raw_clipping
+    }
+
+    pub fn visualize_point_color(&self) -> i32 {
+        self.visualize_point_color
+    }
+
+    pub fn is_sharpen_mask(&self) -> bool {
+        self.sharpen_mask
+    }
+}
+
+/// Builder for [`FilterJob`]: the kind, source image and settings are the
+/// required triad; every other field defaults to the neutral request.
+pub struct FilterJobBuilder<'a> {
+    kind: FilterKind,
+    image: &'a Bitmap,
+    settings: FilterSettings,
+    scale: f64,
+    selection: Option<SelectionClip>,
+    mapping: CGAffineTransform,
+    seed: u32,
+    noise_origin: CGPoint,
+    camera_raw_clipping: Option<crate::adjust::camera_raw::CameraRawClipping>,
+    visualize_point_color: i32,
+    sharpen_mask: bool,
+}
+
+impl<'a> FilterJobBuilder<'a> {
+    pub fn with_scale(mut self, scale: f64) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    pub fn with_selection(mut self, selection: Option<SelectionClip>) -> Self {
+        self.selection = selection;
+        self
+    }
+
+    pub fn with_mapping(mut self, mapping: CGAffineTransform) -> Self {
+        self.mapping = mapping;
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u32) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    pub fn with_noise_origin(mut self, noise_origin: CGPoint) -> Self {
+        self.noise_origin = noise_origin;
+        self
+    }
+
+    pub fn with_camera_raw_clipping(
+        mut self,
+        camera_raw_clipping: Option<crate::adjust::camera_raw::CameraRawClipping>,
+    ) -> Self {
+        self.camera_raw_clipping = camera_raw_clipping;
+        self
+    }
+
+    pub fn with_visualize_point_color(mut self, visualize_point_color: i32) -> Self {
+        self.visualize_point_color = visualize_point_color;
+        self
+    }
+
+    pub fn sharpen_mask(mut self, sharpen_mask: bool) -> Self {
+        self.sharpen_mask = sharpen_mask;
+        self
+    }
+
+    pub fn build(self) -> FilterJob<'a> {
+        FilterJob {
+            kind: self.kind,
+            image: self.image,
+            settings: self.settings,
+            scale: self.scale,
+            selection: self.selection,
+            mapping: self.mapping,
+            seed: self.seed,
+            noise_origin: self.noise_origin,
+            camera_raw_clipping: self.camera_raw_clipping,
+            visualize_point_color: self.visualize_point_color,
+            sharpen_mask: self.sharpen_mask,
+        }
+    }
 }
 
 /// `noise_add_at` (NoisePixels.c).
@@ -362,11 +509,11 @@ pub const MOTION_RADIUS_PER_PIXEL: f64 = 0.2886751345948129; // 1 / √12
 /// distance from the center.
 pub const LENS_STRENGTH: f64 = 0.35;
 
-/// `PixelFilter.run` — applies one filter to `job.image`.
+/// `PixelFilter.run` — applies one filter to the job's image.
 pub fn run_filter(job: &FilterJob) -> Bitmap {
-    let settings = job.settings.normalized();
-    let image = job.image;
-    let mut result: Bitmap = match job.kind {
+    let settings = job.settings().normalized();
+    let image = job.image();
+    let mut result: Bitmap = match job.kind() {
         FilterKind::Curves => settings.curves.apply(image),
         FilterKind::Exposure => settings.exposure.apply(image),
         FilterKind::GradientMap => settings.gradient_map.apply(image),
@@ -374,17 +521,17 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
         FilterKind::ColorBalance => settings.color_balance.apply(image),
         FilterKind::CameraRaw => settings.camera_raw.apply(
             image,
-            job.camera_raw_clipping,
-            job.scale,
-            job.seed,
-            job.visualize_point_color,
-            job.sharpen_mask,
+            job.camera_raw_clipping(),
+            job.scale(),
+            job.seed(),
+            job.visualize_point_color(),
+            job.is_sharpen_mask(),
         ),
         // Grain sits in layer pixels; the job's seed gives each application its own pattern.
         FilterKind::Grain => {
             settings
                 .grain
-                .apply(image, CGPoint::ZERO, 1.0 / job.scale, Some(job.seed))
+                .apply(image, CGPoint::ZERO, 1.0 / job.scale(), Some(job.seed()))
         }
         FilterKind::RemoveBackground => crate::tools::subject_removal::run(image, &settings),
         FilterKind::ContentAwareFill => crate::tools::content_fill::run(image),
@@ -396,7 +543,7 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
             // smearing inwards. Grow the bitmap by transparent padding, blur
             // the grown image (the edge clamp in `gaussian_blur_rgba` then only
             // ever lands in the transparent pad), and trim the pad away.
-            let sigma = settings.radius * job.scale;
+            let sigma = settings.radius * job.scale();
             let pad = (sigma * 3.0).ceil().max(1.0) as usize;
             let grown = grow_to_fit(image, pad);
             let blurred = crate::raster::gaussian_blur_rgba(&grown, sigma);
@@ -410,7 +557,9 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
                 ),
             )
         }
-        FilterKind::MotionBlur => motion_blur(image, settings.distance * job.scale, settings.angle),
+        FilterKind::MotionBlur => {
+            motion_blur(image, settings.distance * job.scale(), settings.angle)
+        }
         FilterKind::AddNoise => {
             let mut noisy = image.clone();
             noise_add_at(
@@ -418,9 +567,9 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
                 settings.amount as f32,
                 settings.gaussian,
                 settings.monochromatic,
-                job.seed,
-                job.noise_origin.x.floor() as i64,
-                job.noise_origin.y.floor() as i64,
+                job.seed(),
+                job.noise_origin().x.floor() as i64,
+                job.noise_origin().y.floor() as i64,
             );
             noisy
         }
@@ -428,8 +577,8 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
             lens_distort(image, settings.distortion / 100.0 * LENS_STRENGTH)
         }
     };
-    if let Some(selection) = &job.selection {
-        result = pixel_adjust::blend(&result, image, selection, &job.mapping);
+    if let Some(selection) = job.selection() {
+        result = pixel_adjust::blend(&result, image, selection, &job.mapping());
     }
     result
 }
@@ -668,22 +817,15 @@ mod tests {
 
     /// A Gaussian Blur job at scale 1 with no selection.
     fn gaussian_job(image: &Bitmap, radius: f64) -> FilterJob<'_> {
-        FilterJob {
-            kind: FilterKind::GaussianBlur,
+        FilterJob::builder(
+            FilterKind::GaussianBlur,
             image,
-            settings: FilterSettings {
+            FilterSettings {
                 radius,
                 ..Default::default()
             },
-            scale: 1.0,
-            selection: None,
-            mapping: CGAffineTransform::IDENTITY,
-            seed: 0,
-            noise_origin: CGPoint::ZERO,
-            camera_raw_clipping: None,
-            visualize_point_color: -1,
-            sharpen_mask: false,
-        }
+        )
+        .build()
     }
 
     #[test]

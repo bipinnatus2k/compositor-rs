@@ -8611,22 +8611,17 @@ mod tests {
                 img.set_pixel(x, y, [255, 255, 255, 255]);
             }
         }
-        let out = crate::filters::run_filter(&crate::filters::FilterJob {
-            kind: crate::filters::FilterKind::GaussianBlur,
-            image: &img,
-            settings: crate::filters::FilterSettings {
-                radius: 6.0,
-                ..Default::default()
-            },
-            scale: 1.0,
-            selection: None,
-            mapping: CGAffineTransform::IDENTITY,
-            seed: 0,
-            noise_origin: CGPoint::ZERO,
-            camera_raw_clipping: None,
-            visualize_point_color: -1,
-            sharpen_mask: false,
-        });
+        let out = crate::filters::run_filter(
+            &crate::filters::FilterJob::builder(
+                crate::filters::FilterKind::GaussianBlur,
+                &img,
+                crate::filters::FilterSettings {
+                    radius: 6.0,
+                    ..Default::default()
+                },
+            )
+            .build(),
+        );
         // Unclamped (CI semantics): the 20px block blurs into transparency,
         // so the core thins slightly but stays strongly opaque.
         let core = out.pixel(50, 50);

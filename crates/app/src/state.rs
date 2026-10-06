@@ -986,21 +986,16 @@ impl AppState {
         if self.tab().session.selection().is_none() {
             return;
         }
-        let job = FilterJob {
-            kind: FilterKind::ContentAwareFill,
-            image: &base,
-            settings: FilterSettings::default(),
-            scale: 1.0,
-            selection,
-            mapping: CGAffineTransform::IDENTITY,
-            // A one-shot edit takes a fresh seed (Filters.swift:223's
-            // `UInt32.random` at FilterEdit creation).
-            seed: time_seed(),
-            noise_origin: CGPoint::ZERO,
-            camera_raw_clipping: None,
-            visualize_point_color: -1,
-            sharpen_mask: false,
-        };
+        let job = FilterJob::builder(
+            FilterKind::ContentAwareFill,
+            &base,
+            FilterSettings::default(),
+        )
+        .with_selection(selection)
+        // A one-shot edit takes a fresh seed (Filters.swift:223's
+        // `UInt32.random` at FilterEdit creation).
+        .with_seed(time_seed())
+        .build();
         let result = compositor_core::filters::run_filter(&job);
         if let Some(id) = self.tab().session.active_layer_id {
             self.history_edit("Content-Aware Fill", move |session| {
@@ -1855,23 +1850,13 @@ impl AppState {
             return;
         };
         let selection = self.selection_clip();
-        let job = FilterJob {
-            kind,
-            image: &base,
-            settings,
-            scale: 1.0,
-            selection,
-            mapping: CGAffineTransform::IDENTITY,
+        let job = FilterJob::builder(kind, &base, settings)
+            .with_selection(selection)
             // The seed was drawn when the panel opened and is reused for the
             // committed pixels, so the preview is exactly what lands
             // (FilterEdit.seed, Filters.swift:223).
-            seed: self.filter_seed,
-            noise_origin: CGPoint::ZERO,
-            camera_raw_clipping: None,
-            // Swift's default is -1: no visualization (CameraRaw.swift:221).
-            visualize_point_color: -1,
-            sharpen_mask: false,
-        };
+            .with_seed(self.filter_seed)
+            .build();
         let result = compositor_core::filters::run_filter(&job);
         self.preview = Some(Arc::new(result));
         self.revision += 1;
