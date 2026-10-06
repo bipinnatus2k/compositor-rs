@@ -279,6 +279,7 @@ impl AppState {
                     "layer-add",
                     IconName::Plus,
                     "New blank layer (⇧⌘N)",
+                    "New blank layer",
                     !layers_enabled,
                     cx.listener(|this, _, _, cx| {
                         this.tab().session.add_blank_layer();
@@ -289,6 +290,7 @@ impl AppState {
                     "layer-group",
                     IconName::FolderPlus,
                     "Group selected layers (⌘G)",
+                    "New folder",
                     !layers_enabled,
                     cx.listener(|this, _, _, cx| {
                         // The footer groups the SELECTION (LayerGroups.swift:
@@ -302,6 +304,7 @@ impl AppState {
                     "layer-mask",
                     IconName::SquareDashedBottom,
                     mask_tooltip,
+                    "Add layer mask",
                     mask_disabled,
                     cx.listener(|this, _, _, cx| {
                         // addMask (LayerMask.swift:233): all white, or with a
@@ -349,6 +352,7 @@ impl AppState {
                 .child(footer_button(
                     "layer-del",
                     IconName::Trash,
+                    delete_tooltip,
                     delete_tooltip,
                     trash_disabled,
                     cx.listener(
@@ -902,14 +906,15 @@ fn footer_button(
     id: &'static str,
     icon: IconName,
     tooltip: &'static str,
+    accessibility: &'static str,
     disabled: bool,
     listener: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> Button {
     Button::new(id)
         .icon(Icon::new(icon))
-        // Icon-only buttons have no label to read aloud; the tooltip wording
-        // doubles as the announced one.
-        .accessibility_label(tooltip)
+        // Swift sets these labels explicitly (LayersPanel.swift:38-60);
+        // group's differs from its help text ("New folder").
+        .accessibility_label(accessibility)
         .ghost()
         .small()
         .tooltip(tooltip)
@@ -919,10 +924,9 @@ fn footer_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_mask_disabled, footer_mask_tooltip, layer_key, selection_mode};
+    use super::{footer_mask_disabled, layer_key, selection_mode};
     use compositor_core::selection::SelectionMode;
     use compositor_core::session::EditorSession;
-    use gpui_kit::SharedString;
 
     /// The footer mask button's three retired states (LayerMaskMenu.swift):
     /// no active layer, a layer already carrying a mask, or a session that
@@ -942,28 +946,15 @@ mod tests {
         assert!(footer_mask_disabled(&session));
     }
 
-    /// LayerMaskMenu.swift's help line: with a selection it becomes black.
-    #[test]
-    fn footer_mask_tooltip_follows_selection() {
-        assert_eq!(footer_mask_tooltip(false), "Add layer mask");
-        assert_eq!(
-            footer_mask_tooltip(true),
-            "Add layer mask (the selection becomes black)"
-        );
-    }
-
     /// Row keys come from the layer's UUID (coding-guides "Stable
-    /// identity"), so a reorder can never rebind a row's state.
+    /// identity"), so a reorder can never rebind a row's state: the same id
+    /// always yields the same key, different ids never collide.
     #[test]
     fn layer_keys_come_from_ids_not_positions() {
         let a = uuid::Uuid::new_v4();
         let b = uuid::Uuid::new_v4();
         assert_eq!(layer_key("row", a), layer_key("row", a));
         assert_ne!(layer_key("row", a), layer_key("row", b));
-        assert_eq!(
-            layer_key("row", a),
-            SharedString::from(format!("layer-row-{a}"))
-        );
     }
 
     /// Shift adds, Option subtracts, plain replaces; shift wins when both

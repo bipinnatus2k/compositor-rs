@@ -88,10 +88,10 @@ impl AppState {
             .relative()
             .flex_1()
             .overflow_hidden()
-            .bg(rgb(0x232326))
+            .bg(rgb(crate::ui::BG_CANVAS_AREA))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 // File drags tint the canvas (Swift highlights the drop area).
-                style.bg(gpui_kit::rgb(0x2a2f3a))
+                style.bg(gpui_kit::rgb(crate::ui::BG_DROP_AREA))
             })
             .on_drag_move::<ExternalPaths>(cx.listener(
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {

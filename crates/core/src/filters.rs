@@ -357,7 +357,7 @@ impl<'a> FilterJobBuilder<'a> {
         self
     }
 
-    pub fn sharpen_mask(mut self, sharpen_mask: bool) -> Self {
+    pub fn with_sharpen_mask(mut self, sharpen_mask: bool) -> Self {
         self.sharpen_mask = sharpen_mask;
         self
     }

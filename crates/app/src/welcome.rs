@@ -191,7 +191,7 @@ impl AppState {
             .relative()
             .flex_1()
             .overflow_hidden()
-            .bg(rgb(crate::ui::BG_WELCOME))
+            .bg(rgb(crate::ui::BG_CANVAS_AREA))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 // File drags tint the area, as they tint the canvas.
                 style.bg(rgb(crate::ui::BG_DROP_AREA))

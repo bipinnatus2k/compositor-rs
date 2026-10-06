@@ -44,11 +44,13 @@ pub const STATUS_WARNING: u32 = 0xe0a24a;
 pub const ACCENT_WASH: u32 = 0x4da6ff33;
 /// The sheet overlay's scrim.
 pub const SCRIM: u32 = 0x00000099;
-/// The welcome area's surface, and the file-drop tints (welcome area and
-/// tab strip).
-pub const BG_WELCOME: u32 = 0x232326;
+/// The canvas area's backdrop (the welcome landing surface included), and
+/// the file-drop tints (area and tab strip).
+pub const BG_CANVAS_AREA: u32 = 0x232326;
 pub const BG_DROP_AREA: u32 = 0x2a2f3a;
 pub const BG_DROP_STRIP: u32 = 0x33383f;
+/// The inline-text caret's bar.
+pub const BG_CARET: u32 = 0x1a1a1a;
 
 #[allow(dead_code)]
 pub fn app_bg() -> gpui_kit::Rgba {

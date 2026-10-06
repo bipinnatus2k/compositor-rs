@@ -535,16 +535,11 @@ impl AppState {
             .current_mut()
             .session
             .create_document(1280, 800, true);
-        // Startup load of the persisted tool toggles (ToolDefaults.swift):
-        // Swift applies them where the session is constructed
-        // (EditorSession.swift:198-279), so they land here, before the panel
-        // sliders seed themselves from the session's settings. Once per
-        // process; a no-op afterwards.
-        let mut transform_auto_select = false;
-        crate::settings::apply_startup_defaults(
-            &mut workspace.current_mut().session,
-            &mut transform_auto_select,
-        );
+        // The persisted auto-select toggle is app-global in this port (Swift
+        // keeps it per-session — docs/rust-vs-swift-diff-report.md); the
+        // session-side defaults are applied per tab in ProjectTab::new, so
+        // the panel sliders seed from already-persisted settings.
+        let transform_auto_select = crate::settings::stored_auto_select();
         let brush = workspace.current().session.brush_settings;
         let wand_tolerance = workspace.current().session.wand_settings.tolerance;
         let gradient_opacity = workspace.current().session.gradient_settings.opacity;

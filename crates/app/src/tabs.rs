@@ -79,9 +79,14 @@ pub struct ProjectTab {
 
 impl ProjectTab {
     pub fn new(name: impl Into<String>) -> Self {
+        let mut session = EditorSession::new();
+        // ToolDefaults.swift: every EditorSession's property initializers
+        // read the persisted defaults at construction (EditorSession.swift:
+        // 198-279), so each tab's session opens with the user's toggles.
+        crate::settings::apply_stored_session_defaults(&mut session);
         ProjectTab {
             id: Uuid::new_v4(),
-            session: EditorSession::new(),
+            session,
             controller: ProjectController::new(),
             busy: ProjectBusy::new(),
             default_name: name.into(),

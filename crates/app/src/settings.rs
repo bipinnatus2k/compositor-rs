@@ -24,7 +24,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -273,8 +272,6 @@ pub fn apply_to_session(
 
 static GLOBAL: OnceLock<Mutex<ToolDefaults>> = OnceLock::new();
 
-static STARTUP_APPLIED: AtomicBool = AtomicBool::new(false);
-
 /// The process-wide table, loaded from the platform config directory on first
 /// use (Windows: `%APPDATA%\compositor\tool-defaults.json`; macOS:
 /// `~/Library/Application Support`; Linux/XDG: `$XDG_CONFIG_HOME` or
@@ -295,20 +292,19 @@ pub fn lock_global() -> MutexGuard<'static, ToolDefaults> {
     global().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Applies the stored toggles to a freshly opened window, once per process
-/// (the startup load; `AppState::new` lives outside this task's file scope,
-/// so the workspace calls this at the top of its first render). Returns
-/// whether this call was the one that applied.
-pub fn apply_startup_defaults(
-    session: &mut EditorSession,
-    transform_auto_select: &mut bool,
-) -> bool {
-    if STARTUP_APPLIED.swap(true, Ordering::Relaxed) {
-        return false;
-    }
+/// The persisted session toggles for ONE session (Swift's `EditorSession`
+/// property initializers read `ToolDefaults` at construction,
+/// EditorSession.swift:198-279), applied to every session as it is built.
+pub fn apply_stored_session_defaults(session: &mut EditorSession) {
     let defaults = lock_global();
-    apply_to_session(&defaults, session, transform_auto_select);
-    true
+    let mut ignored = false;
+    apply_to_session(&defaults, session, &mut ignored);
+}
+
+/// The stored auto-select toggle. App-global in this port (Swift keeps it
+/// per-session — recorded in docs/rust-vs-swift-diff-report.md).
+pub fn stored_auto_select() -> bool {
+    lock_global().bool(AUTO_SELECT, false)
 }
 
 /// Snapshots the session's toggles into the process-wide table and saves it
@@ -602,17 +598,5 @@ mod tests {
         assert!(restored.shows_rulers);
         assert!(restored.snap_to_grid);
         assert!(!restored.snapping_enabled);
-    }
-
-    #[test]
-    fn startup_defaults_apply_exactly_once() {
-        // The guard is process-wide, so under parallel tests this asserts the
-        // deterministic part: within one caller the second application never
-        // reports that it applied.
-        let mut session = EditorSession::new();
-        let mut auto_select = false;
-        apply_startup_defaults(&mut session, &mut auto_select);
-        let second = apply_startup_defaults(&mut session, &mut auto_select);
-        assert!(!second, "the startup load must not run twice");
     }
 }

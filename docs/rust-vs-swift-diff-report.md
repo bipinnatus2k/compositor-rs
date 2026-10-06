@@ -574,3 +574,4 @@ Rust 全部测试为内联 `#[cfg(test)]`（`crates/core/tests/` 为空目录）
 - `README.md:26` "LayerRenderer/TiledLayerRenderer semantics" → 无 tiling，且调整图层/剪贴蒙版语义与 Swift 不同（§6.1-1/6/7）。
 - `README.md:41,63` "PSD … imported" → app 未接线（§9.1-1）。
 - `README.md:27` canvas.rs "复刻 ImageResizer" → 旋转层与 1×1 mask 行为不同（§4.2-1/2），CanvasResizer fill 缺失。
+- `transformAutoSelect`（EditorSession.swift:196-198）→ Swift 为每会话属性；本移植收敛为 app 级全局开关（state.rs `transform_auto_select`），其余 ToolDefaults 逐会话在 `ProjectTab::new` 应用（`apply_stored_session_defaults`）。

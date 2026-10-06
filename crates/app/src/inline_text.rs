@@ -690,7 +690,7 @@ impl AppState {
                 .top(px(top))
                 .w(px(2.0))
                 .h(px(f32::from(bounds.size.height) + 2.0))
-                .bg(gpui_kit::rgb(0x1a1a1a))
+                .bg(gpui_kit::rgb(crate::ui::BG_CARET))
                 .into_any_element(),
         )
     }
