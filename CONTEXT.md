@@ -40,6 +40,16 @@ _Avoid_: undo stack（代码命名中）
 **Guides**:
 用户放置的对齐参考线；与自动显示的 grid 区分。
 
+### 工具与变换
+
+**Auto-select**:
+Move 工具按下时按指针位置拾取所在图层为活动层；默认关闭，按住 Cmd 临时反转。
+对应原版 `transformAutoSelect`。
+
+**Hover regions**:
+变换框边缘、角点、旋转手柄的悬停命中区域，决定光标形态与按下后的拖拽语义。
+对应原版 TransformTests 的 hoverRegions。
+
 ### 选区
 
 **Selection**:
