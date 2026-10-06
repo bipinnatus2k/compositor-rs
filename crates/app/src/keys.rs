@@ -29,7 +29,7 @@ actions!(
         SwapColors,
         DefaultColors,
         CycleToolMode,
-        CycleShapeKind,
+        CycleShape,
         BrushSofter,
         BrushHarder,
         BlendModeNext,
@@ -426,7 +426,7 @@ pub(crate) fn bindings_tracked(
     // Blend mode stepping and shape kind
     bind!(out, ids, registry, "blend.previous", BlendModePrevious);
     bind!(out, ids, registry, "blend.next", BlendModeNext);
-    bind!(out, ids, registry, "shape.cycle", CycleShapeKind);
+    bind!(out, ids, registry, "shape.cycle", CycleShape);
     // Levels preview toggle (Alt-P)
     bind!(
         out,
@@ -528,7 +528,7 @@ mod tests {
         for (keystroke, action) in expected {
             let binding = bindings
                 .iter()
-                .find(|b| b.action().name() == &format!("compositor::{action}"))
+                .find(|b| b.action().name() == format!("compositor::{action}"))
                 .unwrap_or_else(|| panic!("missing binding for {action}"));
             assert_eq!(
                 binding.keystrokes()[0].inner().unparse(),

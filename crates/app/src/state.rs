@@ -102,11 +102,11 @@ pub enum CanvasDrag {
 }
 
 /// Which modal sheet is open. The floating panels that replaced the tool
-/// dialogs (`SheetKind::Levels`, `HueSaturation`, `Effects`, `Filter`,
+/// dialogs (`Sheet::Levels`, `HueSaturation`, `Effects`, `Filter`,
 /// `Amount`, `Shortcuts` — see `panels_ui`) are gone from here; what remains
 /// are the modal dialogs Swift presents as sheets/NSAlerts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SheetKind {
+pub enum Sheet {
     ImageSize,
     CanvasSize,
     ExportPng,
@@ -124,7 +124,7 @@ pub enum SheetKind {
 /// The modal sheet: which one plus all of its widget states. Fields a given
 /// sheet doesn't use are simply never read.
 pub struct SheetState {
-    pub kind: SheetKind,
+    pub kind: Sheet,
     pub width: Entity<InputState>,
     pub height: Entity<InputState>,
     pub path: Entity<InputState>,
@@ -1395,7 +1395,7 @@ impl AppState {
         let Some(sheet) = self.sheet.as_ref() else {
             return;
         };
-        if sheet.kind != SheetKind::ExportJpeg {
+        if sheet.kind != Sheet::ExportJpeg {
             return;
         }
         let quality = self.sheet_value(cx, 0) as f64;
@@ -2195,7 +2195,7 @@ mod tests {
             let mut document = CanvasDocument::new(10, 10);
             let base = empty_layer("base");
             let mut dependent = empty_layer("dependent");
-            let mut isolated = empty_layer("isolated");
+            let isolated = empty_layer("isolated");
             let base_id = base.id;
             dependent.mask_source_id = Some(base_id);
             let (dependent_id, isolated_id) = (dependent.id, isolated.id);

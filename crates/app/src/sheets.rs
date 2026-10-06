@@ -17,7 +17,7 @@ use compositor_core::geometry::CGAffineTransform;
 use compositor_core::raster::Bitmap;
 use compositor_core::transform::LayerTransform;
 
-use crate::state::{AppState, SheetKind, SheetState};
+use crate::state::{AppState, Sheet, SheetState};
 
 /// A slider role: which setting a sheet slider writes back to.
 #[derive(Clone, Copy, PartialEq)]
@@ -48,10 +48,10 @@ pub enum SliderRole {
 impl AppState {
     // MARK: Opening
 
-    pub fn open_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_sheet(&mut self, kind: Sheet, window: &mut Window, cx: &mut Context<Self>) {
         let sheet = self.build_sheet(kind, window, cx);
         self.sheet = Some(sheet);
-        if kind == SheetKind::ExportJpeg {
+        if kind == Sheet::ExportJpeg {
             self.refresh_jpeg_preview(cx);
         }
         self.touch(cx);
@@ -99,7 +99,7 @@ impl AppState {
     /// remains are the modal dialogs of the two-phase flows.
     fn build_sheet(
         &mut self,
-        kind: SheetKind,
+        kind: Sheet,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> SheetState {
@@ -130,7 +130,7 @@ impl AppState {
             confirm_step: None,
         };
         match kind {
-            SheetKind::ImageSize => {
+            Sheet::ImageSize => {
                 let resolution = self
                     .current_tab()
                     .session
@@ -145,12 +145,12 @@ impl AppState {
                     ..base
                 }
             }
-            SheetKind::CanvasSize => base,
-            SheetKind::ExportPng => SheetState {
+            Sheet::CanvasSize => base,
+            Sheet::ExportPng => SheetState {
                 path: self.make_input("export.png", window, cx),
                 ..base
             },
-            SheetKind::ExportJpeg => SheetState {
+            Sheet::ExportJpeg => SheetState {
                 path: self.make_input("export.jpg", window, cx),
                 // The quality of the last export, which the next one starts
                 // from (JPEGExportSheet.init's UserDefaults read).
@@ -165,11 +165,11 @@ impl AppState {
                 preset: 0,
                 ..base
             },
-            SheetKind::SaveComp => SheetState {
+            Sheet::SaveComp => SheetState {
                 path: self.make_input("./project.comp", window, cx),
                 ..base
             },
-            SheetKind::Trim | SheetKind::About | SheetKind::Confirm | SheetKind::Alert => base,
+            Sheet::Trim | Sheet::About | Sheet::Confirm | Sheet::Alert => base,
         }
     }
 

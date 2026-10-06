@@ -1472,7 +1472,7 @@ mod tests {
             // Blend modes, shape kind, levels preview
             ("shift--", "compositor::BlendModePrevious", ""),
             ("shift-=", "compositor::BlendModeNext", ""),
-            ("shift-u", "compositor::CycleShapeKind", ""),
+            ("shift-u", "compositor::CycleShape", ""),
             ("alt-p", "compositor::ToggleLevelsPreview", ""),
             // Canvas keys
             ("enter", "compositor::FinishLasso", "Compositor"),

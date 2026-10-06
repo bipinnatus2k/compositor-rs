@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use gpui_kit::{Context, IntoElement, Styled, Window, px, rgb};
 
 use crate::project::{ConfirmStep, Pending, Step, TabId, UnsavedChoice};
-use crate::state::{AppState, FitDims, SaveAfter, SheetKind};
+use crate::state::{AppState, FitDims, SaveAfter, Sheet};
 use crate::tabs::ProjectTab;
 use compositor_core::transform::LayerSampling;
 
@@ -63,7 +63,7 @@ impl AppState {
     /// asked for, with the panel's `nameFieldStringValue` in the field).
     fn open_path_sheet(
         &mut self,
-        kind: SheetKind,
+        kind: Sheet,
         default_name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -84,7 +84,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_sheet(SheetKind::Alert, window, cx);
+        self.open_sheet(Sheet::Alert, window, cx);
         if let Some(sheet) = self.sheet.as_mut() {
             sheet.message = format!("{title}\n{message}");
         }
@@ -101,19 +101,19 @@ impl AppState {
     ) {
         match pending {
             Pending::SaveAs { default_name, .. } => {
-                self.open_path_sheet(SheetKind::SaveComp, &default_name, window, cx);
+                self.open_path_sheet(Sheet::SaveComp, &default_name, window, cx);
             }
             Pending::ExportPng { default_name, .. } => {
-                self.open_path_sheet(SheetKind::ExportPng, &default_name, window, cx);
+                self.open_path_sheet(Sheet::ExportPng, &default_name, window, cx);
             }
             Pending::ExportJpeg { default_name } => {
-                self.open_path_sheet(SheetKind::ExportJpeg, &default_name, window, cx);
+                self.open_path_sheet(Sheet::ExportJpeg, &default_name, window, cx);
             }
             Pending::Options { kind } => {
                 let sheet_kind = match kind {
-                    crate::project::OptionsKind::CanvasSize => SheetKind::CanvasSize,
-                    crate::project::OptionsKind::ImageSize => SheetKind::ImageSize,
-                    crate::project::OptionsKind::Trim => SheetKind::Trim,
+                    crate::project::OptionsSheet::CanvasSize => Sheet::CanvasSize,
+                    crate::project::OptionsSheet::ImageSize => Sheet::ImageSize,
+                    crate::project::OptionsSheet::Trim => Sheet::Trim,
                 };
                 self.open_sheet(sheet_kind, window, cx);
             }
@@ -142,7 +142,7 @@ impl AppState {
                 .detach();
             }
             Pending::Confirm { step, message, .. } => {
-                self.open_sheet(SheetKind::Confirm, window, cx);
+                self.open_sheet(Sheet::Confirm, window, cx);
                 if let Some(sheet) = self.sheet.as_mut() {
                     sheet.message = message;
                     sheet.confirm_step = Some(step);
@@ -315,7 +315,7 @@ impl AppState {
         let ids = self.delete_candidates();
         let single = ids.len() <= 1;
         self.delete_ask_ids = Some(ids);
-        self.open_sheet(SheetKind::Confirm, window, cx);
+        self.open_sheet(Sheet::Confirm, window, cx);
         if let Some(sheet) = self.sheet.as_mut() {
             sheet.message = if single {
                 "This layer supplies a live mask".to_string()
@@ -462,7 +462,7 @@ impl AppState {
     /// guard (Swift's panel Cancel runs the same completion with nil).
     pub(crate) fn cancel_pending_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
-            Some(SheetKind::SaveComp) => {
+            Some(Sheet::SaveComp) => {
                 let (tab_id, after) = self
                     .pending_save
                     .take()
@@ -490,17 +490,17 @@ impl AppState {
                     }
                 }
             }
-            Some(SheetKind::ExportPng) => {
+            Some(Sheet::ExportPng) => {
                 self.with_current_tab(|controller, _, busy| {
                     controller.finish_export_png(busy, None);
                 });
             }
-            Some(SheetKind::ExportJpeg) => {
+            Some(Sheet::ExportJpeg) => {
                 self.with_current_tab(|controller, _, busy| {
                     controller.finish_export_jpeg(busy, None, &[]);
                 });
             }
-            Some(SheetKind::ImageSize) => {
+            Some(Sheet::ImageSize) => {
                 self.with_current_tab(|controller, session, busy| {
                     controller.finish_image_size(
                         session,
@@ -512,17 +512,17 @@ impl AppState {
                     );
                 });
             }
-            Some(SheetKind::CanvasSize) => {
+            Some(Sheet::CanvasSize) => {
                 self.with_current_tab(|controller, session, busy| {
                     controller.finish_canvas_size(session, busy, None);
                 });
             }
-            Some(SheetKind::Trim) => {
+            Some(Sheet::Trim) => {
                 self.with_current_tab(|controller, session, busy| {
                     controller.finish_trim(session, busy, None);
                 });
             }
-            Some(SheetKind::Confirm) | Some(SheetKind::Alert) | _ => {}
+            Some(Sheet::Confirm) | Some(Sheet::Alert) | _ => {}
         }
         self.close_sheet(cx);
     }

@@ -68,7 +68,7 @@ pub enum Pending {
     /// before the panel, exactly as Swift captures it before awaiting.
     ExportPng {
         default_name: String,
-        snapshot: Option<compositor_core::project::ProjectData>,
+        snapshot: Option<Box<compositor_core::project::ProjectData>>,
     },
     /// The JPEG save panel of `exportJPEG` (:139-145). The app renders and
     /// encodes through its JPEG sheet first and hands the bytes to
@@ -76,7 +76,7 @@ pub enum Pending {
     ExportJpeg { default_name: String },
     /// An options sheet (`canvasSize` :54-65 / `imageSize` :76-87 /
     /// `trim` :98-109); the app owns the sheet UI.
-    Options { kind: OptionsKind },
+    Options { kind: OptionsSheet },
     /// The workspace-level multi-select `.comp` open panel (`open(_:)`
     /// :65-71 in ProjectWorkspace.swift); the app calls
     /// `ProjectWorkspace::finish_open` with the chosen files.
@@ -128,7 +128,7 @@ impl Pending {
 
 /// Which options sheet a `Pending::Options` stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OptionsKind {
+pub enum OptionsSheet {
     CanvasSize,
     ImageSize,
     Trim,
@@ -372,7 +372,10 @@ impl ProjectController {
         if session.document.is_none() || !self.begin(session, busy) {
             return Step::Done(());
         }
-        let snapshot = session.document.as_ref().map(project_snapshot);
+        let snapshot = session
+            .document
+            .as_ref()
+            .map(|d| Box::new(project_snapshot(d)));
         let pending = Pending::ExportPng {
             default_name: Pending::export_default_name(session, "png"),
             snapshot,
@@ -460,7 +463,7 @@ impl ProjectController {
             return Step::Done(());
         }
         let pending = Pending::Options {
-            kind: OptionsKind::CanvasSize,
+            kind: OptionsSheet::CanvasSize,
         };
         self.pending = Some(pending.clone());
         Step::Pending(pending)
@@ -492,7 +495,7 @@ impl ProjectController {
             return Step::Done(());
         }
         let pending = Pending::Options {
-            kind: OptionsKind::ImageSize,
+            kind: OptionsSheet::ImageSize,
         };
         self.pending = Some(pending.clone());
         Step::Pending(pending)
@@ -529,7 +532,7 @@ impl ProjectController {
             return Step::Done(());
         }
         let pending = Pending::Options {
-            kind: OptionsKind::Trim,
+            kind: OptionsSheet::Trim,
         };
         self.pending = Some(pending.clone());
         Step::Pending(pending)

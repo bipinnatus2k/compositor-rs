@@ -12,7 +12,7 @@ use compositor_core::session::SelectionAmountOperation;
 
 use crate::keys;
 use crate::project::{Pending, Step};
-use crate::state::{AppState, FitDims, SaveAfter, SheetKind};
+use crate::state::{AppState, FitDims, SaveAfter, Sheet};
 use crate::ui::{FG_DIM, text_label};
 
 impl Render for AppState {
@@ -1231,7 +1231,7 @@ impl AppState {
         self.set_status("Panel layout is fixed in this build", cx);
     }
     fn on_about(&mut self, _: &keys::About, _w: &mut Window, cx: &mut Context<Self>) {
-        self.open_sheet(SheetKind::About, _w, cx);
+        self.open_sheet(Sheet::About, _w, cx);
     }
 
     // MARK: Canvas keys
@@ -1379,7 +1379,7 @@ impl AppState {
     }
     fn on_cycle_shape_kind(
         &mut self,
-        _: &keys::CycleShapeKind,
+        _: &keys::CycleShape,
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {

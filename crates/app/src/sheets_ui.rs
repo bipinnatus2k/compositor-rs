@@ -25,7 +25,7 @@ use compositor_core::tools::brush::RasterEdit;
 
 use crate::project::UnsavedChoice;
 
-use crate::state::{AppState, FitDims, SheetKind};
+use crate::state::{AppState, FitDims, Sheet};
 use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
 
 /// Starting a drag on the curve canvas (`CurvesControls.swift`'s
@@ -44,18 +44,18 @@ pub enum CurveDragBegin {
     None,
 }
 
-fn sheet_title(kind: SheetKind) -> &'static str {
+fn sheet_title(kind: Sheet) -> &'static str {
     match kind {
-        SheetKind::ImageSize => "Image Size",
-        SheetKind::CanvasSize => "Canvas Size",
-        SheetKind::ExportPng => "Export PNG",
-        SheetKind::ExportJpeg => "Export JPEG",
-        SheetKind::SaveComp => "Save Project",
-        SheetKind::Trim => "Trim",
-        SheetKind::About => "About Compositor",
+        Sheet::ImageSize => "Image Size",
+        Sheet::CanvasSize => "Canvas Size",
+        Sheet::ExportPng => "Export PNG",
+        Sheet::ExportJpeg => "Export JPEG",
+        Sheet::SaveComp => "Save Project",
+        Sheet::Trim => "Trim",
+        Sheet::About => "About Compositor",
         // Confirm/Alert titles come from the presenting flow at render time.
-        SheetKind::Confirm => "Compositor",
-        SheetKind::Alert => "Compositor",
+        Sheet::Confirm => "Compositor",
+        Sheet::Alert => "Compositor",
     }
 }
 
@@ -121,7 +121,7 @@ impl AppState {
         // discards the draft) and Done (which saves it).
         // The JPEG export's OK stays disabled until the live encoded preview
         // matches the current options (`readyOptions != options`).
-        let ok_disabled = kind == SheetKind::ExportJpeg
+        let ok_disabled = kind == Sheet::ExportJpeg
             && self
                 .sheet
                 .as_ref()
@@ -129,7 +129,7 @@ impl AppState {
                     sheet.jpeg_ready != Some((self.sheet_value(cx, 0) as f64, sheet.preset))
                 })
                 .unwrap_or(false);
-        let footer = if kind == SheetKind::Confirm && self.delete_ask_ids.is_some() {
+        let footer = if kind == Sheet::Confirm && self.delete_ask_ids.is_some() {
             // The live-mask delete ask (deleteWithLiveMaskChoice's NSAlert,
             // LiveLayerMask.swift:118-121): Bake and Delete / Cancel /
             // Remove Links and Delete.
@@ -167,7 +167,7 @@ impl AppState {
                             this.resolve_delete_ask(false, cx);
                         })),
                 )
-        } else if kind == SheetKind::Confirm {
+        } else if kind == Sheet::Confirm {
             // `confirmReplacement` (:257-259): Save / Cancel / Don't Save.
             gpui_kit::div()
                 .flex()
@@ -203,7 +203,7 @@ impl AppState {
                             this.resolve_confirm_choice(UnsavedChoice::DontSave, window, cx);
                         })),
                 )
-        } else if kind == SheetKind::Alert {
+        } else if kind == Sheet::Alert {
             gpui_kit::div()
                 .flex()
                 .flex_row()
@@ -283,7 +283,7 @@ impl AppState {
         let mut body = gpui_kit::div().flex().flex_col().gap_1();
 
         match kind {
-            SheetKind::ImageSize => {
+            Sheet::ImageSize => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let percent = sheet.percent;
                 let link = sheet.link;
@@ -343,7 +343,7 @@ impl AppState {
                         .into_any_element(),
                     ));
             }
-            SheetKind::CanvasSize => {
+            Sheet::CanvasSize => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let anchor = sheet.anchor;
                 let relative = sheet.relative;
@@ -374,11 +374,11 @@ impl AppState {
                     ))
                     .child(sheet_row("Anchor", anchor_picker(anchor, cx)));
             }
-            SheetKind::ExportPng | SheetKind::SaveComp => {
+            Sheet::ExportPng | Sheet::SaveComp => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let hint = match kind {
-                    SheetKind::ExportPng => "The composited canvas is written as a PNG.",
-                    SheetKind::SaveComp => "The project is saved as a .comp package folder.",
+                    Sheet::ExportPng => "The composited canvas is written as a PNG.",
+                    Sheet::SaveComp => "The project is saved as a .comp package folder.",
                     _ => "PNG/JPEG images open as a new layer; .comp folders open as projects.",
                 };
                 body = body
@@ -388,7 +388,7 @@ impl AppState {
                     ))
                     .child(sheet_row("", text_label(hint, true)));
             }
-            SheetKind::ExportJpeg => {
+            Sheet::ExportJpeg => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let matte = sheet.preset;
                 let quality = {
@@ -465,7 +465,7 @@ impl AppState {
                         ),
                     ));
             }
-            SheetKind::Trim => {
+            Sheet::Trim => {
                 let sheet = self.sheet.as_ref().unwrap();
                 let based_on = sheet.based_on;
                 let sides = sheet.sides;
@@ -557,7 +557,7 @@ impl AppState {
                             .w(px(80.0)),
                     ));
             }
-            SheetKind::About => {
+            Sheet::About => {
                 body = body.child(
                     gpui_kit::div()
                         .flex()
@@ -570,7 +570,7 @@ impl AppState {
                         )),
                 );
             }
-            SheetKind::Confirm | SheetKind::Alert => {
+            Sheet::Confirm | Sheet::Alert => {
                 let message = self
                     .sheet
                     .as_ref()
@@ -579,7 +579,7 @@ impl AppState {
                 for line in message.lines() {
                     body = body.child(text_label(line.to_string(), false));
                 }
-                if kind == SheetKind::Confirm {
+                if kind == Sheet::Confirm {
                     if self.delete_ask_ids.is_some() {
                         // The delete ask's informative text (the alert's
                         // `informativeText`, LiveLayerMask.swift:117).
@@ -598,7 +598,7 @@ impl AppState {
         // Alert's Cancel is just OK; the controller-driven panels release
         // their pending (with no answer).
         match self.sheet.as_ref().map(|sheet| sheet.kind) {
-            Some(SheetKind::Confirm) => {
+            Some(Sheet::Confirm) => {
                 // The delete ask's Cancel deletes nothing; the unsaved-changes
                 // confirm's Cancel aborts the close/quit flow.
                 if self.delete_ask_ids.is_some() {
@@ -608,17 +608,17 @@ impl AppState {
                 }
                 return;
             }
-            Some(SheetKind::Alert) => {
+            Some(Sheet::Alert) => {
                 self.dismiss_error_alert(cx);
                 return;
             }
             Some(
-                SheetKind::SaveComp
-                | SheetKind::ExportPng
-                | SheetKind::ExportJpeg
-                | SheetKind::ImageSize
-                | SheetKind::CanvasSize
-                | SheetKind::Trim,
+                Sheet::SaveComp
+                | Sheet::ExportPng
+                | Sheet::ExportJpeg
+                | Sheet::ImageSize
+                | Sheet::CanvasSize
+                | Sheet::Trim,
             ) => {
                 self.cancel_pending_sheet(window, cx);
                 return;
@@ -764,7 +764,7 @@ impl AppState {
             None => return,
         };
         match kind {
-            SheetKind::ImageSize => {
+            Sheet::ImageSize => {
                 let (mut width, mut height, resolution, percent) = {
                     let cx_app: &gpui_kit::App = cx;
                     let sheet = self.sheet.as_ref().unwrap();
@@ -792,7 +792,7 @@ impl AppState {
                 });
                 self.request_refit();
             }
-            SheetKind::CanvasSize => {
+            Sheet::CanvasSize => {
                 let (mut width, mut height, relative, anchor) = {
                     let cx_app: &gpui_kit::App = cx;
                     let sheet = self.sheet.as_ref().unwrap();
@@ -815,11 +815,11 @@ impl AppState {
                 });
                 self.request_refit();
             }
-            SheetKind::ExportPng => {
+            Sheet::ExportPng => {
                 let url = path_or_none(&self.sheet_path(cx));
                 self.finish_pending_export_png(url, window, cx);
             }
-            SheetKind::ExportJpeg => {
+            Sheet::ExportJpeg => {
                 let (path, quality, matte) = {
                     let cx_app: &gpui_kit::App = cx;
                     let sheet = self.sheet.as_ref().unwrap();
@@ -888,11 +888,11 @@ impl AppState {
                 let url = path_or_none(&path);
                 self.finish_pending_export_jpeg(url, &data, window, cx);
             }
-            SheetKind::SaveComp => {
+            Sheet::SaveComp => {
                 let url = path_or_none(&self.sheet_path(cx));
                 self.finish_pending_save(url, window, cx);
             }
-            SheetKind::Trim => {
+            Sheet::Trim => {
                 let (based_on, sides, tolerance) = {
                     let cx_app: &gpui_kit::App = cx;
                     let sheet = self.sheet.as_ref().unwrap();
@@ -921,7 +921,7 @@ impl AppState {
                 });
                 self.request_refit();
             }
-            SheetKind::About | SheetKind::Confirm | SheetKind::Alert => {}
+            Sheet::About | Sheet::Confirm | Sheet::Alert => {}
         }
         if self.sheet.as_ref().map(|sheet| sheet.kind) == kind_before {
             self.close_sheet(cx);
