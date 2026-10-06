@@ -18,7 +18,7 @@ use image::Frame;
 use compositor_core::document::CanvasDocument;
 use compositor_core::document::ImageLayer;
 use compositor_core::filters::{FilterJob, FilterKind, FilterSettings};
-use compositor_core::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
+use compositor_core::geometry::{CGPoint, CGRect, CGSize};
 use compositor_core::raster::{Bitmap, ImportedImage};
 use compositor_core::render;
 use compositor_core::session::EditorSession;

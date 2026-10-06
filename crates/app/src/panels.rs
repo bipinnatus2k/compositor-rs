@@ -300,7 +300,7 @@ pub fn render_panel<E: 'static>(
         .px_3()
         .py_2()
         .border_b_1()
-        .border_color(gpui_kit::rgb(0x4a4a4a))
+        .border_color(gpui_kit::rgb(crate::ui::BORDER))
         .on_mouse_down(
             MouseButton::Left,
             move |event: &MouseDownEvent, _window, cx| {
@@ -339,8 +339,8 @@ pub fn render_panel<E: 'static>(
         .flex_col()
         .rounded_md()
         .border_1()
-        .border_color(gpui_kit::rgb(0x4a4a4a))
-        .bg(gpui_kit::rgb(0x2d2d2d))
+        .border_color(gpui_kit::rgb(crate::ui::BORDER))
+        .bg(gpui_kit::rgb(crate::ui::BG_PANEL))
         .overflow_hidden()
         .occlude()
         .child(title_row)

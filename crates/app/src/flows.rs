@@ -522,7 +522,8 @@ impl AppState {
                     controller.finish_trim(session, busy, None);
                 });
             }
-            Some(Sheet::Confirm) | Some(Sheet::Alert) | _ => {}
+            // Confirm/Alert resolve through their own flow paths.
+            _ => {}
         }
         self.close_sheet(cx);
     }

@@ -433,7 +433,9 @@ impl AppState {
             .border_color(gpui_kit::black().opacity(0.4))
             // Dropping files on the strip opens them (into=nil: images get
             // their own tabs, packages load) — `ProjectTabs`' strip target.
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(gpui_kit::rgb(0x33383f)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.bg(gpui_kit::rgb(crate::ui::BG_DROP_STRIP))
+            })
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
                 let paths = dropped.paths().to_vec();
                 let failures = this.workspace.receive(&paths, None, None);

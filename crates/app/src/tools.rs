@@ -824,7 +824,7 @@ impl AppState {
                         .h(px(18.0))
                         .rounded_xs()
                         .border_1()
-                        .border_color(gpui_kit::rgb(0x111111))
+                        .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
                         .bg(gpui_kit::rgb(color_rgb))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.open_text_color_picker_ui(window, cx);
@@ -1160,7 +1160,7 @@ fn swatch(
         .h(px(18.0))
         .rounded_sm()
         .border_1()
-        .border_color(gpui_kit::rgb(0x606060))
+        .border_color(gpui_kit::rgb(crate::ui::BORDER_BRIGHT))
         .bg(gpui_kit::rgb(value))
 }
 

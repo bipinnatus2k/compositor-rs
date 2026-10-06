@@ -244,9 +244,7 @@ pub(crate) fn color_picker_panel_body(
     let picker = state.tab().session.color_picker.as_ref()?;
     let color = picker.color();
     let hsb = picker.hsb;
-    let Some(ui) = state.picker_ui.as_ref() else {
-        return None;
-    };
+    let ui = state.picker_ui.as_ref()?;
     let hex = ui.hex.clone();
 
     // The gradient bitmaps: one per working hue for the field, one strip

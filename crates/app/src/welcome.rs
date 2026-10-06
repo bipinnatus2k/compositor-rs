@@ -102,7 +102,7 @@ impl AppState {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(0x4a4a4a))
+            .border_color(rgb(crate::ui::BORDER))
             .child(text_label(WELCOME_TITLE, false).text_size(px(14.0)))
             .child(text_label(WELCOME_SUBTITLE, true));
 
@@ -132,7 +132,7 @@ impl AppState {
                 text_label("Transparent canvas · sRGB", true)
             } else {
                 text_label("Enter whole numbers from 1 to 30,000 pixels.", true)
-                    .text_color(rgb(0xe0a24a))
+                    .text_color(rgb(crate::ui::STATUS_WARNING))
             });
 
         let footer = div()
@@ -143,7 +143,7 @@ impl AppState {
             .px_3()
             .py_2()
             .border_t_1()
-            .border_color(rgb(0x4a4a4a))
+            .border_color(rgb(crate::ui::BORDER))
             // File > Open's entry point, exactly as the menu action runs it
             // (workspace.rs `on_open`): the workspace asks for the two-phase
             // open dialog and the pending flow plays the file picker's part.
@@ -191,10 +191,10 @@ impl AppState {
             .relative()
             .flex_1()
             .overflow_hidden()
-            .bg(rgb(0x232326))
+            .bg(rgb(crate::ui::BG_WELCOME))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 // File drags tint the area, as they tint the canvas.
-                style.bg(rgb(0x2a2f3a))
+                style.bg(rgb(crate::ui::BG_DROP_AREA))
             })
             .on_drag_move::<ExternalPaths>(cx.listener(
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {
@@ -220,8 +220,8 @@ impl AppState {
                             .flex_col()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(0x4a4a4a))
-                            .bg(rgb(0x2d2d2d))
+                            .border_color(rgb(crate::ui::BORDER))
+                            .bg(rgb(crate::ui::BG_PANEL))
                             .overflow_hidden()
                             // Create supports Return (NewCanvasSheet.swift:40,
                             // the button's `.configuredNativeShortcut(.return)`):
@@ -251,11 +251,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CREATE_CANVAS_LABEL, IMPORT_IMAGE_LABEL, OPEN_PROJECT_LABEL, WELCOME_SUBTITLE,
-        WELCOME_TITLE, welcome_can_create, welcome_disabled,
-    };
     use super::{valid_dimension, welcome_dimension};
+    use super::{welcome_can_create, welcome_disabled};
     use crate::tabs::ProjectBusy;
 
     #[test]

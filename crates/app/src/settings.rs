@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn bool_reads_stored_values_with_fallbacks() {
         let mut defaults = ToolDefaults::new();
-        assert!(defaults.bool(RULERS, false) == false);
+        assert!(!defaults.bool(RULERS, false));
         assert!(defaults.bool(SNAP, true));
         defaults.set(true, RULERS);
         defaults.set(false, SNAP);

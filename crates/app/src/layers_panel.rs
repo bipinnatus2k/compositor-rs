@@ -111,8 +111,8 @@ fn thumbnail_cell(
         .rounded_sm()
         .overflow_hidden()
         .border_1()
-        .border_color(gpui_kit::rgb(0x444444))
-        .bg(rgb(0x555555))
+        .border_color(gpui_kit::rgb(crate::ui::BORDER_THUMB))
+        .bg(rgb(crate::ui::FG_DISABLED))
         .when(is_target, |cell| {
             cell.border_2()
                 .border_color(gpui_kit::rgb(crate::ui::ACCENT))
@@ -477,7 +477,9 @@ impl AppState {
                 }
                 this.touch(cx);
             }))
-            .when(is_active, |row| row.bg(gpui_kit::rgba(0x4da6ff33)));
+            .when(is_active, |row| {
+                row.bg(gpui_kit::rgba(crate::ui::ACCENT_WASH))
+            });
 
         // Indent: one 24px step per level; the folder's chevron closes the
         // indent region.
@@ -536,7 +538,7 @@ impl AppState {
                     .text_color(if visible {
                         gpui_kit::rgb(crate::ui::FG_TEXT)
                     } else {
-                        gpui_kit::rgb(0x555555)
+                        gpui_kit::rgb(crate::ui::FG_DISABLED)
                     }),
                 ),
         );

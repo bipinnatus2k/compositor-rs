@@ -1187,7 +1187,7 @@ impl AppState {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(gpui_kit::rgb(0x111111))
+                            .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
                             .on_mouse_down(
                                 gpui_kit::MouseButton::Left,
                                 cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
@@ -1514,7 +1514,7 @@ fn effect_swatch(
         .h(px(18.0))
         .rounded_xs()
         .border_1()
-        .border_color(gpui_kit::rgb(0x111111))
+        .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
         .bg(gpui_kit::rgb(rgb))
         .on_click(cx.listener(move |state, _, _, cx| {
             state.open_effect_color_picker(kind, cx);
@@ -1614,8 +1614,8 @@ mod tests {
         }
         // The click target mirrors the tag: segment 0 = Outside (false),
         // segment 1 = Inside (true). Clicking the selected segment keeps it.
-        assert_eq!(stroke_segment_target(0), false);
-        assert_eq!(stroke_segment_target(1), true);
+        assert!(!stroke_segment_target(0));
+        assert!(stroke_segment_target(1));
         for segment in 0..STROKE_POSITION_SEGMENTS.len() {
             assert!(
                 stroke_segment_selected(stroke_segment_target(segment), segment),

@@ -105,7 +105,7 @@ impl AppState {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(gpui_kit::rgb(0x4a4a4a))
+            .border_color(gpui_kit::rgb(crate::ui::BORDER))
             .child(text_label(sheet_title(kind), false).text_size(px(13.0)));
 
         let body = gpui_kit::div()
@@ -141,7 +141,7 @@ impl AppState {
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .border_color(gpui_kit::rgb(crate::ui::BORDER))
                 .child(
                     Button::new("delete-ask-bake")
                         .label("Bake and Delete")
@@ -177,7 +177,7 @@ impl AppState {
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .border_color(gpui_kit::rgb(crate::ui::BORDER))
                 .child(
                     Button::new("confirm-save")
                         .label("Save")
@@ -211,7 +211,7 @@ impl AppState {
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .border_color(gpui_kit::rgb(crate::ui::BORDER))
                 .child(
                     Button::new("alert-ok")
                         .label("OK")
@@ -230,7 +230,7 @@ impl AppState {
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(gpui_kit::rgb(0x4a4a4a))
+                .border_color(gpui_kit::rgb(crate::ui::BORDER))
                 .child(
                     Button::new("sheet-cancel")
                         .label("Cancel")
@@ -252,7 +252,7 @@ impl AppState {
         let overlay = gpui_kit::div()
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000099))
+            .bg(rgba(crate::ui::SCRIM))
             .occlude()
             .flex()
             .items_center()
@@ -264,8 +264,8 @@ impl AppState {
                     .flex_col()
                     .rounded_md()
                     .border_1()
-                    .border_color(gpui_kit::rgb(0x4a4a4a))
-                    .bg(gpui_kit::rgb(0x2d2d2d))
+                    .border_color(gpui_kit::rgb(crate::ui::BORDER))
+                    .bg(gpui_kit::rgb(crate::ui::BG_PANEL))
                     .overflow_hidden()
                     .child(title_bar)
                     .child(body)
@@ -419,7 +419,7 @@ impl AppState {
                         gpui_kit::div()
                             .w(px(280.0))
                             .h(px(160.0))
-                            .bg(gpui_kit::rgb(0x1f1f1f))
+                            .bg(gpui_kit::rgb(crate::ui::BG_INSET))
                             .rounded_sm()
                             .overflow_hidden()
                             .flex()
@@ -1035,8 +1035,8 @@ impl AppState {
                 bitmap.data = rgba.into_raw();
                 for pixel in bitmap.data.chunks_exact_mut(4) {
                     let alpha = pixel[3] as u32;
-                    for channel in 0..3 {
-                        pixel[channel] = ((pixel[channel] as u32 * alpha + 127) / 255) as u8;
+                    for channel in &mut pixel[..3] {
+                        *channel = ((*channel as u32 * alpha + 127) / 255) as u8;
                     }
                 }
                 let name = std::path::Path::new(path)
@@ -1280,8 +1280,10 @@ impl AppState {
             ))
             .child(list);
         if let Some(problem) = problem {
-            column = column
-                .child(text_label(problem.to_string(), false).text_color(gpui_kit::rgb(0xe0a24a)));
+            column = column.child(
+                text_label(problem.to_string(), false)
+                    .text_color(gpui_kit::rgb(crate::ui::STATUS_WARNING)),
+            );
         }
         column.into_any_element()
     }
@@ -1350,9 +1352,7 @@ fn shortcuts_handle_keystroke(
 ) {
     let chord_text = event.keystroke.unparse();
     let finished = SHORTCUTS_SHEET.with_borrow_mut(|slot| {
-        let Some(editor) = slot.as_mut() else {
-            return None;
-        };
+        let editor = slot.as_mut()?;
         editor.recording.as_ref()?;
         // Recording: swallow the keystroke either way.
         cx.stop_propagation();
@@ -1607,8 +1607,10 @@ fn anchor_picker(anchor: usize, cx: &mut Context<AppState>) -> gpui_kit::AnyElem
                 .h(px(26.0))
                 .rounded_xs()
                 .border_1()
-                .border_color(gpui_kit::rgb(0x555555))
-                .when(index == anchor, |cell| cell.bg(gpui_kit::rgb(0x4da6ff)))
+                .border_color(gpui_kit::rgb(crate::ui::FG_DISABLED))
+                .when(index == anchor, |cell| {
+                    cell.bg(gpui_kit::rgb(crate::ui::ACCENT))
+                })
                 .on_click(cx.listener(move |state, _, _, cx| {
                     if let Some(sheet) = state.sheet.as_mut() {
                         sheet.anchor = index;
@@ -1672,6 +1674,16 @@ pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
         },
     )
     .size_full()
+}
+
+/// A sheet path field's value as an optional save target (empty = Cancel).
+fn path_or_none(path: &str) -> Option<std::path::PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(trimmed))
+    }
 }
 
 #[cfg(test)]
@@ -1925,15 +1937,5 @@ mod tests {
         assert_eq!(display_chord("v"), "V");
         // Unparsable stored chords print raw instead of failing the sheet.
         assert_eq!(display_chord("???"), "???");
-    }
-}
-
-/// A sheet path field's value as an optional save target (empty = Cancel).
-fn path_or_none(path: &str) -> Option<std::path::PathBuf> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(std::path::PathBuf::from(trimmed))
     }
 }

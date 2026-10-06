@@ -1476,7 +1476,7 @@ mod tests {
         let mut workspace = ProjectWorkspace::new();
 
         workspace.is_managing = true;
-        workspace.receive(&[url.clone()], None, None);
+        workspace.receive(std::slice::from_ref(&url), None, None);
         assert!(workspace.has_queued_receives());
         assert_eq!(workspace.tabs().len(), 1);
         assert!(workspace.drain_incoming().is_empty(), "still blocked");

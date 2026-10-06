@@ -25,6 +25,30 @@ pub const BG_CONTROL: u32 = 0x373737;
 pub const FG_TEXT: u32 = 0xd4d4d4;
 pub const FG_DIM: u32 = 0x9a9a9a;
 pub const ACCENT: u32 = 0x4da6ff;
+/// The standard hairline border on cards, panels and sheets.
+pub const BORDER: u32 = 0x4a4a4a;
+/// Frame around sunken data content: editor plots and swatch cells.
+pub const BORDER_INSET: u32 = 0x111111;
+/// Layer-thumbnail frame.
+pub const BORDER_THUMB: u32 = 0x444444;
+/// Bright frame on data swatches.
+pub const BORDER_BRIGHT: u32 = 0x606060;
+/// The disabled/dimmed mid gray: eye-off glyphs, the empty-thumbnail fill,
+/// anchor-dot frames.
+pub const FG_DISABLED: u32 = 0x555555;
+/// Sunken preview well (the camera-raw viewer's backdrop).
+pub const BG_INSET: u32 = 0x1f1f1f;
+/// Warning copy (camera-raw problem lines, welcome warnings).
+pub const STATUS_WARNING: u32 = 0xe0a24a;
+/// The active layer row's accent wash — ACCENT at ~20% alpha.
+pub const ACCENT_WASH: u32 = 0x4da6ff33;
+/// The sheet overlay's scrim.
+pub const SCRIM: u32 = 0x00000099;
+/// The welcome area's surface, and the file-drop tints (welcome area and
+/// tab strip).
+pub const BG_WELCOME: u32 = 0x232326;
+pub const BG_DROP_AREA: u32 = 0x2a2f3a;
+pub const BG_DROP_STRIP: u32 = 0x33383f;
 
 #[allow(dead_code)]
 pub fn app_bg() -> gpui_kit::Rgba {

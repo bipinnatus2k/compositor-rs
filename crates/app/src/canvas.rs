@@ -2144,14 +2144,58 @@ fn nice_tick(rough: f64) -> f64 {
         .unwrap_or(50_000.0)
 }
 
-/// Whole-pixel tick label (`CanvasRulers.label`).
-fn ruler_label(value: f64) -> String {
-    let rounded = value.round();
-    if rounded == 0.0 {
-        "0".to_string()
-    } else {
-        (rounded as i64).to_string()
-    }
+// MARK: Drag events
+
+/// Registers the window-level listeners that continue an in-progress drag
+/// when the pointer leaves the canvas. Called during paint; listeners are
+/// re-registered every frame.
+fn install_drag_events(
+    app_move: &gpui_kit::WeakEntity<AppState>,
+    app_up: &gpui_kit::WeakEntity<AppState>,
+    window: &mut Window,
+) {
+    let app_move = app_move.clone();
+    let app_up = app_up.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
+        app_move
+            .update(cx, |state, cx| {
+                if state.drag.is_some() {
+                    state.canvas_mouse_move(event, window, cx);
+                }
+            })
+            .ok();
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
+        app_up
+            .update(cx, |state, cx| state.canvas_mouse_up(event, window, cx))
+            .ok();
+    });
+}
+
+/// Registers the window-level key listeners for the canvas keys the action
+/// system can't express: Space's hold-to-pan (needs keyUp), the opacity
+/// digits, Option-arrow text spacing and ⌘Return finishing text
+/// (`EditorCanvas.keyDown`/`keyUp`). Listeners run each frame, so they must
+/// be re-registered during paint like the drag events above.
+fn install_key_events(app: &gpui_kit::WeakEntity<AppState>, window: &mut Window) {
+    let app_down = app.clone();
+    window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        app_down
+            .update(cx, |state, cx| state.canvas_key_down(event, window, cx))
+            .ok();
+    });
+    let app_up = app.clone();
+    window.on_key_event(move |event: &KeyUpEvent, phase, window, cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        app_up
+            .update(cx, |state, cx| state.canvas_key_up(event, window, cx))
+            .ok();
+    });
 }
 
 #[cfg(test)]
@@ -2159,7 +2203,7 @@ mod tests {
     use super::{
         blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, can_paint,
         clone_layer_sample, guide_axis_position, guide_release_deletes, handle_at, nice_tick,
-        paint_target, ruler_axis_at, ruler_label, shape_drag_rect, transform_press_layer,
+        paint_target, ruler_axis_at, shape_drag_rect, transform_press_layer,
     };
     use crate::state::RULER_SIZE;
     use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, LayerMask, ShapeKind};
@@ -2169,6 +2213,18 @@ mod tests {
     use compositor_core::session::EditorSession;
     use compositor_core::transform::LayerTransform;
     use uuid::Uuid;
+
+    /// Whole-pixel tick label (`CanvasRulers.label`). Production rendering
+    /// has no ruler ticks yet; the helper keeps its ported shape here for
+    /// the label tests until it gains a caller.
+    fn ruler_label(value: f64) -> String {
+        let rounded = value.round();
+        if rounded == 0.0 {
+            "0".to_string()
+        } else {
+            (rounded as i64).to_string()
+        }
+    }
 
     fn opaque_layer(width: usize, height: usize, rgba: [u8; 4], origin: CGPoint) -> ImageLayer {
         let mut image = Bitmap::new(width, height);
@@ -2619,58 +2675,4 @@ mod tests {
         );
         assert_eq!(rect, CGRect::new(0.0, 0.0, 10.0, 8.0));
     }
-}
-
-// MARK: Drag events
-
-/// Registers the window-level listeners that continue an in-progress drag
-/// when the pointer leaves the canvas. Called during paint; listeners are
-/// re-registered every frame.
-fn install_drag_events(
-    app_move: &gpui_kit::WeakEntity<AppState>,
-    app_up: &gpui_kit::WeakEntity<AppState>,
-    window: &mut Window,
-) {
-    let app_move = app_move.clone();
-    let app_up = app_up.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
-        app_move
-            .update(cx, |state, cx| {
-                if state.drag.is_some() {
-                    state.canvas_mouse_move(event, window, cx);
-                }
-            })
-            .ok();
-    });
-    window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
-        app_up
-            .update(cx, |state, cx| state.canvas_mouse_up(event, window, cx))
-            .ok();
-    });
-}
-
-/// Registers the window-level key listeners for the canvas keys the action
-/// system can't express: Space's hold-to-pan (needs keyUp), the opacity
-/// digits, Option-arrow text spacing and ⌘Return finishing text
-/// (`EditorCanvas.keyDown`/`keyUp`). Listeners run each frame, so they must
-/// be re-registered during paint like the drag events above.
-fn install_key_events(app: &gpui_kit::WeakEntity<AppState>, window: &mut Window) {
-    let app_down = app.clone();
-    window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
-        if phase != DispatchPhase::Bubble {
-            return;
-        }
-        app_down
-            .update(cx, |state, cx| state.canvas_key_down(event, window, cx))
-            .ok();
-    });
-    let app_up = app.clone();
-    window.on_key_event(move |event: &KeyUpEvent, phase, window, cx| {
-        if phase != DispatchPhase::Bubble {
-            return;
-        }
-        app_up
-            .update(cx, |state, cx| state.canvas_key_up(event, window, cx))
-            .ok();
-    });
 }
