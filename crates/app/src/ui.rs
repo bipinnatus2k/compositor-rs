@@ -4,8 +4,10 @@
 //! text rows.
 
 pub mod color_picker_sheet;
+pub mod curves_controls;
 pub mod floating_panel;
 pub mod keyboard_shortcuts;
+pub mod levels_sheet;
 pub mod sheets;
 
 use std::rc::Rc;

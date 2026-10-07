@@ -16,10 +16,14 @@
 
 use std::path::{Path, PathBuf};
 
+use gpui_kit::Context;
+
 use compositor_core::canvas::{CanvasSizeOptions, TrimOptions};
 use compositor_core::geometry::CGPoint;
+use compositor_core::raster::Bitmap;
 use compositor_core::session::EditorSession;
 
+use crate::state::{AppState, FitDims};
 use crate::tabs::ProjectBusy;
 
 /// A tab's identity (`ProjectTab.id`, a `UUID` in Swift). Declared here so
@@ -916,6 +920,111 @@ fn same_path(session: &EditorSession, source: &Path) -> bool {
 }
 
 // MARK: Tests
+
+impl AppState {
+    // MARK: File operations
+
+    /// Opens an image (PNG/JPEG) as a new layer, or a .comp package folder.
+    pub fn open_document(&mut self, path: &str, cx: &mut Context<Self>) {
+        let dir = std::path::PathBuf::from(path);
+        if dir.is_dir() || path.ends_with(".comp") {
+            match compositor_core::project::load(&dir) {
+                Ok(data) => match compositor_core::project::document_from_project(&data) {
+                    Ok((document, active)) => {
+                        self.tab().session.active_layer_id =
+                            active.or_else(|| document.layers.last().map(|layer| layer.id));
+                        self.tab().session.selected_layer_ids = self
+                            .tab()
+                            .session
+                            .active_layer_id
+                            .map(|id| vec![id])
+                            .unwrap_or_default();
+                        self.tab().session.document = Some(document);
+                        self.tab().session.history.reset();
+                        self.tab().session.mark_saved();
+                        self.fit_for = FitDims::REFIT;
+                        self.set_status(format!("Opened {}", dir.display()), cx);
+                    }
+                    Err(error) => self.set_status(format!("Open failed: {}", error), cx),
+                },
+                Err(error) => self.set_status(format!("Open failed: {}", error), cx),
+            }
+            return;
+        }
+        // A Photoshop file goes through PsdReader + PsdDocumentBuilder
+        // (`insertPhotoshop`): fresh document or wrapping group, with a note
+        // per conversion.
+        if path.to_ascii_lowercase().ends_with(".psd") {
+            let data = match std::fs::read(path) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.set_status(format!("Open failed: {}", error), cx);
+                    return;
+                }
+            };
+            let name = std::path::Path::new(path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Photoshop".to_string());
+            match self.tab().session.import_photoshop_data(&name, &data) {
+                Ok(notes) => {
+                    self.fit_for = FitDims::REFIT;
+                    self.set_status(
+                        if notes > 0 {
+                            format!(
+                                "Imported {} ({} conversion note{})",
+                                path,
+                                notes,
+                                if notes == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("Imported {}", path)
+                        },
+                        cx,
+                    );
+                }
+                Err(error) => self.set_status(format!("Open failed: {}", error), cx),
+            }
+            return;
+        }
+        match image::open(path) {
+            Ok(image) => {
+                let rgba = image.to_rgba8();
+                let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+                let mut bitmap = Bitmap::new(width, height);
+                bitmap.data = rgba.into_raw();
+                for pixel in bitmap.data.chunks_exact_mut(4) {
+                    let alpha = pixel[3] as u32;
+                    for channel in &mut pixel[..3] {
+                        *channel = ((*channel as u32 * alpha + 127) / 255) as u8;
+                    }
+                }
+                let name = std::path::Path::new(path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Image".to_string());
+                if self.tab().session.document.is_none() {
+                    self.tab().session.create_document(width, height, true);
+                }
+                let layer = compositor_core::document::ImageLayer::with_asset(
+                    compositor_core::raster::ImportedImage::new(bitmap, name),
+                    CGPoint::ZERO,
+                );
+                let id = layer.id;
+                self.history_edit("Open", move |session| {
+                    if let Some(document) = session.document.as_mut() {
+                        let slot = document.layers.len();
+                        document.layers.insert(slot, layer);
+                    }
+                    session.select_layer(Some(id));
+                });
+                self.fit_for = FitDims::REFIT;
+                self.set_status(format!("Opened {}", path), cx);
+            }
+            Err(error) => self.set_status(format!("Open failed: {}", error), cx),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -32,13 +32,12 @@ use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
 
-use crate::sheets_ui::{
-    histogram_view, labeled_slider, levels_channel_label, parse_input_usize, sheet_row,
-};
+use crate::sheets_ui::{histogram_view, labeled_slider, parse_input_usize, sheet_row};
 use crate::state::AppState;
 use crate::ui::floating_panel::{
     DOCKED_WIDTH, PanelPlacement, docked_top_left, panel_names, render_panel,
 };
+use crate::ui::levels_sheet::levels_channel_label;
 use crate::ui::sheets::SliderRole;
 use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
 
@@ -1196,7 +1195,7 @@ impl AppState {
                                     this.curves_mouse_down(event, cx);
                                 }),
                             )
-                            .child(crate::sheets_ui::curves_canvas_view(
+                            .child(crate::ui::curves_controls::curves_canvas_view(
                                 &curves, &points, selected, cx,
                             )),
                     )

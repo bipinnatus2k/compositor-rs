@@ -18,6 +18,7 @@
 //!   [`ShortcutProblem`]. The reserved chords follow this port's ⌘→`ctrl`
 //!   mapping convention used by every default binding.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
@@ -25,8 +26,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-use gpui_kit::Keystroke;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    Context, InteractiveElement, IntoElement, Keystroke, KeystrokeEvent, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, px,
+};
 use serde::{Deserialize, Serialize};
+
+use crate::state::AppState;
+use crate::ui::text_label;
 
 /// Shortcut groups, mirroring `ShortcutDefinition`'s groups in
 /// KeyboardShortcuts.swift ("Menus", "Canvas & Layers", "Text Editing").
@@ -1811,5 +1821,418 @@ mod tests {
         // path() reports the injected target for the settings sheet.
         assert_eq!(registry.path(), Some(path.as_path()));
         fs::remove_dir_all(dir).ok();
+    }
+}
+
+// MARK: Shortcuts settings sheet (KeyboardShortcuts.swift:129-319)
+
+/// The Shortcuts sheet's editor state — Swift's `@State draft` and
+/// `@State recording` plus the recorder's key grab (KeyboardShortcutsSheet's
+/// fields, lines 230-232). It lives beside the sheet instead of in
+/// `SheetState` because that struct (state.rs) is shared with every other
+/// sheet and the port keeps its shape frozen; it is thread-local because the
+/// recorder's live keystroke interceptor (`Subscription`) is not `Sync`, and
+/// every one of these touch points — rendering, clicks, key dispatch — runs
+/// on the main thread.
+pub(crate) struct ShortcutsSheetEditor {
+    /// Overrides when the sheet opened. The sheet edits the live registry as
+    /// its draft (each row goes through `set_override`/`reset`); Cancel
+    /// restores this snapshot, Done saves it.
+    baseline: BTreeMap<String, String>,
+    /// Catalog id of the row recording a new chord, if any.
+    recording: Option<String>,
+    /// The app-wide keystroke interceptor that feeds the recorder while the
+    /// sheet is open; dropping it releases the keyboard.
+    _capture: Option<Subscription>,
+}
+
+thread_local! {
+    static SHORTCUTS_SHEET: RefCell<Option<ShortcutsSheetEditor>> =
+        const { RefCell::new(None) };
+}
+
+/// What the recorder does with one captured key press
+/// (ShortcutRecorder's `keyDown`, KeyboardShortcuts.swift:310-317).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecorderCapture {
+    /// A single key chord: finish the recording and assign it.
+    Finish(String),
+    /// A bare modifier press or an unparsable chord: keep recording (Swift's
+    /// `NSSound.beep()`).
+    Ignore,
+}
+
+/// Classifies a captured keystroke's text (gpui `Keystroke::unparse` form,
+/// e.g. `"ctrl-shift-s"`) for the recorder.
+pub fn recorder_capture(chord_text: &str) -> RecorderCapture {
+    // gpui synthesizes keystrokes keyed by the bare modifier's name when a
+    // modifier is pressed alone; those never finish a recording.
+    if matches!(
+        chord_text,
+        "control" | "alt" | "shift" | "platform" | "function"
+    ) {
+        return RecorderCapture::Ignore;
+    }
+    // Exactly one chord, no `key->char` test syntax — the same shape
+    // `shortcuts::set_override` will accept.
+    if chord_text.split_whitespace().count() > 1 {
+        return RecorderCapture::Ignore;
+    }
+    match Keystroke::parse(chord_text) {
+        Ok(chord) if !chord.key.is_empty() && chord.key_char.is_none() => {
+            RecorderCapture::Finish(chord.unparse())
+        }
+        _ => RecorderCapture::Ignore,
+    }
+}
+
+/// Restores an overrides snapshot into the live registry (the Cancel path).
+/// Entries were normalized when they were first stored, so `set_override`
+/// cannot fail here; failures would leave that entry at its default.
+pub fn restore_overrides(baseline: BTreeMap<String, String>) {
+    let mut registry = crate::ui::keyboard_shortcuts::lock_global();
+    registry.reset_all();
+    for (id, chord) in &baseline {
+        let _ = registry.set_override(id, chord);
+    }
+}
+
+/// A row's chord for display (`ShortcutChord.label`): an unparsable stored
+/// chord prints raw instead of failing the sheet.
+fn display_chord(chord: &str) -> String {
+    Keystroke::parse(chord)
+        .map(|parsed| crate::ui::keyboard_shortcuts::chord_label(&parsed))
+        .unwrap_or_else(|_| chord.to_string())
+}
+
+impl AppState {
+    /// Creates the sheet's editor on first body render: the baseline is the
+    /// registry's overrides, and the app-wide keystroke interceptor is
+    /// installed for the sheet's lifetime (it only acts while a row is
+    /// recording).
+    fn shortcuts_editor_init(&mut self, cx: &mut Context<Self>) {
+        let initialized = SHORTCUTS_SHEET.with_borrow(|slot| slot.is_some());
+        if initialized {
+            return;
+        }
+        let baseline = self.shortcuts().overrides().clone();
+        let app = cx.entity().downgrade();
+        let subscription = cx.intercept_keystrokes(move |event: &KeystrokeEvent, _, cx| {
+            shortcuts_handle_keystroke(&app, event, cx);
+        });
+        SHORTCUTS_SHEET.with_borrow_mut(|slot| {
+            *slot = Some(ShortcutsSheetEditor {
+                baseline,
+                recording: None,
+                _capture: Some(subscription),
+            });
+        });
+    }
+
+    /// Drops the sheet's editor state (and with it the keystroke
+    /// interceptor). Called from `render_sheet_overlay` whenever the Shortcuts
+    /// sheet is not the open one.
+    pub(crate) fn shortcuts_editor_take() -> Option<ShortcutsSheetEditor> {
+        SHORTCUTS_SHEET.with_borrow_mut(|slot| slot.take())
+    }
+
+    /// The id of the row currently recording, if any.
+    pub(crate) fn shortcuts_recording_id() -> Option<String> {
+        SHORTCUTS_SHEET
+            .with_borrow(|slot| slot.as_ref().and_then(|editor| editor.recording.clone()))
+    }
+
+    /// Discards the draft: the registry returns to its state when the sheet
+    /// opened, and the editor state drops.
+    pub(crate) fn shortcuts_cancel_draft() {
+        let baseline = Self::shortcuts_editor_take().map(|editor| editor.baseline);
+        if let Some(baseline) = baseline {
+            restore_overrides(baseline);
+        }
+    }
+
+    /// A row's chord button was clicked: that row records the next keystroke.
+    pub fn shortcuts_start_recording(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        SHORTCUTS_SHEET.with_borrow_mut(|slot| {
+            if let Some(editor) = slot.as_mut() {
+                editor.recording = Some(id.to_string());
+            }
+        });
+        self.notify_only(cx);
+    }
+
+    /// The footer's Done: persists the draft (`ShortcutSettings.save`) and
+    /// closes. The keymap itself is rebuilt at startup, so new chords take
+    /// effect immediately (the keymap rebuilds from the registry).
+    pub(crate) fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
+        match self.shortcuts().save() {
+            Ok(()) => self.set_status("Shortcuts saved", cx),
+            Err(error) => self.set_status(format!("Saving shortcuts failed: {error}"), cx),
+        }
+        Self::shortcuts_editor_take();
+        self.close_shortcuts_panel(cx);
+    }
+
+    /// The sheet body (KeyboardShortcutsSheet's `body`): an intro line, the
+    /// catalog grouped like Swift's ForEach over "Menus", "Canvas & Layers"
+    /// and "Text Editing", and the conflict readout above the footer.
+    pub(crate) fn shortcuts_sheet_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        self.shortcuts_editor_init(cx);
+        let problem = self.shortcuts().validate().err();
+        let recording = Self::shortcuts_recording_id();
+
+        // Precompute every row's data while the registry is locked, then
+        // build the elements.
+        let rows: Vec<(
+            &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
+            String,
+            bool,
+            bool,
+        )> = {
+            let registry = self.shortcuts();
+            let mut rows = Vec::new();
+            for group in [
+                crate::ui::keyboard_shortcuts::Group::Menus,
+                crate::ui::keyboard_shortcuts::Group::CanvasLayers,
+                crate::ui::keyboard_shortcuts::Group::TextEditing,
+            ] {
+                for entry in crate::ui::keyboard_shortcuts::entries_in_group(group) {
+                    let chord = display_chord(&registry.chord(entry.id));
+                    let customized = registry.is_customized(entry.id);
+                    let is_recording = recording.as_deref() == Some(entry.id);
+                    rows.push((entry, chord, customized, is_recording));
+                }
+            }
+            rows
+        };
+
+        let mut list = gpui_kit::div()
+            .id("shortcuts-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .max_h(px(380.0))
+            .overflow_y_scroll();
+        let mut current_group: Option<crate::ui::keyboard_shortcuts::Group> = None;
+        for (entry, chord, customized, is_recording) in rows {
+            if current_group != Some(entry.group) {
+                current_group = Some(entry.group);
+                list = list.child(
+                    text_label(entry.group.label(), false)
+                        .text_size(px(12.0))
+                        .mt_2(),
+                );
+            }
+            list = list.child(shortcut_row(entry, &chord, customized, is_recording, cx));
+        }
+        list = list.child(
+            text_label(
+                "Text fields keep standard editing keys. The shortcut editor itself uses Return to save and Esc to cancel when not recording.",
+                true,
+            )
+            .mt_2(),
+        );
+
+        let mut column = gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(text_label(
+                "Click a shortcut, then press its new key combination. Changes apply immediately.",
+                true,
+            ))
+            .child(list);
+        if let Some(problem) = problem {
+            column = column.child(
+                text_label(problem.to_string(), false)
+                    .text_color(gpui_kit::rgb(crate::ui::STATUS_WARNING)),
+            );
+        }
+        column.into_any_element()
+    }
+}
+
+/// One catalog row: the action's title, its chord button (click to record)
+/// and a per-row Reset (`ShortcutRecorder` framed at 150x26 in Swift).
+fn shortcut_row(
+    entry: &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
+    chord: &str,
+    customized: bool,
+    is_recording: bool,
+    cx: &mut Context<AppState>,
+) -> gpui_kit::Div {
+    let id = entry.id;
+    gpui_kit::div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .py_0p5()
+        .child(
+            text_label(entry.title.to_string(), false)
+                .flex_1()
+                .min_w_0()
+                .text_ellipsis(),
+        )
+        .child(
+            Button::new(SharedString::from(format!("sc-chord-{id}")))
+                .label(if is_recording {
+                    "Press keys…".to_string()
+                } else {
+                    chord.to_string()
+                })
+                .small()
+                .outline()
+                .when(is_recording, |button| {
+                    button.text_color(gpui_kit::rgb(crate::ui::ACCENT))
+                })
+                .on_click(cx.listener(move |state, _, _, cx| {
+                    state.shortcuts_start_recording(id, cx);
+                })),
+        )
+        .child(
+            Button::new(SharedString::from(format!("sc-reset-{id}")))
+                .label("Reset")
+                .small()
+                .outline()
+                .disabled(!customized)
+                .on_click(cx.listener(move |state, _, _, cx| {
+                    state.shortcuts().reset(id);
+                    state.notify_only(cx);
+                })),
+        )
+}
+
+/// The recorder's keystroke hook (KeyboardShortcuts.swift:306-317's
+/// `performKeyEquivalent`): while a row records, every keystroke is swallowed
+/// (`cx.stop_propagation`, which also keeps actions from dispatching); a
+/// single-key chord is assigned to the row and ends the recording, a bare
+/// modifier or garbage keeps waiting.
+fn shortcuts_handle_keystroke(
+    app: &WeakEntity<AppState>,
+    event: &KeystrokeEvent,
+    cx: &mut gpui_kit::App,
+) {
+    let chord_text = event.keystroke.unparse();
+    let finished = SHORTCUTS_SHEET.with_borrow_mut(|slot| {
+        let editor = slot.as_mut()?;
+        editor.recording.as_ref()?;
+        // Recording: swallow the keystroke either way.
+        cx.stop_propagation();
+        match recorder_capture(&chord_text) {
+            RecorderCapture::Ignore => None,
+            RecorderCapture::Finish(chord) => {
+                let id = editor.recording.take().unwrap();
+                Some((id, chord))
+            }
+        }
+    });
+    let Some((id, chord)) = finished else { return };
+    let app = app.clone();
+    let _ = app.update(cx, move |state, cx| {
+        if let Err(problem) = state.shortcuts().set_override(&id, &chord) {
+            state.set_status(problem.to_string(), cx);
+        } else {
+            state.notify_only(cx);
+        }
+    });
+}
+
+#[cfg(test)]
+mod recorder_tests {
+    use super::{RecorderCapture, display_chord, recorder_capture, restore_overrides};
+
+    #[test]
+    fn recorder_finishes_on_single_chords() {
+        // Plain keys, modifiers, arrows and punctuation all finish the
+        // recording, normalized to the canonical chord text.
+        assert_eq!(recorder_capture("v"), RecorderCapture::Finish("v".into()));
+        assert_eq!(
+            recorder_capture("ctrl-shift-s"),
+            RecorderCapture::Finish("ctrl-shift-s".into())
+        );
+        assert_eq!(
+            recorder_capture("shift-u"),
+            RecorderCapture::Finish("shift-u".into())
+        );
+        assert_eq!(
+            recorder_capture("alt-delete"),
+            RecorderCapture::Finish("alt-delete".into())
+        );
+        // A capital letter parses as the shifted key (KeyboardShortcuts.swift's
+        // `key.uppercased()` inverse).
+        assert_eq!(
+            recorder_capture("A"),
+            RecorderCapture::Finish("shift-a".into())
+        );
+    }
+
+    #[test]
+    fn recorder_ignores_bare_modifiers_and_garbage() {
+        // gpui synthesizes these keystrokes when a modifier is pressed alone:
+        // the recording keeps waiting (Swift's `NSSound.beep()`).
+        for modifier in ["control", "alt", "shift", "platform", "function"] {
+            assert_eq!(
+                recorder_capture(modifier),
+                RecorderCapture::Ignore,
+                "bare {modifier}"
+            );
+        }
+        // Multi-key sequences and the test-only `key->char` syntax never
+        // finish a recording either.
+        assert_eq!(recorder_capture("ctrl-x ctrl-c"), RecorderCapture::Ignore);
+        assert_eq!(recorder_capture("a->b"), RecorderCapture::Ignore);
+        assert_eq!(recorder_capture(""), RecorderCapture::Ignore);
+    }
+
+    #[test]
+    fn restore_overrides_returns_the_registry_to_its_baseline() {
+        use crate::ui::keyboard_shortcuts::ShortcutRegistry;
+
+        // The Cancel path restores the process-wide registry, so remember
+        // whatever it held and put it back at the end (the test never saves
+        // to disk).
+        let original = {
+            let registry = crate::ui::keyboard_shortcuts::lock_global();
+            registry.overrides().clone()
+        };
+        let result = std::panic::catch_unwind(|| {
+            // The draft's opening state: one override.
+            let mut baseline_registry = ShortcutRegistry::new();
+            baseline_registry
+                .set_override("edit.undo", "ctrl-alt-z")
+                .unwrap();
+            let baseline = baseline_registry.overrides().clone();
+
+            // The live registry has drifted since the sheet opened.
+            {
+                let mut registry = crate::ui::keyboard_shortcuts::lock_global();
+                registry.set_override("tool.brush", "k").unwrap();
+                registry.set_override("edit.redo", "ctrl-y").unwrap();
+            }
+
+            restore_overrides(baseline);
+
+            let registry = crate::ui::keyboard_shortcuts::lock_global();
+            assert_eq!(registry.chord("edit.undo"), "ctrl-alt-z");
+            assert_eq!(registry.chord("tool.brush"), "b", "drift is discarded");
+            assert_eq!(
+                registry.chord("edit.redo"),
+                "ctrl-shift-z",
+                "drift is discarded"
+            );
+            assert!(registry.validate().is_ok());
+        });
+        restore_overrides(original);
+        result.unwrap();
+    }
+
+    #[test]
+    fn display_chord_uses_platform_notation() {
+        assert_eq!(display_chord("ctrl-shift-s"), "Ctrl+Shift+S");
+        assert_eq!(display_chord("escape"), "Esc");
+        assert_eq!(display_chord("v"), "V");
+        // Unparsable stored chords print raw instead of failing the sheet.
+        assert_eq!(display_chord("???"), "???");
     }
 }
