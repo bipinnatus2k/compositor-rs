@@ -1,0 +1,95 @@
+//! Port of the Hue/Saturation sheet (`HueSaturationSheet.swift`) as
+//! the floating panel: open/OK/Cancel actions and the panel body.
+
+use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled};
+
+use crate::sheets_ui::{labeled_slider, sheet_row};
+use crate::state::AppState;
+use crate::ui::floating_panel::HueSaturationPanelState;
+use crate::ui::floating_panel::{PanelPlacement, panel_names};
+use crate::ui::labeled_checkbox;
+use crate::ui::sheets::SliderRole;
+
+impl AppState {
+    /// `session.hueSaturation != nil` → adjustmentPanel, title
+    /// "Hue/Saturation" (`ContentView.swift:208-215`).
+    pub fn open_hue_saturation_panel(&mut self, cx: &mut Context<Self>) {
+        self.begin_preview();
+        let panel = HueSaturationPanelState {
+            sliders: vec![
+                self.make_slider(-180.0, 180.0, 0.0, SliderRole::Hue, cx),
+                self.make_slider(-100.0, 100.0, 0.0, SliderRole::Saturation, cx),
+                self.make_slider(-100.0, 100.0, 0.0, SliderRole::Lightness, cx),
+            ],
+            colorize: false,
+        };
+        self.panel_widgets.hue_saturation = Some(panel);
+        self.panels.show(
+            panel_names::ADJUSTMENT_PANEL,
+            "Hue/Saturation",
+            PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// `cancelHueSaturation` (`ContentView.swift:210`).
+    pub fn cancel_hue_saturation_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.close(panel_names::ADJUSTMENT_PANEL) {
+            return;
+        }
+        if self.tab().session.adjustment_editing_id.is_some() {
+            self.tab().session.finish_adjustment_editing(false);
+        }
+        self.panel_widgets.hue_saturation = None;
+        self.after_panel_editing_closed(cx);
+    }
+
+    pub fn confirm_hue_saturation_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.is_visible(panel_names::ADJUSTMENT_PANEL) {
+            return;
+        }
+        if self.tab().session.adjustment_editing_id.is_some() {
+            self.tab().session.finish_adjustment_editing(true);
+        } else {
+            self.commit_preview_pixels("Hue/Saturation", cx);
+        }
+        self.panel_widgets.hue_saturation = None;
+        self.panels.close(panel_names::ADJUSTMENT_PANEL);
+        self.after_panel_editing_closed(cx);
+    }
+
+    /// `HueSaturationSheet`'s body: three sliders plus the Colorize toggle.
+    pub(crate) fn hue_saturation_panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        let Some(panel) = self.panel_widgets.hue_saturation.as_ref() else {
+            return gpui_kit::div().into_any_element();
+        };
+        let colorize = panel.colorize;
+        let sliders = panel.sliders.clone();
+        gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(labeled_slider(&sliders, 0, "Hue"))
+            .child(labeled_slider(&sliders, 1, "Saturation"))
+            .child(labeled_slider(&sliders, 2, "Lightness"))
+            .child(sheet_row(
+                "Colorize",
+                labeled_checkbox(
+                    &app,
+                    "hue-colorize",
+                    "Colorize",
+                    colorize,
+                    |state, checked, _, cx| {
+                        if let Some(panel) = state.panel_widgets.hue_saturation.as_mut() {
+                            panel.colorize = checked;
+                        }
+                        state.apply_slider(SliderRole::Hue, 0.0, cx);
+                    },
+                )
+                .into_any_element(),
+            ))
+            .into_any_element()
+    }
+}

@@ -5,9 +5,14 @@
 
 pub mod color_picker_sheet;
 pub mod curves_controls;
+pub mod effects_sheet;
+pub mod filter_sheet;
 pub mod floating_panel;
+pub mod hue_saturation_sheet;
 pub mod keyboard_shortcuts;
+pub mod lasso_controls;
 pub mod levels_sheet;
+pub mod native_layer_list;
 pub mod navigation_tool_header;
 pub mod sheets;
 pub mod type_controls;

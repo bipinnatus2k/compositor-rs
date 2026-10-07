@@ -332,7 +332,7 @@ pub struct AppState {
     /// The floating panels (design doc §5): the registry of open panels plus
     /// their remembered positions, and the per-panel widget bundles.
     pub panels: crate::ui::floating_panel::FloatingPanels,
-    pub panel_widgets: crate::panels_ui::PanelWidgets,
+    pub panel_widgets: crate::ui::floating_panel::PanelWidgets,
     pub status: Option<String>,
     pub rename: Option<uuid::Uuid>,
     pub rename_input: Option<Entity<InputState>>,
@@ -588,7 +588,7 @@ impl AppState {
             drag: None,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
-            panel_widgets: crate::panels_ui::PanelWidgets::default(),
+            panel_widgets: crate::ui::floating_panel::PanelWidgets::default(),
             status: None,
             rename: None,
             rename_input: None,

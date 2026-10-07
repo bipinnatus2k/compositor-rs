@@ -26,7 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -35,7 +35,10 @@ use gpui_kit::{
 };
 use serde::{Deserialize, Serialize};
 
+use gpui_kit::AnyElement;
+
 use crate::state::AppState;
+use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::text_label;
 
 /// Shortcut groups, mirroring `ShortcutDefinition`'s groups in
@@ -2235,4 +2238,95 @@ mod recorder_tests {
         // Unparsable stored chords print raw instead of failing the sheet.
         assert_eq!(display_chord("???"), "???");
     }
+}
+
+impl AppState {
+    /// `ShortcutSettings.show()` (`KeyboardShortcuts.swift:155-157`): title
+    /// "Keyboard Shortcuts". The editor state (baseline draft, recording row,
+    /// keystroke interceptor) is created by the body's first render, as the
+    /// sheet did.
+    pub fn open_shortcuts_panel(&mut self, cx: &mut Context<Self>) {
+        self.panels.show(
+            panel_names::KEYBOARD_SHORTCUTS,
+            "Keyboard Shortcuts",
+            PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    // MARK: Closing, Cancel, OK
+
+    /// `ShortcutSettings.close` after Done saved the draft
+    /// (`KeyboardShortcuts.swift:162-166`).
+    pub fn close_shortcuts_panel(&mut self, cx: &mut Context<Self>) {
+        self.panels.close(panel_names::KEYBOARD_SHORTCUTS);
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// The Shortcuts panel's body plus its own footer
+    /// (`KeyboardShortcutsSheet.swift:270-278`): Restore Defaults, Cancel
+    /// (discards the draft) and Done (saves it, disabled while a row records
+    /// or the draft conflicts).
+    pub(crate) fn shortcuts_panel_footer_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let body = self.shortcuts_sheet_body(cx);
+        let done_disabled =
+            Self::shortcuts_recording_id().is_some() || self.shortcuts().validate().is_err();
+        gpui_kit::div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .gap_1()
+            .child(body)
+            .child(
+                gpui_kit::div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("shortcuts-restore")
+                            .label("Restore Defaults")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.shortcuts().reset_all();
+                                // Restore Defaults applies immediately: the
+                                // keymap is rebuilt from the reset registry.
+                                this.rebuild_keymap(cx);
+                                this.notify_only(cx);
+                            })),
+                    )
+                    .child(gpui_kit::div().flex_1())
+                    .child(
+                        Button::new("panel-cancel")
+                            .label("Cancel")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_panel(panel_names::KEYBOARD_SHORTCUTS, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("shortcuts-done")
+                            .label("Done")
+                            .small()
+                            .primary()
+                            .disabled(done_disabled)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.shortcuts_done(cx);
+                                // Done rebuilt nothing while the draft was
+                                // being edited; save closed the panel, and
+                                // the saved registry now drives a live
+                                // keymap rebuild (no restart needed).
+                                this.rebuild_keymap(cx);
+                                this.set_status("Shortcuts saved", cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    // MARK: Panel bodies (moved from the sheets)
 }

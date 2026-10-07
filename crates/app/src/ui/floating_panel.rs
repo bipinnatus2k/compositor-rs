@@ -16,14 +16,22 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::InputState;
+use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Global, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
     Styled, WeakEntity, Window, anchored, canvas, div, point, px,
 };
 
+use compositor_core::filters::FilterKind;
+use compositor_core::session::SelectionAmountOperation;
+
+use crate::state::AppState;
+use crate::ui::sheets::SliderRole;
 use crate::ui::text_label;
 
 /// Camera Raw's three grading wheels are the widest thing a docked panel
@@ -670,5 +678,376 @@ mod tests {
         assert_eq!(panel_names::EFFECTS_PANEL, "effectsPanel");
         assert_eq!(panel_names::KEYBOARD_SHORTCUTS, "keyboardShortcuts");
         assert_eq!(panel_names::COLOR_PICKER_PANEL, "colorPickerPanel");
+    }
+}
+
+/// The per-panel widget bundles. A panel's bundle exists exactly while the
+/// panel is open — the same lifetime the sheet's `SheetState` had.
+#[derive(Default)]
+pub struct PanelWidgets {
+    pub levels: Option<LevelsPanelState>,
+    pub hue_saturation: Option<HueSaturationPanelState>,
+    pub amount: Option<AmountPanelState>,
+    pub filter: Option<FilterPanelState>,
+    pub effects: Option<EffectsPanelState>,
+}
+
+/// The Levels panel's widgets (`LevelsSheet`'s edit state): the five sliders,
+/// the visible channel, the Preview toggle and the histogram, plus the full
+/// settings the Auto modes write wholesale.
+pub struct LevelsPanelState {
+    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
+    pub channel: usize,
+    pub preview: bool,
+    pub histogram: [f64; 1024],
+    pub levels: compositor_core::adjust::LevelsSettings,
+}
+
+/// The Hue/Saturation panel's widgets (`HueSaturationSheet`).
+pub struct HueSaturationPanelState {
+    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
+    pub colorize: bool,
+}
+
+/// The selection-amount panel's widgets (`SelectionAmountSheet`): the amount
+/// field, its 1…maximum companion slider (`LassoControls.swift:224-228`) and
+/// which operation is being sized.
+pub struct AmountPanelState {
+    pub operation: SelectionAmountOperation,
+    pub tolerance: gpui_kit::Entity<InputState>,
+    pub slider: gpui_kit::Entity<SliderState>,
+}
+
+/// The filter panel's widgets (`FilterSheet`): which filter is open plus its
+/// sliders and Add Noise's two checkboxes. Curves keeps its editor on
+/// `AppState.curves_editor`, exactly as the sheet did.
+pub struct FilterPanelState {
+    pub kind: FilterKind,
+    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
+    /// Add Noise's Distribution (Swift's Uniform/Gaussian picker).
+    pub gaussian: bool,
+    /// Add Noise's Monochromatic toggle.
+    pub monochromatic: bool,
+}
+
+/// The Effects panel's widgets (`EffectsSheet`): which effect is being edited
+/// (an index into `LayerEffectKind::ALL`), its sliders, and Stroke's
+/// Outside/Inside position.
+pub struct EffectsPanelState {
+    pub kind_index: usize,
+    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
+    pub inside: bool,
+}
+
+impl AppState {
+    // MARK: Opening
+    /// Keeps the workspace's tab-switch guard in step with the panel stack.
+    pub(crate) fn sync_panel_guard(&mut self) {
+        self.workspace.ui_panels_open = !self.panels.open_panels().is_empty();
+    }
+    /// `session.levels != nil` → levelsPanel (`ContentView.swift:198-206`),
+    /// title "Levels", `Automatic` placement. Opening captures the active
+    /// layer for the live preview and computes the histogram, exactly as the
+    /// sheet's `build_sheet` did.
+    pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
+        self.begin_preview();
+        let mut panel = LevelsPanelState {
+            sliders: vec![
+                self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
+                self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
+                self.make_slider(1.0, 255.0, 255.0, SliderRole::LevelsWhite, cx),
+                self.make_slider(0.0, 255.0, 0.0, SliderRole::LevelsOutBlack, cx),
+                self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
+            ],
+            channel: 0,
+            // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
+            preview: true,
+            histogram: [0.0; 1024],
+            levels: compositor_core::adjust::LevelsSettings::default(),
+        };
+        if let Some(pixels) = self.preview_base.clone() {
+            // With a selection, bins are weighted by the selection's coverage
+            // on the layer's pixel grid (LevelsFilter.histogram,
+            // Levels.swift:90-96).
+            let coverage = crate::ui::sheets::histogram_coverage(
+                self.preview_base_transform,
+                self.tab().session.selection().cloned(),
+                pixels.width,
+                pixels.height,
+            );
+            compositor_core::adjust::levels_histogram(
+                pixels.as_ref(),
+                coverage.as_ref(),
+                &mut panel.histogram,
+            );
+        }
+        self.panel_widgets.levels = Some(panel);
+        self.panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// The title-bar ✕ and Esc route here (`onClose` semantics = Cancel).
+    pub fn cancel_panel(&mut self, name: &str, cx: &mut Context<Self>) {
+        match name {
+            panel_names::LEVELS_PANEL => self.cancel_levels_panel(cx),
+            panel_names::ADJUSTMENT_PANEL => self.cancel_hue_saturation_panel(cx),
+            panel_names::SELECTION_AMOUNT_PANEL => self.cancel_amount_panel(cx),
+            panel_names::FILTER_PANEL => self.cancel_filter_panel(cx),
+            panel_names::EFFECTS_PANEL => self.cancel_effects_panel(cx),
+            panel_names::COLOR_PICKER_PANEL => self.close_color_picker_ui(false, cx),
+            panel_names::KEYBOARD_SHORTCUTS => {
+                // The draft is discarded: the registry returns to its state
+                // when the panel opened (KeyboardShortcutsSheet's Cancel).
+                Self::shortcuts_cancel_draft();
+                self.close_shortcuts_panel(cx);
+                // Re-sync the live keymap with the restored registry.
+                self.rebuild_keymap(cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// A panel footer's OK button — the sheet's commit branch.
+    pub fn confirm_panel(&mut self, name: &str, cx: &mut Context<Self>) {
+        match name {
+            panel_names::LEVELS_PANEL => self.confirm_levels_panel(cx),
+            panel_names::ADJUSTMENT_PANEL => self.confirm_hue_saturation_panel(cx),
+            panel_names::SELECTION_AMOUNT_PANEL => self.confirm_amount_panel(cx),
+            panel_names::FILTER_PANEL => self.confirm_filter_panel(cx),
+            panel_names::EFFECTS_PANEL => self.confirm_effects_panel(cx),
+            _ => {}
+        }
+    }
+
+    /// Rebuilds the app keymap from the live shortcut registry
+    /// (`keys::rebuild_bindings`): the component baseline is snapshotted and
+    /// replayed, the app's own bindings are regenerated, so a saved or
+    /// restored chord takes effect on the next keystroke without a restart.
+    pub(crate) fn rebuild_keymap(&mut self, cx: &mut Context<Self>) {
+        let app: &mut gpui_kit::App = cx;
+        crate::keys::rebuild_with(app, &self.shortcuts());
+    }
+
+    /// The panel counterpart of `close_sheet`'s preview teardown: the live
+    /// adjustment/filter preview is dropped, so the canvas shows the layer's
+    /// own pixels again.
+    pub(crate) fn after_panel_editing_closed(&mut self, cx: &mut Context<Self>) {
+        self.panel_widgets.effects = None;
+        self.preview = None;
+        self.preview_base = None;
+        self.preview_base_transform = None;
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    // MARK: Rendering
+
+    /// Renders every open panel as an overlay above the workspace. The
+    /// stacking order from [`FloatingPanels::open_panels`] is preserved, so
+    /// the topmost panel paints last.
+    pub fn render_panels_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let names: Vec<&'static str> = self
+            .panels
+            .open_panels()
+            .iter()
+            .map(|panel| panel.name)
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| self.render_one_panel(name, window, cx))
+            .collect()
+    }
+
+    fn render_one_panel(
+        &mut self,
+        name: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let app = cx.entity().downgrade();
+        let entry = self.panels.open_panels().iter().find(|p| p.name == name)?;
+        let title = entry.title.clone();
+        let placement = entry.placement;
+        let viewport = window.viewport_size();
+        let top_left = match placement {
+            PanelPlacement::DockedToMainWindowRight => {
+                let (x, y) =
+                    docked_top_left((f32::from(viewport.width), f32::from(viewport.height)));
+                Point::new(px(x), px(y))
+            }
+            PanelPlacement::Automatic => {
+                let (x, y) = self.panels.position(
+                    name,
+                    self.panel_canvas_center(window),
+                    panel_estimated_size(name),
+                )?;
+                Point::new(px(x), px(y))
+            }
+        };
+        let fixed_size = if placement == PanelPlacement::DockedToMainWindowRight {
+            Some((px(DOCKED_WIDTH), viewport.height))
+        } else {
+            None
+        };
+
+        let content = self.panel_content(name, cx)?;
+
+        let app = app.clone();
+        let on_close =
+            move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
+                state.cancel_panel(name, cx);
+            };
+        let on_moved = move |state: &mut AppState,
+                             position: Point<Pixels>,
+                             _window: &mut Window,
+                             cx: &mut Context<AppState>| {
+            state
+                .panels
+                .remember_position(name, f32::from(position.x), f32::from(position.y));
+            state.notify_only(cx);
+        };
+        Some(render_panel(
+            &app, top_left, title, fixed_size, content, on_close, on_moved,
+        ))
+    }
+
+    /// The canvas area's center (`canvasCenter(in:)`): the panel's center
+    /// lands there on the first open. Uses the canvas paint area's bounds;
+    /// before the first layout pass it falls back to the window's center.
+    fn panel_canvas_center(&self, window: &mut Window) -> (f32, f32) {
+        let viewport = self.viewport;
+        let (w, h) = (
+            f32::from(viewport.size.width),
+            f32::from(viewport.size.height),
+        );
+        if w > 1.0 && h > 1.0 {
+            (
+                f32::from(viewport.origin.x) + w / 2.0,
+                f32::from(viewport.origin.y) + h / 2.0,
+            )
+        } else {
+            let size = window.viewport_size();
+            (f32::from(size.width) / 2.0, f32::from(size.height) / 2.0)
+        }
+    }
+
+    /// One panel's content: the view body plus its footer (Swift's Cancel /
+    /// OK row). The color picker carries its own OK/Cancel in its layout and
+    /// the Shortcuts panel its Restore/Cancel/Done footer.
+    fn panel_content(&mut self, name: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let body = match name {
+            panel_names::LEVELS_PANEL => self.levels_panel_body(cx),
+            panel_names::ADJUSTMENT_PANEL => self.hue_saturation_panel_body(cx),
+            panel_names::SELECTION_AMOUNT_PANEL => self.amount_panel_body(cx),
+            panel_names::FILTER_PANEL => self.filter_panel_body(cx),
+            panel_names::EFFECTS_PANEL => self.effects_panel_body(cx),
+            panel_names::COLOR_PICKER_PANEL => {
+                return crate::ui::color_picker_sheet::color_picker_panel_body(self, cx);
+            }
+            panel_names::KEYBOARD_SHORTCUTS => {
+                return Some(self.shortcuts_panel_footer_body(cx));
+            }
+            _ => return None,
+        };
+        let ok_disabled = if name == panel_names::SELECTION_AMOUNT_PANEL {
+            let cx_app: &gpui_kit::App = cx;
+            !self.amount_input_valid(cx_app)
+        } else {
+            false
+        };
+        let footer = panel_footer(name, ok_disabled, cx);
+        Some(
+            gpui_kit::div()
+                .flex()
+                .flex_col()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .child(body)
+                .child(footer)
+                .into_any_element(),
+        )
+    }
+}
+
+/// The shared Cancel/OK footer row (Swift's `HStack { Cancel; Spacer; OK }`).
+/// OK runs the sheet's commit branch; Cancel — like the ✕ — runs the cancel
+/// branch.
+fn panel_footer(
+    name: &'static str,
+    ok_disabled: bool,
+    cx: &mut Context<AppState>,
+) -> gpui_kit::Div {
+    gpui_kit::div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap_2()
+        .child(
+            Button::new(SharedString::from(format!("panel-{name}-cancel")))
+                .label("Cancel")
+                .small()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.cancel_panel(name, cx);
+                })),
+        )
+        .child(
+            Button::new(SharedString::from(format!("panel-{name}-ok")))
+                .label("OK")
+                .small()
+                .primary()
+                .disabled(ok_disabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.confirm_panel(name, cx);
+                })),
+        )
+}
+
+/// A first-open size estimate per panel (`fittingSize`): only used to center
+/// the panel on the canvas the first time; afterwards the remembered position
+/// wins and the panel hugs its content.
+pub fn panel_estimated_size(name: &str) -> (f32, f32) {
+    match name {
+        // Histogram (96) + five sliders + rows.
+        panel_names::LEVELS_PANEL => (440.0, 390.0),
+        // Three sliders + the Colorize row.
+        panel_names::ADJUSTMENT_PANEL => (440.0, 220.0),
+        panel_names::SELECTION_AMOUNT_PANEL => (340.0, 110.0),
+        // Curves is the tallest of the filter bodies.
+        panel_names::FILTER_PANEL => (440.0, 420.0),
+        panel_names::EFFECTS_PANEL => (440.0, 240.0),
+        panel_names::COLOR_PICKER_PANEL => (540.0, 350.0),
+        panel_names::KEYBOARD_SHORTCUTS => (560.0, 560.0),
+        _ => (440.0, 300.0),
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn panel_size_estimates_are_positive() {
+        for name in [
+            panel_names::LEVELS_PANEL,
+            panel_names::ADJUSTMENT_PANEL,
+            panel_names::SELECTION_AMOUNT_PANEL,
+            panel_names::FILTER_PANEL,
+            panel_names::EFFECTS_PANEL,
+            panel_names::COLOR_PICKER_PANEL,
+            panel_names::KEYBOARD_SHORTCUTS,
+        ] {
+            let (w, h) = panel_estimated_size(name);
+            assert!(w > 0.0 && h > 0.0, "{name}: {w}x{h}");
+        }
     }
 }
