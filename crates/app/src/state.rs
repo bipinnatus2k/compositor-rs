@@ -26,7 +26,7 @@ use compositor_core::tools::brush::RasterEdit;
 use compositor_core::tools::warp::WarpStroke;
 use compositor_core::transform::LayerTransform;
 
-use crate::inline_text::inline_text_key;
+use crate::canvas::inline_text_editor::inline_text_key;
 
 pub const RULER_SIZE: f32 = 20.0;
 pub const MIN_ZOOM: f64 = 0.008;
@@ -784,7 +784,7 @@ impl AppState {
         // when no binding matched (they can never double-step: a consumed
         // keystroke never reaches this listener).
         if self.inline_text_focused(window, cx) {
-            use crate::inline_text::InlineTextKey;
+            use crate::canvas::inline_text_editor::InlineTextKey;
             if let Some(action) = inline_text_key(
                 key,
                 modifiers.control,

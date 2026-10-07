@@ -6,7 +6,6 @@
 pub mod canvas;
 pub mod color_picker_ui;
 pub mod flows;
-pub mod inline_text;
 pub mod keys;
 pub mod layers_panel;
 pub mod menu;
