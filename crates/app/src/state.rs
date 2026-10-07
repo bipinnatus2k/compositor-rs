@@ -103,7 +103,7 @@ pub enum CanvasDrag {
 
 /// Which modal sheet is open. The floating panels that replaced the tool
 /// dialogs (`Sheet::Levels`, `HueSaturation`, `Effects`, `Filter`,
-/// `Amount`, `Shortcuts` — see `panels_ui`) are gone from here; what remains
+/// `Amount`, `Shortcuts` — see `ui/floating_panel.rs`) are gone from here; what remains
 /// are the modal dialogs Swift presents as sheets/NSAlerts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sheet {

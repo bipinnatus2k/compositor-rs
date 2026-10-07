@@ -31,7 +31,6 @@ use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
 
 use crate::state::AppState;
-use crate::ui::sheets::SliderRole;
 use crate::ui::text_label;
 
 /// Camera Raw's three grading wheels are the widest thing a docked panel
@@ -744,51 +743,6 @@ impl AppState {
     /// Keeps the workspace's tab-switch guard in step with the panel stack.
     pub(crate) fn sync_panel_guard(&mut self) {
         self.workspace.ui_panels_open = !self.panels.open_panels().is_empty();
-    }
-    /// `session.levels != nil` → levelsPanel (`ContentView.swift:198-206`),
-    /// title "Levels", `Automatic` placement. Opening captures the active
-    /// layer for the live preview and computes the histogram, exactly as the
-    /// sheet's `build_sheet` did.
-    pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
-        self.begin_preview();
-        let mut panel = LevelsPanelState {
-            sliders: vec![
-                self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
-                self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
-                self.make_slider(1.0, 255.0, 255.0, SliderRole::LevelsWhite, cx),
-                self.make_slider(0.0, 255.0, 0.0, SliderRole::LevelsOutBlack, cx),
-                self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
-            ],
-            channel: 0,
-            // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
-            preview: true,
-            histogram: [0.0; 1024],
-            levels: compositor_core::adjust::LevelsSettings::default(),
-        };
-        if let Some(pixels) = self.preview_base.clone() {
-            // With a selection, bins are weighted by the selection's coverage
-            // on the layer's pixel grid (LevelsFilter.histogram,
-            // Levels.swift:90-96).
-            let coverage = crate::ui::sheets::histogram_coverage(
-                self.preview_base_transform,
-                self.tab().session.selection().cloned(),
-                pixels.width,
-                pixels.height,
-            );
-            compositor_core::adjust::levels_histogram(
-                pixels.as_ref(),
-                coverage.as_ref(),
-                &mut panel.histogram,
-            );
-        }
-        self.panel_widgets.levels = Some(panel);
-        self.panels.show(
-            panel_names::LEVELS_PANEL,
-            "Levels",
-            PanelPlacement::Automatic,
-        );
-        self.sync_panel_guard();
-        self.touch(cx);
     }
 
     /// The title-bar ✕ and Esc route here (`onClose` semantics = Cancel).

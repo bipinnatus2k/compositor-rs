@@ -199,7 +199,7 @@ pub fn labeled_slider(
 /// when `label_width` is given. The options header adds a pixel-width
 /// slider and the value readout ([`labeled_slider`]); the sheets and
 /// panels add vertical padding and a full-width slider (sheets_ui.rs's
-/// wrapper, whose shape is frozen by panels_ui's call sites).
+/// wrapper, whose shape is frozen by the panel bodies' call sites).
 pub(crate) fn labeled_slider_row(label: &str, label_width: Option<Pixels>) -> gpui_kit::Div {
     let mut label_cell = gpui_kit::div()
         // ToolHeaderStyle.swift:7: the control font is 12.

@@ -832,7 +832,7 @@ impl AppState {
 /// A labeled slider row bound to one of the sheet's sliders: the shared
 /// spine ([`crate::ui::labeled_slider_row`]) with the sheets' fixed 110px
 /// label column, vertical padding, and a full-width slider. (Shape frozen
-/// by panels_ui's call sites.)
+/// by the panel bodies' call sites.)
 pub(crate) fn labeled_slider(
     sliders: &[Entity<SliderState>],
     index: usize,

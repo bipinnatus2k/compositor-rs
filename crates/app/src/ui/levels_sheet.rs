@@ -2,17 +2,17 @@
 //! here as it is carved out of sheets_ui.rs; today this holds the shared
 //! Levels UI helpers.
 
-use compositor_core::adjust::LevelsChannel;
-
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::Button;
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled, px};
 
+use compositor_core::adjust::LevelsChannel;
 use compositor_core::adjust::levels_auto::LevelsAuto;
 
 use crate::sheets_ui::{histogram_view, labeled_slider, sheet_row};
 use crate::state::AppState;
-use crate::ui::floating_panel::panel_names;
+use crate::ui::floating_panel::{LevelsPanelState, PanelPlacement, panel_names};
+use crate::ui::sheets::SliderRole;
 use crate::ui::{MenuEntry, dropdown, labeled_checkbox};
 
 /// The Levels/Curves channel picker's labels (LevelsSheet.swift's Picker).
@@ -26,6 +26,52 @@ pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
 }
 
 impl AppState {
+    /// `session.levels != nil` → levelsPanel (`ContentView.swift:198-206`),
+    /// title "Levels", `Automatic` placement. Opening captures the active
+    /// layer for the live preview and computes the histogram, exactly as the
+    /// sheet's `build_sheet` did.
+    pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
+        self.begin_preview();
+        let mut panel = LevelsPanelState {
+            sliders: vec![
+                self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
+                self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
+                self.make_slider(1.0, 255.0, 255.0, SliderRole::LevelsWhite, cx),
+                self.make_slider(0.0, 255.0, 0.0, SliderRole::LevelsOutBlack, cx),
+                self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
+            ],
+            channel: 0,
+            // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
+            preview: true,
+            histogram: [0.0; 1024],
+            levels: compositor_core::adjust::LevelsSettings::default(),
+        };
+        if let Some(pixels) = self.preview_base.clone() {
+            // With a selection, bins are weighted by the selection's coverage
+            // on the layer's pixel grid (LevelsFilter.histogram,
+            // Levels.swift:90-96).
+            let coverage = crate::ui::sheets::histogram_coverage(
+                self.preview_base_transform,
+                self.tab().session.selection().cloned(),
+                pixels.width,
+                pixels.height,
+            );
+            compositor_core::adjust::levels_histogram(
+                pixels.as_ref(),
+                coverage.as_ref(),
+                &mut panel.histogram,
+            );
+        }
+        self.panel_widgets.levels = Some(panel);
+        self.panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
     /// `cancelLevels` (`LevelsSheet.swift:79`): an adjustment editing session
     /// restores the opening settings; a pixel-layer session just drops the
     /// preview.

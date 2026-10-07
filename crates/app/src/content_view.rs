@@ -1,5 +1,5 @@
-//! The workspace: window layout, the action dispatch for every menu item and
-//! keyboard shortcut, and the status bar.
+//! Port of `ContentView.swift`: the window layout, the action dispatch for
+//! every menu item and keyboard shortcut, and the status bar.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

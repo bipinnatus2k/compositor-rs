@@ -95,7 +95,7 @@ impl AppState {
     }
 
     /// Builds the modal sheet's widget bundle. The tool dialogs that became
-    /// floating panels (`panels_ui`) no longer build sheets here; what
+    /// floating panels (`ui/floating_panel.rs`) no longer build sheets here; what
     /// remains are the modal dialogs of the two-phase flows.
     fn build_sheet(
         &mut self,
@@ -212,7 +212,7 @@ impl AppState {
     }
 
     /// Writes a slider back to its setting and refreshes the preview. Panel
-    /// sliders (`panels_ui`) route by role to their panel's widget bundle;
+    /// sliders (`ui/floating_panel.rs`) route by role to their panel's widget bundle;
     /// the JPEG quality slider is the one modal sheet slider left.
     pub fn apply_slider(&mut self, role: SliderRole, _value: f32, cx: &mut Context<Self>) {
         match role {
