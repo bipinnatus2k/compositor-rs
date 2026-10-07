@@ -75,21 +75,23 @@ impl EditorSession {
         let background = self.background_color;
         match kind {
             LayerEffectKind::Stroke if effects.stroke.is_none() => {
-                let mut new = StrokeEffect::default();
-                new.red = background.red;
-                new.green = background.green;
-                new.blue = background.blue;
-                effects.stroke = Some(new);
+                effects.stroke = Some(StrokeEffect {
+                    red: background.red,
+                    green: background.green,
+                    blue: background.blue,
+                    ..StrokeEffect::default()
+                });
             }
             LayerEffectKind::Shadow if effects.shadow.is_none() => {
                 effects.shadow = Some(ShadowEffect::default());
             }
             LayerEffectKind::ColorOverlay if effects.color_overlay.is_none() => {
-                let mut new = ColorOverlayEffect::default();
-                new.red = background.red;
-                new.green = background.green;
-                new.blue = background.blue;
-                effects.color_overlay = Some(new);
+                effects.color_overlay = Some(ColorOverlayEffect {
+                    red: background.red,
+                    green: background.green,
+                    blue: background.blue,
+                    ..ColorOverlayEffect::default()
+                });
             }
             LayerEffectKind::InnerShadow if effects.inner_shadow.is_none() => {
                 effects.inner_shadow = Some(InnerShadowEffect::default());
@@ -334,6 +336,27 @@ impl EditorSession {
         }
         self.set_effects(effects, Some(target), &format!("Copy {}", kind.label()));
         self.select_effect(kind, target, false);
+    }
+
+    /// `toggleEffect(_:on:)` (LayerEffects.swift:350-355) — the effect row's
+    /// eye: flips the kind's enabled flag in one "Hide/Show <kind>" undo
+    /// step. A layer without effects is left alone.
+    pub fn toggle_effect(&mut self, kind: LayerEffectKind, id: Uuid) {
+        let Some(mut effects) = self
+            .document
+            .as_ref()
+            .and_then(|document| document.layer(id))
+            .and_then(|layer| layer.effects)
+        else {
+            return;
+        };
+        let enabled = effects.is_enabled(kind);
+        effects.set_enabled(!enabled, kind);
+        self.set_effects(
+            effects,
+            Some(id),
+            &format!("{} {}", if enabled { "Hide" } else { "Show" }, kind.label()),
+        );
     }
 }
 
@@ -653,6 +676,46 @@ mod tests {
                 layer_id: source,
                 kind: LayerEffectKind::Stroke
             })
+        );
+    }
+
+    /// The effect row's eye (`toggleEffect`, LayerEffects.swift:350-355):
+    /// hides and shows the kind, each in its own one-step edit, and Undo
+    /// puts the previous state back.
+    #[test]
+    fn toggle_effect_hides_and_shows_in_one_undo_step() {
+        let mut s = session();
+        let id = s.active_layer_id.unwrap();
+        s.add_effect(LayerEffectKind::Stroke);
+        s.finish_effects_editing(true);
+        assert!(effects_of(&s, id).is_enabled(LayerEffectKind::Stroke));
+
+        s.toggle_effect(LayerEffectKind::Stroke, id);
+        let effects = effects_of(&s, id);
+        assert!(effects.contains(LayerEffectKind::Stroke), "still carried");
+        assert!(!effects.is_enabled(LayerEffectKind::Stroke));
+        assert_eq!(s.history.undo_name(), "Hide Stroke");
+
+        s.toggle_effect(LayerEffectKind::Stroke, id);
+        assert!(effects_of(&s, id).is_enabled(LayerEffectKind::Stroke));
+        assert_eq!(s.history.undo_name(), "Show Stroke");
+
+        // Undo steps back over exactly one toggle: the show, then the hide.
+        s.undo();
+        assert!(!effects_of(&s, id).is_enabled(LayerEffectKind::Stroke));
+        s.undo();
+        assert!(effects_of(&s, id).is_enabled(LayerEffectKind::Stroke));
+
+        // A layer without effects has nothing to toggle; no edit is made.
+        let bare = ImageLayer::blank("Bare", CGSize::new(10.0, 10.0));
+        let bare_id = bare.id;
+        s.document.as_mut().unwrap().layers.push(bare);
+        let name_before = s.history.undo_name().to_string();
+        s.toggle_effect(LayerEffectKind::Stroke, bare_id);
+        assert_eq!(
+            s.history.undo_name(),
+            name_before,
+            "the bare layer left no step"
         );
     }
 }

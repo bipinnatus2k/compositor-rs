@@ -10,14 +10,15 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::{
-    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, RenderImage,
-    SharedString, StatefulInteractiveElement, Styled, Window, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, AppContext, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
+    Render, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window,
+    prelude::FluentBuilder as _, px, rgb,
 };
 
 use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
-use compositor_core::effects::LayerEffectKind;
+use compositor_core::effects::{LayerEffectKind, LayerEffectSelection};
 use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
 
@@ -65,6 +66,53 @@ fn footer_mask_tooltip(has_selection: bool) -> &'static str {
 /// must not rebind a row's element state.
 fn layer_key(part: &str, id: uuid::Uuid) -> SharedString {
     SharedString::from(format!("layer-{part}-{}", id))
+}
+
+/// The effect-row counterpart of `layer_key`: keyed by the layer's UUID and
+/// the effect kind, never the row's position in the list.
+fn effect_key(part: &str, id: uuid::Uuid, kind: LayerEffectKind) -> SharedString {
+    SharedString::from(format!("effect-{part}-{:?}-{}", kind, id))
+}
+
+/// What an Option-drag off an effect row carries (the Swift pasteboard's
+/// `com.compositor.layer-effect`, NativeLayerList.swift:46-47): the effect
+/// to copy onto whichever layer row receives the drop.
+#[derive(Clone, Copy)]
+struct EffectDrag {
+    layer_id: uuid::Uuid,
+    kind: LayerEffectKind,
+}
+
+/// Swift only drags an effect with Option held, which GPUI's declarative
+/// drag cannot gate at initiation — so a drag that did not start with
+/// Option (and without Command) carries an invisible ghost, and nothing
+/// answers its drop: the copy checks the modifiers again at drop time.
+struct EffectDragGhost {
+    label: SharedString,
+    visible: bool,
+}
+
+impl Render for EffectDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::div().when(self.visible, |chip| {
+            chip.px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(gpui_kit::rgb(crate::ui::BG_PANEL))
+                .border_1()
+                .border_color(gpui_kit::rgb(crate::ui::BORDER_BRIGHT))
+                .text_size(px(11.0))
+                .text_color(gpui_kit::rgb(crate::ui::FG_TEXT))
+                .child(self.label.clone())
+        })
+    }
+}
+
+/// Option without Command, the modifier gate every effect-drag decision
+/// goes through (NativeLayerList.swift's `contains(.option),
+/// !contains(.command)`).
+fn option_drag_modifiers(modifiers: gpui_kit::Modifiers) -> bool {
+    modifiers.alt && !modifiers.control && !modifiers.platform
 }
 
 /// What the trash acts on (`deleteLayerOrMask`, SelectionEdits.swift:
@@ -740,7 +788,7 @@ impl AppState {
         // The row's right-click menu (NativeLayerList.swift:604-613, cropped
         // to what the session models). Opening it first activates the row —
         // Swift's menu actions all run through selectImage().
-        row.context_menu(move |menu, window, cx| {
+        let row = row.context_menu(move |menu, window, cx| {
             app_activate(&app, id, window, cx);
             let menu = menu
                 .item(PopupMenuItem::new("Rename…").on_click({
@@ -849,8 +897,184 @@ impl AppState {
                         .ok();
                 })
             })
-        })
-        .into_any_element()
+        });
+
+        // The per-effect rows (LayerEffectRow, NativeLayerList.swift:849-940,
+        // built per kind in LayerCell.configure:620-629): one 24px line under
+        // the layer row per carried effect, each with its own eye. Their
+        // clicks must not fall through to the layer row — a double-click
+        // there would begin a rename.
+        let effect_kinds = layer
+            .effects
+            .as_ref()
+            .map(|effects| effects.kinds())
+            .unwrap_or_default();
+        let effect_selection = self.current_tab().session.selected_effect();
+        let mut entry = gpui_kit::div().flex().flex_col().child(row);
+        for kind in effect_kinds {
+            entry = entry.child(self.render_effect_row(layer, kind, indent, effect_selection, cx));
+        }
+
+        // The entry answers an effect's Option-drag (validateDrop/acceptDrop,
+        // NativeLayerList.swift:156-203): the copy lands on the row under the
+        // pointer, so the whole entry — layer row and effect rows — counts.
+        let app = cx.entity().downgrade();
+        entry
+            .drag_over::<EffectDrag>(move |style, drag: &EffectDrag, window, cx| {
+                // Only an Option-drag copies, and only onto a layer that can
+                // take the effect — highlight those targets alone.
+                let copies = option_drag_modifiers(window.modifiers())
+                    && app
+                        .upgrade()
+                        .map(|state| {
+                            state.read(cx).current_tab().session.can_copy_effect(
+                                drag.kind,
+                                drag.layer_id,
+                                id,
+                            )
+                        })
+                        .unwrap_or(false);
+                if copies {
+                    style.bg(gpui_kit::rgba(crate::ui::ACCENT_WASH))
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, drag: &EffectDrag, window, cx| {
+                // acceptDrop (NativeLayerList.swift:184-191) runs the copy
+                // through canCopyEffect/copyEffect; the modifier gate is
+                // re-checked here because GPUI cannot decline a drag that
+                // did not start with Option.
+                if !option_drag_modifiers(window.modifiers()) {
+                    return;
+                }
+                this.tab().session.copy_effect(drag.kind, drag.layer_id, id);
+                this.sync_opacity_slider(window, cx);
+                this.touch(cx);
+            }))
+            .into_any_element()
+    }
+
+    /// One effect row (`LayerEffectRow`): the kind's eye — each press one
+    /// undo step through `toggleEffect` (LayerEffects.swift:350-355) — the
+    /// kind's name, click to select and double-click to open the effect's
+    /// editor panel (`selectEffect(_:on:editing:)`, LayerEffects.swift:
+    /// 264-277), and an Option-drag offering the effect for copying
+    /// (`mouseDragged`, NativeLayerList.swift:912-929).
+    fn render_effect_row(
+        &self,
+        layer: &ImageLayer,
+        kind: LayerEffectKind,
+        indent: f32,
+        effect_selection: Option<LayerEffectSelection>,
+        cx: &Context<AppState>,
+    ) -> gpui_kit::AnyElement {
+        let id = layer.id;
+        let enabled = layer
+            .effects
+            .as_ref()
+            .map(|effects| effects.is_enabled(kind))
+            .unwrap_or(false);
+        let selected = effect_selection == Some(LayerEffectSelection { layer_id: id, kind });
+        let tooltip: SharedString = format!(
+            "Click to select; double-click to edit; Option-drag to copy {}",
+            kind.label().to_lowercase()
+        )
+        .into();
+
+        gpui_kit::div()
+            .id(effect_key("row", id, kind))
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(24.0))
+            .mx_1()
+            .rounded_sm()
+            // The Swift row's eye sits 38px in — its own 8px leading, the
+            // 20px eye, a 10px gap — plus the layer row's indent step
+            // (NativeLayerList.swift:875); the 4px row margin makes 34 here.
+            .pl(px(34.0 + indent))
+            .when(selected, |row| {
+                row.bg(gpui_kit::rgba(crate::ui::ACCENT_WASH))
+            })
+            .on_click(cx.listener(move |this, event, window, cx| {
+                // `select(editing:)` — a click selects the effect, a
+                // double-click also binds the editor panel to it; the
+                // panel itself opens off `effectsEditing` exactly as it
+                // does for a fresh add.
+                let editing = click_count(event) >= 2;
+                this.tab().session.select_effect(kind, id, editing);
+                if editing
+                    && this.tab().session.effects_editing
+                        == Some(LayerEffectSelection { layer_id: id, kind })
+                {
+                    this.open_effects_panel(cx);
+                }
+                this.sync_opacity_slider(window, cx);
+                this.touch(cx);
+                cx.stop_propagation();
+            }))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .on_drag(
+                EffectDrag { layer_id: id, kind },
+                // The drag ghost (Swift snapshots the row): a small chip
+                // naming the effect — but only when the drag began with
+                // Option, the only drag a drop will answer.
+                move |_, _, window, cx| {
+                    let visible = option_drag_modifiers(window.modifiers());
+                    cx.new(|_| EffectDragGhost {
+                        label: kind.label().into(),
+                        visible,
+                    })
+                },
+            )
+            // The eye toggles visibility alone — an eye click must not select
+            // the effect (NativeLayerList.swift:935).
+            .child(
+                gpui_kit::div()
+                    .id(effect_key("eye", id, kind))
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.tab().session.toggle_effect(kind, id);
+                        this.touch(cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        Icon::new(if enabled {
+                            IconName::Eye
+                        } else {
+                            IconName::EyeOff
+                        })
+                        .size(px(14.0))
+                        // Swift keeps the eye at the secondary tint in both
+                        // states (NativeLayerList.swift:866); the glyph
+                        // carries the state.
+                        .text_color(gpui_kit::rgb(crate::ui::FG_DIM)),
+                    ),
+            )
+            .child(
+                gpui_kit::div()
+                    .ml_1()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(11.0))
+                    .text_color(if enabled {
+                        gpui_kit::rgb(crate::ui::FG_TEXT)
+                    } else {
+                        gpui_kit::rgb(crate::ui::FG_DIM)
+                    })
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(kind.label())),
+            )
+            .into_any_element()
     }
 
     /// The row's mask thumbnail: the mask's own pixels placed where they sit
@@ -924,9 +1148,13 @@ fn footer_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_mask_disabled, layer_key, selection_mode};
+    use super::{
+        effect_key, footer_mask_disabled, layer_key, option_drag_modifiers, selection_mode,
+    };
+    use compositor_core::effects::LayerEffectKind;
     use compositor_core::selection::SelectionMode;
     use compositor_core::session::EditorSession;
+    use gpui_kit::Modifiers;
 
     /// The footer mask button's three retired states (LayerMaskMenu.swift):
     /// no active layer, a layer already carrying a mask, or a session that
@@ -955,6 +1183,50 @@ mod tests {
         let b = uuid::Uuid::new_v4();
         assert_eq!(layer_key("row", a), layer_key("row", a));
         assert_ne!(layer_key("row", a), layer_key("row", b));
+    }
+
+    /// Effect-row keys are stable the same way, and name the kind: the same
+    /// layer and kind always collide with themselves alone, and two kinds on
+    /// one layer never share a key.
+    #[test]
+    fn effect_keys_come_from_layer_id_and_kind() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        assert_eq!(
+            effect_key("row", a, LayerEffectKind::Stroke),
+            effect_key("row", a, LayerEffectKind::Stroke)
+        );
+        assert_ne!(
+            effect_key("row", a, LayerEffectKind::Stroke),
+            effect_key("row", b, LayerEffectKind::Stroke)
+        );
+        assert_ne!(
+            effect_key("row", a, LayerEffectKind::Stroke),
+            effect_key("row", a, LayerEffectKind::Shadow)
+        );
+    }
+
+    /// An effect-drag copies only with Option and without Command — on this
+    /// platform either of the Command seats (control, platform) vetoes it
+    /// (NativeLayerList.swift:905, 918).
+    #[test]
+    fn option_drag_requires_alt_without_command() {
+        let plain = Modifiers::default();
+        assert!(!option_drag_modifiers(plain));
+        assert!(option_drag_modifiers(Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        }));
+        assert!(!option_drag_modifiers(Modifiers {
+            alt: true,
+            control: true,
+            ..Modifiers::default()
+        }));
+        assert!(!option_drag_modifiers(Modifiers {
+            alt: true,
+            platform: true,
+            ..Modifiers::default()
+        }));
     }
 
     /// Shift adds, Option subtracts, plain replaces; shift wins when both
