@@ -2555,6 +2555,13 @@ impl EditorSession {
             .map(|a| a.image.height)
             .unwrap_or(layer.size().height.round() as usize);
         if width == 0 || height == 0 || width * height > 100_000_000 {
+            // Swift throws ProjectError.tooLarge here and surfaces it through
+            // brushError (LayerMask.swift:241, :259) — the status line reads
+            // it; returning silently would leave the user guessing.
+            self.brush_error = Some(
+                "This project exceeds the supported canvas, layer, file-size, or 100-megapixel image limit."
+                    .to_string(),
+            );
             return;
         }
         let base = if revealing { 255u8 } else { 0u8 };
@@ -7375,6 +7382,23 @@ mod tests {
             "a mask target has no pixels to lift"
         );
         assert!(s.pixel_move.is_none());
+    }
+
+    #[test]
+    fn add_mask_from_selection_reports_an_oversized_layer() {
+        // Swift throws ProjectError.tooLarge and surfaces it via brushError
+        // (LayerMask.swift:241, :259); the port mirrors the surfacing.
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].transform.size = CGSize::new(20_000.0, 20_000.0);
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        s.add_mask_from_selection(true);
+        assert!(
+            s.brush_error
+                .as_deref()
+                .is_some_and(|e| e.contains("100-megapixel")),
+            "the tooLarge failure must be surfaced"
+        );
+        assert!(!s.is_mask_selected);
     }
 
     #[test]
