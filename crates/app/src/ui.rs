@@ -8,7 +8,9 @@ pub mod curves_controls;
 pub mod floating_panel;
 pub mod keyboard_shortcuts;
 pub mod levels_sheet;
+pub mod navigation_tool_header;
 pub mod sheets;
+pub mod type_controls;
 
 use std::rc::Rc;
 

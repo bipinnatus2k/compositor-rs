@@ -15,6 +15,5 @@ pub mod settings;
 pub mod sheets_ui;
 pub mod state;
 pub mod tabs;
-pub mod tools;
 pub mod ui;
 pub mod welcome;
