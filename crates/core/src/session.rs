@@ -765,6 +765,49 @@ impl EditorSession {
         self.selected_layer_ids = id.map(|i| vec![i]).unwrap_or_default();
     }
 
+    /// `selectTool` (EditorSession.swift:332-352) — the one gate every tool
+    /// switch passes. A failing text apply refuses the switch (:333);
+    /// switching commits the pending transform, applies the pending gradient
+    /// and cancels the crop frame (:335); entering Crop with no frame presets
+    /// the full-document frame and resets the ratio choice (:347-351).
+    /// Returns false when the switch was refused, so the caller can leave its
+    /// app-side companions of the Swift cancels (the shape drag) alone. The
+    /// busy states Swift guards on (`isProjectBusy`, `brushStroke`,
+    /// `warpStroke`, `levels`) are app-side here, as in `select_layer_target`;
+    /// the port keeps the lasso cancel unconditional after the assignment
+    /// (Swift cancels it inside the switching branch), and where Swift parks
+    /// per-family brush tips the port's eraser entry is a `brush_mode` on the
+    /// shared Brush tool, so selecting Brush resets it to Paint.
+    pub fn select_tool(&mut self, value: NavigationTool) -> bool {
+        let switching = self.tool != value;
+        if switching && !self.finish_text() {
+            return false;
+        }
+        if switching {
+            self.commit_transform();
+            self.resolve_gradient();
+            self.cancel_crop();
+        }
+        if value == NavigationTool::Brush {
+            self.brush_mode = BrushToolMode::Paint;
+        }
+        self.tool = value;
+        self.cancel_lasso();
+        if value == NavigationTool::Crop
+            && self.crop_rect.is_none()
+            && let Some(document) = self.document.as_ref()
+        {
+            self.crop_ratio_choice = "Free".to_string();
+            self.crop_rect = Some(CGRect::new(
+                0.0,
+                0.0,
+                document.width as f64,
+                document.height as f64,
+            ));
+        }
+        true
+    }
+
     /// `addBlankLayer`.
     pub fn add_blank_layer(&mut self) {
         let Some(document) = self.document.clone() else {

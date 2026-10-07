@@ -14,7 +14,6 @@ use gpui_kit::{
 };
 
 use compositor_core::document::{NavigationTool, ShapeKind};
-use compositor_core::geometry::CGRect;
 use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
 use compositor_core::tools::brush::GradientShape;
@@ -117,21 +116,12 @@ fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
 
 /// EditorSession.swift:347-351: entering Crop with no frame presets the
 /// full-document frame and resets the ratio choice to Free, so a ratio
-/// left over from an earlier crop never reshapes the preset.
+/// left over from an earlier crop never reshapes the preset. The preset
+/// itself moved into `EditorSession::select_tool` (ticket 16); this shim
+/// only keeps the ticket-04 guard test's call shape.
+#[cfg(test)]
 fn crop_entry_preset(session: &mut EditorSession, tool: NavigationTool) {
-    if tool != NavigationTool::Crop || session.crop_rect.is_some() {
-        return;
-    }
-    let Some(document) = session.document.as_ref() else {
-        return;
-    };
-    session.crop_ratio_choice = "Free".to_string();
-    session.crop_rect = Some(CGRect::new(
-        0.0,
-        0.0,
-        document.width as f64,
-        document.height as f64,
-    ));
+    session.select_tool(tool);
 }
 
 /// The options header's shared "(value, label) → checked menu entry"
@@ -164,16 +154,12 @@ where
 
 impl AppState {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
-        // `selectTool` (EditorSession.swift:332-352): the one gate every
-        // tool switch passes. The text draft commits first — a failed apply
-        // refuses the switch (:333). A stroke mid-flight, a project
-        // operation, or an adjustment editor open refuses outright (:334).
-        // Transform and the pending gradient auto-confirm; crop
-        // auto-cancels (:335).
-        let switching = self.tab().session.tool != tool;
-        if switching && !self.tab().session.finish_text() {
-            return;
-        }
+        // `selectTool` (EditorSession.swift:332-352) lives on the session
+        // now. Its refusal guards (:334) stay here: the stroke and warp
+        // drags and the project-busy flag are app-side state, and the
+        // adjustment editor is the port's stand-in for Swift's `levels`
+        // sheet. A refused switch (a failing text apply) leaves the shape
+        // drag up, like every session-side gate.
         if matches!(
             self.drag,
             Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
@@ -185,22 +171,14 @@ impl AppState {
         {
             return;
         }
-        if switching {
-            self.tab().session.commit_transform();
-            self.tab().session.resolve_gradient();
-            self.tab().session.cancel_crop();
+        if !self.tab().session.select_tool(tool) {
+            return;
         }
         // A shape drag dies with the switch (Swift's cancelShape :335); it
         // lives app-side, so dropping it here is the whole cancel.
         if matches!(self.drag, Some(CanvasDrag::Shape { .. })) {
             self.drag = None;
         }
-        if tool == NavigationTool::Brush {
-            self.tab().session.brush_mode = BrushToolMode::Paint;
-        }
-        self.tab().session.tool = tool;
-        self.tab().session.cancel_lasso();
-        crop_entry_preset(&mut self.tab().session, tool);
         self.touch(cx);
     }
 
