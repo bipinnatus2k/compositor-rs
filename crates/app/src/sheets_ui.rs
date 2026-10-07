@@ -92,7 +92,7 @@ impl AppState {
         // Shortcuts panel is not open.
         if !self
             .panels
-            .is_visible(crate::panels::panel_names::KEYBOARD_SHORTCUTS)
+            .is_visible(crate::ui::floating_panel::panel_names::KEYBOARD_SHORTCUTS)
         {
             Self::shortcuts_editor_take();
         }
@@ -1132,7 +1132,7 @@ pub fn recorder_capture(chord_text: &str) -> RecorderCapture {
 /// Entries were normalized when they were first stored, so `set_override`
 /// cannot fail here; failures would leave that entry at its default.
 pub fn restore_overrides(baseline: BTreeMap<String, String>) {
-    let mut registry = crate::shortcuts::lock_global();
+    let mut registry = crate::ui::keyboard_shortcuts::lock_global();
     registry.reset_all();
     for (id, chord) in &baseline {
         let _ = registry.set_override(id, chord);
@@ -1143,7 +1143,7 @@ pub fn restore_overrides(baseline: BTreeMap<String, String>) {
 /// chord prints raw instead of failing the sheet.
 fn display_chord(chord: &str) -> String {
     Keystroke::parse(chord)
-        .map(|parsed| crate::shortcuts::chord_label(&parsed))
+        .map(|parsed| crate::ui::keyboard_shortcuts::chord_label(&parsed))
         .unwrap_or_else(|_| chord.to_string())
 }
 
@@ -1225,15 +1225,20 @@ impl AppState {
 
         // Precompute every row's data while the registry is locked, then
         // build the elements.
-        let rows: Vec<(&'static crate::shortcuts::ShortcutSpec, String, bool, bool)> = {
+        let rows: Vec<(
+            &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
+            String,
+            bool,
+            bool,
+        )> = {
             let registry = self.shortcuts();
             let mut rows = Vec::new();
             for group in [
-                crate::shortcuts::Group::Menus,
-                crate::shortcuts::Group::CanvasLayers,
-                crate::shortcuts::Group::TextEditing,
+                crate::ui::keyboard_shortcuts::Group::Menus,
+                crate::ui::keyboard_shortcuts::Group::CanvasLayers,
+                crate::ui::keyboard_shortcuts::Group::TextEditing,
             ] {
-                for entry in crate::shortcuts::entries_in_group(group) {
+                for entry in crate::ui::keyboard_shortcuts::entries_in_group(group) {
                     let chord = display_chord(&registry.chord(entry.id));
                     let customized = registry.is_customized(entry.id);
                     let is_recording = recording.as_deref() == Some(entry.id);
@@ -1250,7 +1255,7 @@ impl AppState {
             .gap_0p5()
             .max_h(px(380.0))
             .overflow_y_scroll();
-        let mut current_group: Option<crate::shortcuts::Group> = None;
+        let mut current_group: Option<crate::ui::keyboard_shortcuts::Group> = None;
         for (entry, chord, customized, is_recording) in rows {
             if current_group != Some(entry.group) {
                 current_group = Some(entry.group);
@@ -1292,7 +1297,7 @@ impl AppState {
 /// One catalog row: the action's title, its chord button (click to record)
 /// and a per-row Reset (`ShortcutRecorder` framed at 150x26 in Swift).
 fn shortcut_row(
-    entry: &'static crate::shortcuts::ShortcutSpec,
+    entry: &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
     chord: &str,
     customized: bool,
     is_recording: bool,
@@ -1890,13 +1895,13 @@ mod tests {
 
     #[test]
     fn restore_overrides_returns_the_registry_to_its_baseline() {
-        use crate::shortcuts::ShortcutRegistry;
+        use crate::ui::keyboard_shortcuts::ShortcutRegistry;
 
         // The Cancel path restores the process-wide registry, so remember
         // whatever it held and put it back at the end (the test never saves
         // to disk).
         let original = {
-            let registry = crate::shortcuts::lock_global();
+            let registry = crate::ui::keyboard_shortcuts::lock_global();
             registry.overrides().clone()
         };
         let result = std::panic::catch_unwind(|| {
@@ -1909,14 +1914,14 @@ mod tests {
 
             // The live registry has drifted since the sheet opened.
             {
-                let mut registry = crate::shortcuts::lock_global();
+                let mut registry = crate::ui::keyboard_shortcuts::lock_global();
                 registry.set_override("tool.brush", "k").unwrap();
                 registry.set_override("edit.redo", "ctrl-y").unwrap();
             }
 
             restore_overrides(baseline);
 
-            let registry = crate::shortcuts::lock_global();
+            let registry = crate::ui::keyboard_shortcuts::lock_global();
             assert_eq!(registry.chord("edit.undo"), "ctrl-alt-z");
             assert_eq!(registry.chord("tool.brush"), "b", "drift is discarded");
             assert_eq!(

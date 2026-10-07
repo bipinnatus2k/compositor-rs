@@ -461,8 +461,10 @@ impl AppState {
     /// draft, assigns overrides with `set_override`, and persists with
     /// `save`; a new launch (or a rebind of `keys::bindings_with`) applies
     /// the change.
-    pub fn shortcuts(&self) -> std::sync::MutexGuard<'static, crate::shortcuts::ShortcutRegistry> {
-        crate::shortcuts::lock_global()
+    pub fn shortcuts(
+        &self,
+    ) -> std::sync::MutexGuard<'static, crate::ui::keyboard_shortcuts::ShortcutRegistry> {
+        crate::ui::keyboard_shortcuts::lock_global()
     }
 
     /// Saves the persisted tool toggles (`settings.rs`): Swift's

@@ -188,12 +188,14 @@ actions!(
 /// `shortcuts.json`, so custom chords take effect here (and in the menu bar's
 /// key hints, which read the same keymap).
 pub fn bindings() -> Vec<KeyBinding> {
-    bindings_with(&crate::shortcuts::lock_global())
+    bindings_with(&crate::ui::keyboard_shortcuts::lock_global())
 }
 
 /// Builds the keymap from an explicit registry (the injection point for
 /// tests and for a live rebind after the settings sheet saves).
-pub fn bindings_with(registry: &crate::shortcuts::ShortcutRegistry) -> Vec<KeyBinding> {
+pub fn bindings_with(
+    registry: &crate::ui::keyboard_shortcuts::ShortcutRegistry,
+) -> Vec<KeyBinding> {
     bindings_tracked(registry, None)
 }
 
@@ -232,13 +234,16 @@ pub(crate) fn split_bindings<'a>(
 /// after the shortcuts panel saves (Done) or restores defaults, so a changed
 /// chord takes effect on the next keystroke without a restart.
 pub fn rebuild_bindings(cx: &mut gpui_kit::App) {
-    let registry = crate::shortcuts::lock_global();
+    let registry = crate::ui::keyboard_shortcuts::lock_global();
     rebuild_with(cx, &registry);
 }
 
 /// [`rebuild_bindings`] against an explicit registry (tests and callers that
 /// already hold the lock).
-pub(crate) fn rebuild_with(cx: &mut gpui_kit::App, registry: &crate::shortcuts::ShortcutRegistry) {
+pub(crate) fn rebuild_with(
+    cx: &mut gpui_kit::App,
+    registry: &crate::ui::keyboard_shortcuts::ShortcutRegistry,
+) {
     // Snapshot before clearing: the keymap also holds gpui-kit's component
     // bindings, which nothing re-installs automatically.
     let (baseline, _) = split_bindings(
@@ -258,7 +263,7 @@ pub(crate) fn rebuild_with(cx: &mut gpui_kit::App, registry: &crate::shortcuts::
 /// every emitted binding so tests can prove the binding table and the
 /// shortcut catalog never drift apart.
 pub(crate) fn bindings_tracked(
-    registry: &crate::shortcuts::ShortcutRegistry,
+    registry: &crate::ui::keyboard_shortcuts::ShortcutRegistry,
     mut ids: Option<&mut Vec<&'static str>>,
 ) -> Vec<KeyBinding> {
     /// Binds every effective chord of one catalog entry (the override chord
@@ -469,7 +474,7 @@ pub(crate) fn inline_text_bindings() -> Vec<KeyBinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shortcuts::ShortcutRegistry;
+    use crate::ui::keyboard_shortcuts::ShortcutRegistry;
 
     /// The (keystrokes, action, context) identity of one binding, for
     /// order-sensitive comparisons.

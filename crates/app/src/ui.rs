@@ -1,5 +1,12 @@
-//! Small shared UI helpers: the app palette, option dropdowns, labeled
-//! sliders, checkboxes and text rows.
+//! The Swift `UI/` mirror: one file per Swift source where a direct
+//! counterpart exists, plus this root's small shared widget helpers —
+//! the app palette, option dropdowns, labeled sliders, checkboxes and
+//! text rows.
+
+pub mod color_picker_sheet;
+pub mod floating_panel;
+pub mod keyboard_shortcuts;
+pub mod sheets;
 
 use std::rc::Rc;
 

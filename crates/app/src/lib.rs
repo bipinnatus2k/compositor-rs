@@ -4,21 +4,17 @@
 //! target lets unit tests exercise it without a GPUI window.
 
 pub mod canvas;
-pub mod color_picker_ui;
+pub mod content_view;
 pub mod flows;
 pub mod keys;
 pub mod layers_panel;
 pub mod menu;
-pub mod panels;
 pub mod panels_ui;
 pub mod project;
 pub mod settings;
-pub mod sheets;
 pub mod sheets_ui;
-pub mod shortcuts;
 pub mod state;
 pub mod tabs;
 pub mod tools;
 pub mod ui;
 pub mod welcome;
-pub mod workspace;

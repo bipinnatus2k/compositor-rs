@@ -32,12 +32,14 @@ use compositor_core::effects::LayerEffectKind;
 use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
 
-use crate::panels::{DOCKED_WIDTH, PanelPlacement, docked_top_left, panel_names, render_panel};
-use crate::sheets::SliderRole;
 use crate::sheets_ui::{
     histogram_view, labeled_slider, levels_channel_label, parse_input_usize, sheet_row,
 };
 use crate::state::AppState;
+use crate::ui::floating_panel::{
+    DOCKED_WIDTH, PanelPlacement, docked_top_left, panel_names, render_panel,
+};
+use crate::ui::sheets::SliderRole;
 use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
 
 /// The per-panel widget bundles. A panel's bundle exists exactly while the
@@ -130,7 +132,7 @@ impl AppState {
             // With a selection, bins are weighted by the selection's coverage
             // on the layer's pixel grid (LevelsFilter.histogram,
             // Levels.swift:90-96).
-            let coverage = crate::sheets::histogram_coverage(
+            let coverage = crate::ui::sheets::histogram_coverage(
                 self.preview_base_transform,
                 self.tab().session.selection().cloned(),
                 pixels.width,
@@ -868,7 +870,7 @@ impl AppState {
             panel_names::FILTER_PANEL => self.filter_panel_body(cx),
             panel_names::EFFECTS_PANEL => self.effects_panel_body(cx),
             panel_names::COLOR_PICKER_PANEL => {
-                return crate::color_picker_ui::color_picker_panel_body(self, cx);
+                return crate::ui::color_picker_sheet::color_picker_panel_body(self, cx);
             }
             panel_names::KEYBOARD_SHORTCUTS => {
                 return Some(self.shortcuts_panel_footer_body(cx));
@@ -1577,7 +1579,7 @@ pub fn panel_estimated_size(name: &str) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panels::panel_names;
+    use crate::ui::floating_panel::panel_names;
 
     /// Every panel has a positive first-open size estimate; the docked width
     /// is the widest a docked panel assumes.

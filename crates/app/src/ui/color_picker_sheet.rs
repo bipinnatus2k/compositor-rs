@@ -86,9 +86,9 @@ impl AppState {
             .map(|picker| picker.target.title())
             .unwrap_or_default();
         self.panels.show(
-            crate::panels::panel_names::COLOR_PICKER_PANEL,
+            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
             title,
-            crate::panels::PanelPlacement::Automatic,
+            crate::ui::floating_panel::PanelPlacement::Automatic,
         );
         self.sync_panel_guard();
         self.touch(cx);
@@ -116,7 +116,7 @@ impl AppState {
         }
         self.picker_ui = None;
         self.panels
-            .close(crate::panels::panel_names::COLOR_PICKER_PANEL);
+            .close(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
         self.sync_panel_guard();
         cx.default_global::<PickerFieldState>().drag = None;
         self.touch(cx);

@@ -331,7 +331,7 @@ pub struct AppState {
     pub sheet: Option<SheetState>,
     /// The floating panels (design doc §5): the registry of open panels plus
     /// their remembered positions, and the per-panel widget bundles.
-    pub panels: crate::panels::FloatingPanels,
+    pub panels: crate::ui::floating_panel::FloatingPanels,
     pub panel_widgets: crate::panels_ui::PanelWidgets,
     pub status: Option<String>,
     pub rename: Option<uuid::Uuid>,
@@ -369,7 +369,7 @@ pub struct AppState {
     /// tool (`spaceHeld` in EditorCanvas.swift).
     pub space_saved_tool: Option<compositor_core::document::NavigationTool>,
     /// The open color picker's widgets (`color_picker_ui`).
-    pub picker_ui: Option<crate::color_picker_ui::PickerUi>,
+    pub picker_ui: Option<crate::ui::color_picker_sheet::PickerUi>,
     /// The Curves filter sheet's editor; `None` while no Curves sheet is
     /// open (see `CurvesEditor`).
     pub curves_editor: Option<CurvesEditor>,
@@ -587,7 +587,7 @@ impl AppState {
             viewport: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
             drag: None,
             sheet: None,
-            panels: crate::panels::FloatingPanels::new(),
+            panels: crate::ui::floating_panel::FloatingPanels::new(),
             panel_widgets: crate::panels_ui::PanelWidgets::default(),
             status: None,
             rename: None,
@@ -1115,11 +1115,11 @@ impl AppState {
         // palette one (ColorPickerSheet.swift:170-182).
         let title = picker.target.title();
         let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
-        self.picker_ui = Some(crate::color_picker_ui::PickerUi { hex });
+        self.picker_ui = Some(crate::ui::color_picker_sheet::PickerUi { hex });
         self.panels.show(
-            crate::panels::panel_names::COLOR_PICKER_PANEL,
+            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
             title,
-            crate::panels::PanelPlacement::Automatic,
+            crate::ui::floating_panel::PanelPlacement::Automatic,
         );
         self.sync_panel_guard();
     }
