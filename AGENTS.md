@@ -92,8 +92,11 @@ cargo test                   # 引擎全量；UI 改动另跑 cargo test -p comp
   一律 builder 构造 + 方法读取。全布尔类型 setter 用字段名、reader 用
   `is_<形容词>` / `has_<名词>`；含非布尔字段的类型 setter 加 `with_` 前缀、
   reader 保留字段名。字段即定义、不会增长的小值类型（`Point`、`Rect`、
-  `Edges` 一类）豁免。本项目的 seam 指 `compositor-core` ↔ app 边界与
-  app 内可复用 UI 模块的边界。
+  `Edges` 一类）豁免。会话状态机家族同样豁免：`EditorSession` 与它持有的
+  对话框编辑状态类型（`ColorPickerState` 一类）是原版 `@Observable` 类的
+  直译，视图直读字段是原项目写法的一部分；突变仍一律走带守卫的方法。
+  本项目的 seam 指 `compositor-core` ↔ app 边界与 app 内可复用 UI 模块
+  的边界。
 - **core 不依赖 gpui**：引擎（文档模型、渲染、工具、格式）全部位于
   `compositor-core`；gpui / gpui-kit 只出现在 app crate。
 - 与原版 Swift 命名保持对照关系，术语以 [`CONTEXT.md`](CONTEXT.md) 为准。
