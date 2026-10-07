@@ -3,18 +3,27 @@
 //! the app palette, option dropdowns, labeled sliders, checkboxes and
 //! text rows.
 
+pub mod brush_controls;
+pub mod canvas_size_sheet;
 pub mod color_picker_sheet;
+pub mod crop_controls;
 pub mod curves_controls;
 pub mod effects_sheet;
 pub mod filter_sheet;
 pub mod floating_panel;
 pub mod hue_saturation_sheet;
+pub mod image_size_sheet;
+pub mod jpeg_export_sheet;
 pub mod keyboard_shortcuts;
 pub mod lasso_controls;
 pub mod levels_sheet;
 pub mod native_layer_list;
 pub mod navigation_tool_header;
+pub mod project_tabs;
+pub mod shape_controls;
 pub mod sheets;
+pub mod transform_inspector;
+pub mod trim_sheet;
 pub mod type_controls;
 
 use std::rc::Rc;

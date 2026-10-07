@@ -1,29 +1,29 @@
-//! The left tool rail and the per-tool options header.
+//! The left tool rail and the options header shell (NavigationToolHeader.swift
+//! plus ContentView's `toolHeaders` group): the tool title and the dispatch
+//! to each tool's controls. The per-tool control sets live beside their
+//! Swift sources (`ui/brush_controls.rs`, `ui/lasso_controls.rs`,
+//! `ui/crop_controls.rs`, `ui/shape_controls.rs`, `ui/type_controls.rs`,
+//! `ui/transform_inspector.rs`). The Zoom/Hand branches are
+//! NavigationToolHeader.swift's own subject and stay here, with the
+//! Gradient branch beside them pending its own carve.
 
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::{Disableable, Selectable, Sizable};
+use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, px,
+    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, px,
 };
 
-use compositor_core::document::{NavigationTool, ShapeKind};
-use compositor_core::selection::{LassoKind, WandMode};
-use compositor_core::session::{BlurToolMode, BrushToolMode, EditorSession, SpotHealingMode};
+use compositor_core::document::NavigationTool;
+use compositor_core::session::{BrushToolMode, EditorSession};
 use compositor_core::tools::brush::GradientShape;
-use compositor_core::transform::LayerSampling;
 
 use crate::state::{AppState, CanvasDrag};
-use crate::ui::type_controls::{
-    FONT_MENU_CAP, alignment_buttons, available_font_names, font_menu_names,
-};
-use crate::ui::{MenuEntry, div_row, dropdown, labeled_slider, text_label};
+use crate::ui::{MenuEntry, dropdown, labeled_slider, text_label};
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
 /// eraser-variant flag). The letter only names the button element (kept so
@@ -131,8 +131,8 @@ fn crop_entry_preset(session: &mut EditorSession, tool: NavigationTool) {
 /// dropdown shape: one entry per value in the given order, the checkmark
 /// on the entry matching `current` (a `String` field compares against its
 /// `&'static str` presets), and a click assigning the value to the session
-/// field `set` names.
-fn menu_entries<V, C, S>(
+/// field `set` names. The per-tool control modules share it.
+pub(crate) fn menu_entries<V, C, S>(
     values: impl IntoIterator<Item = (V, &'static str)>,
     current: C,
     set: S,
@@ -260,7 +260,6 @@ impl AppState {
 
     pub fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let app = cx.entity().downgrade();
-        let brush = self.tab().session.brush_settings;
         let tool = self.tab().session.tool;
         let erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
 
@@ -297,209 +296,20 @@ impl AppState {
             | NavigationTool::SpotHealing
             | NavigationTool::Blur
             | NavigationTool::CloneStamp => {
-                header = header
-                    .child(labeled_slider(
-                        "Size",
-                        &self.brush_sliders[0],
-                        format!("{:.0}", brush.diameter),
-                        px(90.0),
-                    ))
-                    .child(labeled_slider(
-                        "Hardness",
-                        &self.brush_sliders[1],
-                        format!("{:.0}%", brush.hardness * 100.0),
-                        px(70.0),
-                    ))
-                    .child(labeled_slider(
-                        "Opacity",
-                        &self.brush_sliders[2],
-                        format!("{:.0}%", brush.opacity * 100.0),
-                        px(70.0),
-                    ))
-                    .child(labeled_slider(
-                        "Smoothing",
-                        &self.brush_sliders[3],
-                        format!("{:.0}", brush.smoothing),
-                        px(60.0),
-                    ));
-                if tool == NavigationTool::Brush {
-                    let mode = self.tab().session.brush_mode;
-                    header = header.child(dropdown(
-                        &app,
-                        "brush-mode",
-                        if erasing { "Erase" } else { "Paint" },
-                        px(80.0),
-                        menu_entries(
-                            [
-                                (BrushToolMode::Paint, "Paint"),
-                                (BrushToolMode::Erase, "Erase"),
-                            ],
-                            mode,
-                            |session, value| session.brush_mode = value,
-                        ),
-                    ));
-                }
-                if tool == NavigationTool::SpotHealing {
-                    let mode = self.tab().session.spot_healing_mode;
-                    let label = |mode: SpotHealingMode| match mode {
-                        SpotHealingMode::ContentAware => "Content Aware",
-                        SpotHealingMode::CreateTexture => "Create Texture",
-                        SpotHealingMode::ProximityMatch => "Proximity Match",
-                    };
-                    header = header.child(dropdown(
-                        &app,
-                        "heal-mode",
-                        label(mode),
-                        px(150.0),
-                        menu_entries(
-                            [
-                                (SpotHealingMode::ContentAware, "Content Aware"),
-                                (SpotHealingMode::CreateTexture, "Create Texture"),
-                                (SpotHealingMode::ProximityMatch, "Proximity Match"),
-                            ],
-                            mode,
-                            |session, value| session.spot_healing_mode = value,
-                        ),
-                    ));
-                }
-                if tool == NavigationTool::Blur {
-                    let mode = self.tab().session.blur_mode;
-                    let label = |mode: BlurToolMode| match mode {
-                        BlurToolMode::Liquify => "Liquify",
-                        BlurToolMode::Blur => "Blur",
-                        BlurToolMode::Smudge => "Smudge",
-                    };
-                    header = header.child(dropdown(
-                        &app,
-                        "blur-mode",
-                        label(mode),
-                        px(96.0),
-                        menu_entries(
-                            [
-                                (BlurToolMode::Liquify, "Liquify"),
-                                (BlurToolMode::Blur, "Blur"),
-                                (BlurToolMode::Smudge, "Smudge"),
-                            ],
-                            mode,
-                            |session, value| session.blur_mode = value,
-                        ),
-                    ));
-                }
-                if tool == NavigationTool::CloneStamp {
-                    let aligned = self.tab().session.clone_settings.aligned;
-                    let all_layers = self.tab().session.clone_settings.sample_all_layers;
-                    header = header
-                        .child(checkbox(
-                            &app,
-                            "clone-aligned",
-                            "Aligned",
-                            aligned,
-                            |state, checked, _, cx| {
-                                state.tab().session.clone_settings.aligned = checked;
-                                state.touch(cx);
-                            },
-                        ))
-                        .child(checkbox(
-                            &app,
-                            "clone-all-layers",
-                            "Sample All Layers",
-                            all_layers,
-                            |state, checked, _, cx| {
-                                state.tab().session.clone_settings.sample_all_layers = checked;
-                                state.touch(cx);
-                            },
-                        ))
-                        .child(text_label("Option-click sets the source", true));
-                }
+                header = header.children(self.brush_controls(cx));
             }
             NavigationTool::Marquee => {
-                let kind = self.tab().session.marquee_kind;
-                header = header.child(dropdown(
-                    &app,
-                    "marquee-kind",
-                    if kind == LassoKind::Ellipse {
-                        "Ellipse"
-                    } else {
-                        "Rectangle"
-                    },
-                    px(100.0),
-                    menu_entries(
-                        [
-                            (LassoKind::Rectangle, "Rectangle"),
-                            (LassoKind::Ellipse, "Ellipse"),
-                        ],
-                        kind,
-                        |session, value| session.marquee_kind = value,
-                    ),
-                ));
+                header = header.children(self.marquee_controls(cx));
             }
             NavigationTool::Lasso => {
-                let kind = self.tab().session.lasso_kind;
-                header = header.child(dropdown(
-                    &app,
-                    "lasso-kind",
-                    if kind == LassoKind::Polygonal {
-                        "Polygonal"
-                    } else {
-                        "Freehand"
-                    },
-                    px(100.0),
-                    menu_entries(
-                        [
-                            (LassoKind::Freehand, "Freehand"),
-                            (LassoKind::Polygonal, "Polygonal"),
-                        ],
-                        kind,
-                        |session, value| session.lasso_kind = value,
-                    ),
-                ));
+                header = header.children(self.lasso_controls(cx));
             }
             NavigationTool::Wand => {
-                let mode = self.tab().session.wand_mode;
-                let settings = self.tab().session.wand_settings;
-                header = header
-                    .child(dropdown(
-                        &app,
-                        "wand-mode",
-                        match mode {
-                            WandMode::Wand => "Wand",
-                            WandMode::Object => "Object",
-                        },
-                        px(84.0),
-                        menu_entries(
-                            [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
-                            mode,
-                            |session, value| session.wand_mode = value,
-                        ),
-                    ))
-                    .child(labeled_slider(
-                        "Tolerance",
-                        &self.wand_slider,
-                        format!("{}", settings.tolerance),
-                        px(90.0),
-                    ))
-                    .child(checkbox(
-                        &app,
-                        "wand-contiguous",
-                        "Contiguous",
-                        settings.contiguous,
-                        |state, checked, _, cx| {
-                            state.tab().session.wand_settings.contiguous = checked;
-                            state.touch(cx);
-                        },
-                    ))
-                    .child(checkbox(
-                        &app,
-                        "wand-all-layers",
-                        "Sample All Layers",
-                        settings.sample_all_layers,
-                        |state, checked, _, cx| {
-                            state.tab().session.wand_settings.sample_all_layers = checked;
-                            state.touch(cx);
-                        },
-                    ));
+                header = header.children(self.wand_controls(cx));
             }
             NavigationTool::Gradient => {
+                // Swift home: GradientControls.swift. It is not in ticket
+                // 32's file contract, so the controls stay with the shell.
                 let settings = self.tab().session.gradient_settings;
                 header = header
                     .child(dropdown(
@@ -558,392 +368,30 @@ impl AppState {
                     .child(zoom_button(&app, "zoom-out", ZoomCommand::Out));
             }
             NavigationTool::Crop => {
-                let choice = self.tab().session.crop_ratio_choice.clone();
-                let has_crop = self.tab().session.crop_rect.is_some();
-                let entries = menu_entries(
-                    [
-                        ("Free", "Free"),
-                        ("Original", "Original"),
-                        ("1:1", "1:1"),
-                        ("4:3", "4:3"),
-                        ("16:9", "16:9"),
-                    ],
-                    choice.as_str(),
-                    |session, value| session.crop_ratio_choice = value.to_string(),
-                );
-                header = header
-                    .child(dropdown(
-                        &app,
-                        "crop-ratio",
-                        choice.clone(),
-                        px(92.0),
-                        entries,
-                    ))
-                    .child(
-                        Button::new("crop-apply")
-                            .label("Apply")
-                            .small()
-                            .primary()
-                            .disabled(!has_crop)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab().session.commit_crop();
-                                this.touch(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("crop-cancel")
-                            .label("Cancel")
-                            .small()
-                            .disabled(!has_crop)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab().session.cancel_crop();
-                                this.touch(cx);
-                            })),
-                    );
+                header = header.children(self.crop_controls(cx));
             }
             _ => {}
         }
 
         if tool == NavigationTool::Move {
-            // TransformInspector.swift: toggles, the numeric fields, flip,
-            // sampling, then Cancel/Apply.
-            let edit = self.tab().session.transform_edit.as_ref();
-            let has_edit = edit.is_some();
-            let corners = edit.map(|edit| edit.corners.is_some()).unwrap_or(false);
-            let mask = edit.map(|edit| edit.mask).unwrap_or_else(|| {
-                self.tab().session.is_mask_selected
-                    && self
-                        .tab()
-                        .session
-                        .active_layer()
-                        .and_then(|layer| layer.mask.as_ref().map(|mask| !mask.is_linked))
-                        .unwrap_or(false)
-            });
-            // The fields gray out while nothing can transform, or while a
-            // corner distort owns the edit (the handles are the controls).
-            let fields_enabled = (self.tab().session.can_transform() || has_edit) && !corners;
-            header = header
-                .child(
-                    text_label(if mask { "Transform Mask" } else { "Transform" }, false)
-                        // Section title: ToolHeaderStyle.swift:6 (13 semibold).
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .flex_shrink_0(),
-                )
-                .child(checkbox(
-                    &app,
-                    "transform-auto-select",
-                    "Auto-select",
-                    self.transform_auto_select,
-                    |state, checked, _, cx| {
-                        // transformAutoSelect (EditorSession.swift:198). The
-                        // canvas click-through itself is canvas-side wiring.
-                        state.transform_auto_select = checked;
-                        state.persist_tool_defaults();
-                        state.touch(cx);
-                    },
-                ))
-                .child(checkbox(
-                    &app,
-                    "transform-show-controls",
-                    "Show Controls",
-                    self.tab().session.shows_transform_controls,
-                    |state, checked, _, cx| {
-                        state.tab().session.shows_transform_controls = checked;
-                        state.touch(cx);
-                    },
-                ))
-                .child(number_field(
-                    "transform-x",
-                    "X",
-                    &self.transform_x_input,
-                    px(52.0),
-                ))
-                .child(number_field(
-                    "transform-y",
-                    "Y",
-                    &self.transform_y_input,
-                    px(52.0),
-                ))
-                .child(number_field(
-                    "transform-w",
-                    "W",
-                    &self.transform_w_input,
-                    px(52.0),
-                ))
-                .child(number_field(
-                    "transform-h",
-                    "H",
-                    &self.transform_h_input,
-                    px(52.0),
-                ))
-                .child(checkbox(
-                    &app,
-                    "transform-lock-ratio",
-                    "Lock",
-                    self.tab().session.locks_transform_ratio,
-                    |state, checked, _, cx| {
-                        state.tab().session.locks_transform_ratio = checked;
-                        state.touch(cx);
-                    },
-                ))
-                .child(number_field(
-                    "transform-scale",
-                    "Scale %",
-                    &self.transform_scale_input,
-                    px(56.0),
-                ))
-                .child(number_field(
-                    "transform-rotation",
-                    "\u{b0}",
-                    &self.transform_rotation_input,
-                    px(48.0),
-                ))
-                .child(sampling_dropdown(
-                    &app,
-                    self.transform_displayed(),
-                    fields_enabled,
-                ))
-                .child(
-                    Button::new("transform-flip-h")
-                        .label("Flip H")
-                        .small()
-                        .outline()
-                        .disabled(!fields_enabled)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.transform_flip(true, window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("transform-flip-v")
-                        .label("Flip V")
-                        .small()
-                        .outline()
-                        .disabled(!fields_enabled)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.transform_flip(false, window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("transform-cancel")
-                        .label("Cancel")
-                        .small()
-                        .disabled(!has_edit)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.tab().session.cancel_transform();
-                            this.sync_transform_inputs(window, cx);
-                            this.touch(cx);
-                        })),
-                )
-                .child(
-                    Button::new("transform-apply")
-                        .label("Apply")
-                        .small()
-                        .primary()
-                        .disabled(!has_edit)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.tab().session.commit_transform();
-                            this.sync_transform_inputs(window, cx);
-                            this.touch(cx);
-                        })),
-                );
+            header = header.children(self.transform_inspector(cx));
         }
         if tool == NavigationTool::Hand {
             header = header.child(text_label("Drag to pan · scroll to zoom", true));
         }
         if tool == NavigationTool::Type {
-            // TypeControls.swift: font, size, color, alignment, tracking,
-            // leading, and the draft buttons.
-            let style = self.tab().session.current_text_style();
-            let font = style.font_name.clone();
-            let names = font_menu_names(&font, available_font_names(), FONT_MENU_CAP);
-            let entries = names
-                .into_iter()
-                .map(|name| {
-                    let chosen = name.clone();
-                    MenuEntry::new(name.clone(), move |state, _, cx| {
-                        let chosen = chosen.clone();
-                        state.tab().session.change_text_style(move |style| {
-                            style.font_name = chosen;
-                        });
-                        state.touch(cx);
-                    })
-                    .checked(style.font_name == name)
-                })
-                .collect();
-            let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-            let color = self.tab().session.type_color();
-            let color_rgb = (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
-            let has_document = self.tab().session.document.is_some();
-            let has_draft = self.tab().session.text_draft.is_some();
-            let active_is_text = self
-                .tab()
-                .session
-                .active_layer()
-                .and_then(|layer| layer.live_text())
-                .is_some();
-            header = header
-                .child(dropdown(&app, "type-font", font, px(150.0), entries))
-                .child(
-                    // The unit hugs its field (Swift unitSuffix HStack
-                    // spacing 2, ToolHeaderStyle.swift:13-18): a tighter gap
-                    // than the row's control spacing.
-                    div_row()
-                        .gap_1()
-                        .child(
-                            Input::new(&self.type_size_input)
-                                .id("type-size")
-                                .small()
-                                .w(px(52.0)),
-                        )
-                        .child(text_label("px", true)),
-                )
-                .child(
-                    gpui_kit::div()
-                        .id("type-color")
-                        .w(px(36.0))
-                        .h(px(18.0))
-                        .rounded_xs()
-                        .border_1()
-                        .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
-                        .bg(gpui_kit::rgb(color_rgb))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_text_color_picker_ui(window, cx);
-                        })),
-                )
-                .child(alignment_buttons(&app, style.alignment))
-                .child(
-                    div_row().child(text_label("Tracking", true)).child(
-                        Input::new(&self.type_tracking_input)
-                            .id("type-tracking")
-                            .small()
-                            .w(px(48.0)),
-                    ),
-                )
-                .child(
-                    div_row().child(text_label("Leading", true)).child(
-                        Input::new(&self.type_leading_input)
-                            .id("type-leading")
-                            .small()
-                            .w(px(52.0)),
-                    ),
-                );
-            if has_draft {
-                header = header
-                    .child(
-                        Button::new("type-cancel")
-                            .label("Cancel")
-                            .small()
-                            .disabled(!has_document)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.tab().session.cancel_text();
-                                this.sync_inline_text(window, cx);
-                                this.sync_text_style_inputs(window, cx);
-                                this.touch(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("type-done")
-                            .label("Done")
-                            .small()
-                            .primary()
-                            .disabled(!has_document)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.tab().session.finish_text();
-                                this.sync_inline_text(window, cx);
-                                this.sync_text_style_inputs(window, cx);
-                                this.touch(cx);
-                            })),
-                    );
-            } else {
-                header = header.child(
-                    Button::new("type-edit")
-                        .label("Edit Text")
-                        .small()
-                        .disabled(!has_document || !active_is_text)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.tab().session.edit_active_text();
-                            this.sync_inline_text(window, cx);
-                            this.sync_text_style_inputs(window, cx);
-                            this.touch(cx);
-                        })),
-                );
-            }
+            header = header.children(self.type_controls(cx));
         }
         if tool == NavigationTool::Shape {
-            let kind = self.tab().session.shape_kind;
-            let label = |kind: ShapeKind| match kind {
-                ShapeKind::Rectangle => "Rectangle",
-                ShapeKind::RoundedRectangle => "Rounded Rectangle",
-                ShapeKind::Ellipse => "Ellipse",
-                ShapeKind::Line => "Line",
-            };
-            header = header
-                .child(dropdown(
-                    &app,
-                    "shape-kind",
-                    label(kind),
-                    px(150.0),
-                    menu_entries(
-                        [
-                            (ShapeKind::Rectangle, "Rectangle"),
-                            (ShapeKind::RoundedRectangle, "Rounded Rectangle"),
-                            (ShapeKind::Ellipse, "Ellipse"),
-                            (ShapeKind::Line, "Line"),
-                        ],
-                        kind,
-                        |session, value| session.shape_kind = value,
-                    ),
-                ))
-                .child(text_label(
-                    "Drag on the canvas · Shift-U switches shape",
-                    true,
-                ));
+            header = header.children(self.shape_controls(cx));
         }
 
         header.into_any_element()
     }
-
-    /// Flip H / Flip V (`TransformInspector`'s flip buttons): one transform
-    /// change each, then the fields follow.
-    pub fn transform_flip(
-        &mut self,
-        horizontal: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.transform_change(
-            move |value| {
-                if horizontal {
-                    value.flip_x = !value.flip_x;
-                } else {
-                    value.flip_y = !value.flip_y;
-                }
-            },
-            cx,
-        );
-        self.sync_transform_inputs(window, cx);
-    }
-}
-
-/// Cap on the Type header's font menu: the catalog holds every installed
-/// face, and the popup only takes so many.
-/// One of the inspector's labeled numeric fields (TransformValueField's
-/// `label + rounded field`). Typing writes through the field's Change
-/// subscription; nothing here touches the session.
-fn number_field(
-    id: &'static str,
-    label: &str,
-    state: &Entity<InputState>,
-    width: gpui_kit::Pixels,
-) -> gpui_kit::Div {
-    div_row()
-        .child(text_label(label.to_string(), true))
-        .child(Input::new(state).id(id).small().w(width))
 }
 
 /// A checkbox whose handler receives the app, the new value, window and ctx.
-pub fn checkbox(
+pub(crate) fn checkbox(
     app: &gpui_kit::WeakEntity<AppState>,
     id: &'static str,
     label: &str,
@@ -1015,40 +463,6 @@ fn swatch(
         .border_1()
         .border_color(gpui_kit::rgb(crate::ui::BORDER_BRIGHT))
         .bg(gpui_kit::rgb(value))
-}
-
-/// distort owns the edit.
-fn sampling_dropdown(
-    app: &gpui_kit::WeakEntity<AppState>,
-    value: Option<compositor_core::transform::LayerTransform>,
-    enabled: bool,
-) -> gpui_kit::AnyElement {
-    let current = value
-        .map(|value| value.sampling)
-        .unwrap_or(LayerSampling::High);
-    let entries: Vec<MenuEntry> = LayerSampling::ALL
-        .iter()
-        .map(|sampling| {
-            let sampling = *sampling;
-            MenuEntry::new(sampling.label(), move |state, _, cx| {
-                state.transform_change(move |value| value.sampling = sampling, cx);
-            })
-            .checked(current == sampling)
-        })
-        .collect();
-    let app = app.clone();
-    let button = Button::new("transform-sampling")
-        .label(current.label())
-        .outline()
-        .small()
-        // Same caret affordance as the ui::dropdown helper (gpui-component
-        // button.rs dropdown_caret).
-        .dropdown_caret(true)
-        .w(px(120.0))
-        .disabled(!enabled);
-    button
-        .dropdown_menu(move |menu, _, _| crate::ui::build_menu(&app, menu, &entries))
-        .into_any_element()
 }
 
 /// What one zoom header button does (the zoom toolbar's Fit / 100% / +

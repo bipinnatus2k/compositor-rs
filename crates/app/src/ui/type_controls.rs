@@ -1,13 +1,17 @@
-//! Port of the Type tool's option bar (`TypeControls.swift`). The bar's
-//! render body still lives in the options header (ui/navigation_tool_header.rs)
-//! until the per-tool carve; this file holds its font-catalog and alignment
-//! helpers.
+//! Port of the Type tool's option bar (`TypeControls.swift`): the bar's
+//! render body plus its font-catalog and alignment helpers.
 
 use gpui_kit::component::Selectable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::{ParentElement, SharedString, Styled};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::{
+    Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, px,
+};
 
 use crate::state::AppState;
+use crate::ui::{MenuEntry, div_row, dropdown, text_label};
 
 pub(crate) const FONT_MENU_CAP: usize = 250;
 
@@ -100,6 +104,135 @@ pub(crate) fn alignment_buttons(
         );
     }
     row
+}
+
+impl AppState {
+    /// `TypeControls.swift`'s bar controls: font, size, color, alignment,
+    /// tracking, leading, and the draft buttons (Cancel/Done while a text
+    /// draft is open, Edit Text otherwise).
+    pub(crate) fn type_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let app = cx.entity().downgrade();
+        let style = self.tab().session.current_text_style();
+        let font = style.font_name.clone();
+        let names = font_menu_names(&font, available_font_names(), FONT_MENU_CAP);
+        let entries = names
+            .into_iter()
+            .map(|name| {
+                let chosen = name.clone();
+                MenuEntry::new(name.clone(), move |state, _, cx| {
+                    let chosen = chosen.clone();
+                    state.tab().session.change_text_style(move |style| {
+                        style.font_name = chosen;
+                    });
+                    state.touch(cx);
+                })
+                .checked(style.font_name == name)
+            })
+            .collect();
+        let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let color = self.tab().session.type_color();
+        let color_rgb = (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
+        let has_document = self.tab().session.document.is_some();
+        let has_draft = self.tab().session.text_draft.is_some();
+        let active_is_text = self
+            .tab()
+            .session
+            .active_layer()
+            .and_then(|layer| layer.live_text())
+            .is_some();
+
+        let mut controls = vec![
+            dropdown(&app, "type-font", font, px(150.0), entries).into_any_element(),
+            // The unit hugs its field (Swift unitSuffix HStack spacing 2,
+            // ToolHeaderStyle.swift:13-18): a tighter gap than the row's
+            // control spacing.
+            div_row()
+                .gap_1()
+                .child(
+                    Input::new(&self.type_size_input)
+                        .id("type-size")
+                        .small()
+                        .w(px(52.0)),
+                )
+                .child(text_label("px", true))
+                .into_any_element(),
+            gpui_kit::div()
+                .id("type-color")
+                .w(px(36.0))
+                .h(px(18.0))
+                .rounded_xs()
+                .border_1()
+                .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
+                .bg(gpui_kit::rgb(color_rgb))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_text_color_picker_ui(window, cx);
+                }))
+                .into_any_element(),
+            alignment_buttons(&app, style.alignment).into_any_element(),
+            div_row()
+                .child(text_label("Tracking", true))
+                .child(
+                    Input::new(&self.type_tracking_input)
+                        .id("type-tracking")
+                        .small()
+                        .w(px(48.0)),
+                )
+                .into_any_element(),
+            div_row()
+                .child(text_label("Leading", true))
+                .child(
+                    Input::new(&self.type_leading_input)
+                        .id("type-leading")
+                        .small()
+                        .w(px(52.0)),
+                )
+                .into_any_element(),
+        ];
+        if has_draft {
+            controls.push(
+                Button::new("type-cancel")
+                    .label("Cancel")
+                    .small()
+                    .disabled(!has_document)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.tab().session.cancel_text();
+                        this.sync_inline_text(window, cx);
+                        this.sync_text_style_inputs(window, cx);
+                        this.touch(cx);
+                    }))
+                    .into_any_element(),
+            );
+            controls.push(
+                Button::new("type-done")
+                    .label("Done")
+                    .small()
+                    .primary()
+                    .disabled(!has_document)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.tab().session.finish_text();
+                        this.sync_inline_text(window, cx);
+                        this.sync_text_style_inputs(window, cx);
+                        this.touch(cx);
+                    }))
+                    .into_any_element(),
+            );
+        } else {
+            controls.push(
+                Button::new("type-edit")
+                    .label("Edit Text")
+                    .small()
+                    .disabled(!has_document || !active_is_text)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.tab().session.edit_active_text();
+                        this.sync_inline_text(window, cx);
+                        this.sync_text_style_inputs(window, cx);
+                        this.touch(cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        controls
+    }
 }
 
 #[cfg(test)]

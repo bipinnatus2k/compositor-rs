@@ -1,19 +1,21 @@
-//! Port of the selection-amount panel's surface
-//! (`LassoControls.swift`, whose slider companion the amount field
-//! cites): open/OK/Cancel actions, the panel body and the amount
-//! parsing/slider mapping shared by feather/expand/contract.
+//! Port of the selection tools' surfaces (`LassoControls.swift`): open/OK/
+//! Cancel actions, the amount panel body and the amount parsing/slider
+//! mapping shared by feather/expand/contract, plus the option-bar controls
+//! the Marquee/Lasso/Wand tools share.
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::{AnyElement, AppContext, Context, IntoElement, ParentElement, Styled, Window, px};
 
+use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::SelectionAmountOperation;
 
 use crate::sheets_ui::{parse_input_usize, sheet_row};
 use crate::state::AppState;
 use crate::ui::floating_panel::AmountPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::text_label;
+use crate::ui::navigation_tool_header::{checkbox, menu_entries};
+use crate::ui::{dropdown, labeled_slider, text_label};
 
 impl AppState {
     /// `session.selectionAmountOperation` → selectionAmountPanel, title
@@ -186,6 +188,114 @@ impl AppState {
             ));
         }
         body.into_any_element()
+    }
+
+    /// `LassoControls.swift`'s Marquee controls: the Rectangle/Ellipse
+    /// shape picker.
+    pub(crate) fn marquee_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let app = cx.entity().downgrade();
+        let kind = self.tab().session.marquee_kind;
+        vec![
+            dropdown(
+                &app,
+                "marquee-kind",
+                if kind == LassoKind::Ellipse {
+                    "Ellipse"
+                } else {
+                    "Rectangle"
+                },
+                px(100.0),
+                menu_entries(
+                    [
+                        (LassoKind::Rectangle, "Rectangle"),
+                        (LassoKind::Ellipse, "Ellipse"),
+                    ],
+                    kind,
+                    |session, value| session.marquee_kind = value,
+                ),
+            )
+            .into_any_element(),
+        ]
+    }
+
+    /// `LassoControls.swift`'s Lasso controls: the Freehand/Polygonal
+    /// kind picker.
+    pub(crate) fn lasso_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let app = cx.entity().downgrade();
+        let kind = self.tab().session.lasso_kind;
+        vec![
+            dropdown(
+                &app,
+                "lasso-kind",
+                if kind == LassoKind::Polygonal {
+                    "Polygonal"
+                } else {
+                    "Freehand"
+                },
+                px(100.0),
+                menu_entries(
+                    [
+                        (LassoKind::Freehand, "Freehand"),
+                        (LassoKind::Polygonal, "Polygonal"),
+                    ],
+                    kind,
+                    |session, value| session.lasso_kind = value,
+                ),
+            )
+            .into_any_element(),
+        ]
+    }
+
+    /// `LassoControls.swift`'s Wand controls: the Wand/Object mode picker,
+    /// the tolerance slider and the sample checkboxes.
+    pub(crate) fn wand_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let app = cx.entity().downgrade();
+        let mode = self.tab().session.wand_mode;
+        let settings = self.tab().session.wand_settings;
+        vec![
+            dropdown(
+                &app,
+                "wand-mode",
+                match mode {
+                    WandMode::Wand => "Wand",
+                    WandMode::Object => "Object",
+                },
+                px(84.0),
+                menu_entries(
+                    [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
+                    mode,
+                    |session, value| session.wand_mode = value,
+                ),
+            )
+            .into_any_element(),
+            labeled_slider(
+                "Tolerance",
+                &self.wand_slider,
+                format!("{}", settings.tolerance),
+                px(90.0),
+            )
+            .into_any_element(),
+            checkbox(
+                &app,
+                "wand-contiguous",
+                "Contiguous",
+                settings.contiguous,
+                |state, checked, _, cx| {
+                    state.tab().session.wand_settings.contiguous = checked;
+                    state.touch(cx);
+                },
+            ),
+            checkbox(
+                &app,
+                "wand-all-layers",
+                "Sample All Layers",
+                settings.sample_all_layers,
+                |state, checked, _, cx| {
+                    state.tab().session.wand_settings.sample_all_layers = checked;
+                    state.touch(cx);
+                },
+            ),
+        ]
     }
 }
 

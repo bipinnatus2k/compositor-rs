@@ -1,14 +1,16 @@
-//! The modal sheets themselves: the centered overlay panel, per-sheet bodies,
-//! and the OK/Cancel actions (including PNG export, .comp save and open).
+//! The sheet host: the centered overlay panel with its title bar and
+//! footer, the per-sheet body dispatcher, the OK/Cancel actions, and the
+//! shared row/slider helpers. Each sheet's content lives beside its Swift
+//! source file (`ui/*_sheet.rs`); the arms with no Swift sheet view — the
+//! port's NSAlert/NSSavePanel stand-ins — keep their bodies here.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, point, prelude::FluentBuilder as _, px,
-    rgba, size,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Styled, Window, canvas, point,
+    px, rgba, size,
 };
 
 use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
@@ -20,7 +22,7 @@ use compositor_core::tools::brush::RasterEdit;
 use crate::project::UnsavedChoice;
 
 use crate::state::{AppState, Sheet};
-use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
+use crate::ui::text_label;
 
 fn sheet_title(kind: Sheet) -> &'static str {
     match kind {
@@ -252,320 +254,90 @@ impl AppState {
         Some(overlay.into_any_element())
     }
 
+    /// The body dispatcher: each sheet's content lives beside its Swift
+    /// source file. The three arms with no Swift sheet file — the port's
+    /// NSAlert/NSSavePanel stand-ins — keep their bodies in this host.
     fn sheet_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let app = cx.entity().downgrade();
         let kind = match self.sheet.as_ref() {
             Some(sheet) => sheet.kind,
             None => return gpui_kit::div().into_any_element(),
         };
-        let mut body = gpui_kit::div().flex().flex_col().gap_1();
-
         match kind {
-            Sheet::ImageSize => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let percent = sheet.percent;
-                let link = sheet.link;
-                body = body
-                    .child(sheet_row(
-                        "Width",
-                        Input::new(&sheet.width).id("size-width").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Height",
-                        Input::new(&sheet.height).id("size-height").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Unit",
-                        labeled_checkbox(
-                            &app,
-                            "size-percent",
-                            "Percent",
-                            percent,
-                            |state, checked, _, cx| {
-                                if let Some(sheet) = state.sheet.as_mut() {
-                                    sheet.percent = checked;
-                                }
-                                state.notify_only(cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ))
-                    .child(sheet_row(
-                        "Resolution",
-                        gpui_kit::div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Input::new(&sheet.resolution)
-                                    .id("size-resolution")
-                                    .w(px(80.0)),
-                            )
-                            .child(text_label("Pixels/Inch", true)),
-                    ))
-                    .child(sheet_row(
-                        "Constrain",
-                        labeled_checkbox(
-                            &app,
-                            "size-link",
-                            "Link width and height (keep aspect)",
-                            link,
-                            |state, checked, _, cx| {
-                                if let Some(sheet) = state.sheet.as_mut() {
-                                    sheet.link = checked;
-                                }
-                                state.notify_only(cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ));
-            }
-            Sheet::CanvasSize => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let anchor = sheet.anchor;
-                let relative = sheet.relative;
-                body = body
-                    .child(sheet_row(
-                        "Width",
-                        Input::new(&sheet.width).id("canvas-width").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Height",
-                        Input::new(&sheet.height).id("canvas-height").w(px(120.0)),
-                    ))
-                    .child(sheet_row(
-                        "Relative",
-                        labeled_checkbox(
-                            &app,
-                            "canvas-relative",
-                            "Relative (add to current size)",
-                            relative,
-                            |state, checked, _, cx| {
-                                if let Some(sheet) = state.sheet.as_mut() {
-                                    sheet.relative = checked;
-                                }
-                                state.notify_only(cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ))
-                    .child(sheet_row("Anchor", anchor_picker(anchor, cx)));
-            }
-            Sheet::ExportPng | Sheet::SaveComp => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let hint = match kind {
-                    Sheet::ExportPng => "The composited canvas is written as a PNG.",
-                    Sheet::SaveComp => "The project is saved as a .comp package folder.",
-                    _ => "PNG/JPEG images open as a new layer; .comp folders open as projects.",
-                };
-                body = body
-                    .child(sheet_row(
-                        "Path",
-                        Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
-                    ))
-                    .child(sheet_row("", text_label(hint, true)));
-            }
-            Sheet::ExportJpeg => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let matte = sheet.preset;
-                let quality = {
-                    let cx_app: &gpui_kit::App = cx;
-                    self.sheet_value(cx_app, 0)
-                };
-                let quality_text = format!("{}%", (quality * 100.0).round() as i32);
-                let sliders = sheet.sliders.clone();
-                // The live encoded preview and its status line
-                // (JPEGExportSheet's ZStack + ByteCountFormatter row): OK
-                // stays disabled until the preview matches the options.
-                let preview = sheet.jpeg_preview.clone();
-                let ready = sheet.jpeg_ready == Some((quality as f64, matte));
-                let status = if ready {
-                    format!(
-                        "{} · encoded preview, fitted to window",
-                        sheet.jpeg_size_label
-                    )
-                } else {
-                    "Updating preview…".to_string()
-                };
-                body = body
-                    .child(sheet_row(
-                        "Path",
-                        Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
-                    ))
-                    .child(
-                        gpui_kit::div()
-                            .w(px(280.0))
-                            .h(px(160.0))
-                            .bg(gpui_kit::rgb(crate::ui::BG_INSET))
-                            .rounded_sm()
-                            .overflow_hidden()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when_some(preview, |frame, image| {
-                                frame.child(gpui_kit::img(image).max_w_full().max_h_full())
-                            }),
-                    )
-                    .child(sheet_row("", text_label(status, true)))
-                    .child(sheet_row(
-                        "Quality",
-                        labeled_slider(&sliders, 0, &quality_text),
-                    ))
-                    .child(sheet_row(
-                        "Matte",
-                        dropdown(
-                            &app,
-                            "jpeg-matte",
-                            if matte == 1 { "Black" } else { "White" },
-                            px(140.0),
-                            vec![
-                                MenuEntry::new("White", |state: &mut AppState, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.preset = 0;
-                                    }
-                                    state.refresh_jpeg_preview(cx);
-                                }),
-                                MenuEntry::new("Black", |state: &mut AppState, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.preset = 1;
-                                    }
-                                    state.refresh_jpeg_preview(cx);
-                                }),
-                            ],
-                        ),
-                    ))
-                    .child(sheet_row(
-                        "",
-                        text_label(
-                            "Transparency flattens onto the matte color. JPEG has no alpha.",
-                            true,
-                        ),
-                    ));
-            }
-            Sheet::Trim => {
-                let sheet = self.sheet.as_ref().unwrap();
-                let based_on = sheet.based_on;
-                let sides = sheet.sides;
-                body = body
-                    .child(sheet_row(
-                        "Based On",
-                        dropdown(
-                            &app,
-                            "trim-based-on",
-                            match based_on {
-                                1 => "Top Left Pixel Color",
-                                2 => "Bottom Right Pixel Color",
-                                _ => "Transparent Pixels",
-                            },
-                            px(210.0),
-                            vec![
-                                MenuEntry::new("Transparent Pixels", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.based_on = 0;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                                MenuEntry::new("Top Left Pixel Color", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.based_on = 1;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                                MenuEntry::new("Bottom Right Pixel Color", |state, _, cx| {
-                                    if let Some(sheet) = state.sheet.as_mut() {
-                                        sheet.based_on = 2;
-                                    }
-                                    state.notify_only(cx);
-                                }),
-                            ],
-                        ),
-                    ))
-                    .child(sheet_row(
-                        "Trim",
-                        gpui_kit::div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .child(
-                                labeled_checkbox(
-                                    &app,
-                                    "trim-top",
-                                    "Top",
-                                    sides[0],
-                                    make_side_handler(0),
-                                )
-                                .into_any_element(),
-                            )
-                            .child(
-                                labeled_checkbox(
-                                    &app,
-                                    "trim-bottom",
-                                    "Bottom",
-                                    sides[1],
-                                    make_side_handler(1),
-                                )
-                                .into_any_element(),
-                            )
-                            .child(
-                                labeled_checkbox(
-                                    &app,
-                                    "trim-left",
-                                    "Left",
-                                    sides[2],
-                                    make_side_handler(2),
-                                )
-                                .into_any_element(),
-                            )
-                            .child(
-                                labeled_checkbox(
-                                    &app,
-                                    "trim-right",
-                                    "Right",
-                                    sides[3],
-                                    make_side_handler(3),
-                                )
-                                .into_any_element(),
-                            ),
-                    ))
-                    .child(sheet_row(
-                        "Tolerance",
-                        Input::new(&sheet.tolerance)
-                            .id("trim-tolerance")
-                            .w(px(80.0)),
-                    ));
-            }
-            Sheet::About => {
-                body = body.child(
-                    gpui_kit::div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(text_label("Compositor", false).text_size(px(14.0)))
-                        .child(text_label(
-                            "A Photoshop-like image editor built on the compositor-core engine and GPUI.",
-                            true,
-                        )),
-                );
-            }
-            Sheet::Confirm | Sheet::Alert => {
-                let message = self
-                    .sheet
-                    .as_ref()
-                    .map(|s| s.message.clone())
-                    .unwrap_or_default();
-                for line in message.lines() {
-                    body = body.child(text_label(line.to_string(), false));
-                }
-                if kind == Sheet::Confirm {
-                    if self.delete_ask_ids.is_some() {
-                        // The delete ask's informative text (the alert's
-                        // `informativeText`, LiveLayerMask.swift:117).
-                        body = body.child(text_label(crate::flows::DELETE_LIVE_MASK_INFO, true));
-                    } else {
-                        body = body.child(text_label(crate::project::UNSAVED_CHANGES_INFO, true));
-                    }
-                }
+            Sheet::ImageSize => self.image_size_body(cx),
+            Sheet::CanvasSize => self.canvas_size_body(cx),
+            Sheet::ExportPng | Sheet::SaveComp => self.path_prompt_body(cx),
+            Sheet::ExportJpeg => self.jpeg_export_body(cx),
+            Sheet::Trim => self.trim_body(cx),
+            Sheet::About => self.about_body(cx),
+            Sheet::Confirm | Sheet::Alert => self.alert_body(cx),
+        }
+    }
+
+    /// The PNG-export / .comp-save path prompt. Swift drives both flows
+    /// through `NSSavePanel` (ImageExporter.swift / ProjectStore.swift) and
+    /// has no sheet view for them; the port's path field is the recorded
+    /// stand-in, so the body lives with the sheet host.
+    fn path_prompt_body(&mut self, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let kind = match self.sheet.as_ref() {
+            Some(sheet) => sheet.kind,
+            None => return gpui_kit::div().into_any_element(),
+        };
+        let sheet = self.sheet.as_ref().unwrap();
+        let hint = match kind {
+            Sheet::ExportPng => "The composited canvas is written as a PNG.",
+            Sheet::SaveComp => "The project is saved as a .comp package folder.",
+            _ => "PNG/JPEG images open as a new layer; .comp folders open as projects.",
+        };
+        gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(sheet_row(
+                "Path",
+                Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
+            ))
+            .child(sheet_row("", text_label(hint, true)))
+            .into_any_element()
+    }
+
+    /// The About sheet's body: the app name and one tagline (Swift shows the
+    /// standard about window instead — the deviation H-ui-app.md records).
+    fn about_body(&mut self, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(text_label("Compositor", false).text_size(px(14.0)))
+            .child(text_label(
+                "A Photoshop-like image editor built on the compositor-core engine and GPUI.",
+                true,
+            ))
+            .into_any_element()
+    }
+
+    /// The Confirm/Alert message body: the alert's `messageText` lines plus
+    /// the Confirm sheet's informative line.
+    fn alert_body(&mut self, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let kind = match self.sheet.as_ref() {
+            Some(sheet) => sheet.kind,
+            None => return gpui_kit::div().into_any_element(),
+        };
+        let message = self
+            .sheet
+            .as_ref()
+            .map(|s| s.message.clone())
+            .unwrap_or_default();
+        let mut body = gpui_kit::div().flex().flex_col().gap_1();
+        for line in message.lines() {
+            body = body.child(text_label(line.to_string(), false));
+        }
+        if kind == Sheet::Confirm {
+            if self.delete_ask_ids.is_some() {
+                // The delete ask's informative text (the alert's
+                // `informativeText`, LiveLayerMask.swift:117).
+                body = body.child(text_label(crate::flows::DELETE_LIVE_MASK_INFO, true));
+            } else {
+                body = body.child(text_label(crate::project::UNSAVED_CHANGES_INFO, true));
             }
         }
         body.into_any_element()
@@ -881,42 +653,6 @@ pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
         },
     )
     .size_full()
-}
-
-fn make_side_handler(
-    index: usize,
-) -> impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static {
-    move |state, checked, _, cx| {
-        if let Some(sheet) = state.sheet.as_mut() {
-            sheet.sides[index] = checked;
-        }
-        state.notify_only(cx);
-    }
-}
-
-fn anchor_picker(anchor: usize, cx: &mut Context<AppState>) -> gpui_kit::AnyElement {
-    let mut grid = gpui_kit::div().flex().flex_row().gap_0p5();
-    for index in 0..9 {
-        grid = grid.child(
-            gpui_kit::div()
-                .id(SharedString::from(format!("anchor-{}", index)))
-                .w(px(26.0))
-                .h(px(26.0))
-                .rounded_xs()
-                .border_1()
-                .border_color(gpui_kit::rgb(crate::ui::FG_DISABLED))
-                .when(index == anchor, |cell| {
-                    cell.bg(gpui_kit::rgb(crate::ui::ACCENT))
-                })
-                .on_click(cx.listener(move |state, _, _, cx| {
-                    if let Some(sheet) = state.sheet.as_mut() {
-                        sheet.anchor = index;
-                    }
-                    state.notify_only(cx);
-                })),
-        );
-    }
-    grid.into_any_element()
 }
 
 /// A sheet path field's value as an optional save target (empty = Cancel).
