@@ -1,5 +1,5 @@
 //! The Swift `UI/` mirror: one file per Swift source where a direct
-//! counterpart exists, plus this root's small shared widget helpers —
+//! counterpart exists, plus this root's small shared widget structs —
 //! the app palette, option dropdowns, labeled sliders, checkboxes and
 //! text rows.
 
@@ -29,15 +29,15 @@ pub mod type_controls;
 use std::rc::Rc;
 
 use gpui_kit::component::{
-    Sizable,
+    Disableable, Sizable,
     button::Button,
     checkbox::Checkbox,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     slider::{Slider, SliderState},
 };
 use gpui_kit::{
-    Context, ElementId, Entity, IntoElement, ParentElement, Pixels, SharedString, Styled,
-    WeakEntity, Window, px,
+    App, Context, ElementId, Entity, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
+    Styled, WeakEntity, Window, px,
 };
 
 use crate::state::AppState;
@@ -91,7 +91,41 @@ pub fn rgb_u32(hex: u32) -> gpui_kit::Rgba {
 }
 
 /// A handler that mutates the app state, run from menus and dropdowns.
+/// Transitional until AppState dissolves: menu entries will then speak in
+/// session terms, and only the dispatch adapters (not the components)
+/// change with it.
 pub type AppHandler = Rc<dyn Fn(&mut AppState, &mut Window, &mut Context<AppState>)>;
+
+/// Runs one picked menu entry's handler. Which entity owns the state the
+/// handler mutates is the dispatcher's business, not the dropdown's.
+pub type MenuDispatch = Rc<dyn Fn(&AppHandler, &mut Window, &mut App)>;
+
+/// The app-shell dispatch: run the entry's handler inside the app entity.
+pub fn app_dispatch(app: &WeakEntity<AppState>) -> MenuDispatch {
+    let app = app.clone();
+    Rc::new(move |handler, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, |state, cx| handler(state, window, cx)).ok();
+    })
+}
+
+/// A checkbox's new value, reported at `App` level.
+pub type CheckedChange = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// The app-shell change adapter: run an AppState-flavored handler inside
+/// the app entity when a checkbox flips.
+pub fn app_on_change(
+    app: &WeakEntity<AppState>,
+    handler: impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static,
+) -> CheckedChange {
+    let app = app.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |checked, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, move |state, cx| handler(state, checked, window, cx))
+            .ok();
+    })
+}
 
 /// One entry of an option dropdown.
 pub struct MenuEntry {
@@ -139,26 +173,9 @@ impl MenuEntry {
     }
 }
 
-/// A small dropdown button whose menu calls back into the app state.
-pub fn dropdown(
-    app: &WeakEntity<AppState>,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    width: Pixels,
-    entries: Vec<MenuEntry>,
-) -> impl gpui_kit::IntoElement {
-    let app = app.clone();
-    Button::new(id)
-        .label(label)
-        .outline()
-        .small()
-        .w(width)
-        // Native caret affordance (gpui-component button.rs dropdown_caret);
-        // no need to fake it with a "▾" text suffix.
-        .dropdown_caret(true)
-        .dropdown_menu(move |menu, _, _| build_menu(&app, menu, &entries))
-}
-
+/// The app-shell menu assembly: one `PopupMenu` item per entry, each click
+/// running the entry's handler inside the app entity. Shared by the
+/// layers-panel footer menus' `dropdown_menu` closures.
 pub(crate) fn build_menu(
     app: &WeakEntity<AppState>,
     mut menu: PopupMenu,
@@ -183,33 +200,187 @@ pub(crate) fn build_menu(
     menu
 }
 
-/// A compact labeled slider row: `Label [slider] value`.
-pub fn labeled_slider(
-    label: &str,
-    state: &Entity<SliderState>,
-    value: String,
-    slider_width: Pixels,
-) -> impl IntoElement {
-    labeled_slider_row(label, None)
-        .flex_shrink_0()
-        .child(gpui_kit::div().w(slider_width).child(Slider::new(state)))
-        .child(
-            gpui_kit::div()
-                .w(px(38.0))
-                // ToolHeaderStyle.swift:7: the control font is 12.
-                .text_size(px(12.0))
-                .text_color(rgb_u32(FG_TEXT))
-                .child(SharedString::from(value)),
-        )
+/// A small dropdown button whose menu is dispatched through `MenuDispatch`.
+#[derive(IntoElement)]
+pub struct Dropdown {
+    id: ElementId,
+    label: SharedString,
+    width: Pixels,
+    disabled: bool,
+    entries: Vec<MenuEntry>,
+    dispatch: MenuDispatch,
 }
 
-/// The labeled-slider row both slider surfaces share: a flex row whose
-/// leading child is the dim control-font label, in a fixed-width column
-/// when `label_width` is given. The options header adds a pixel-width
-/// slider and the value readout ([`labeled_slider`]); the sheets and
-/// panels add vertical padding and a full-width slider (sheets_ui.rs's
-/// wrapper, whose shape is frozen by the panel bodies' call sites).
-pub(crate) fn labeled_slider_row(label: &str, label_width: Option<Pixels>) -> gpui_kit::Div {
+impl Dropdown {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Dropdown {
+            id: id.into(),
+            label: label.into(),
+            width: px(80.0),
+            disabled: false,
+            entries: Vec::new(),
+            dispatch: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_width(mut self, width: Pixels) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn with_entries(mut self, entries: Vec<MenuEntry>) -> Self {
+        self.entries = entries;
+        self
+    }
+
+    pub fn with_dispatch(mut self, dispatch: MenuDispatch) -> Self {
+        self.dispatch = dispatch;
+        self
+    }
+}
+
+impl RenderOnce for Dropdown {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let dispatch = self.dispatch;
+        Button::new(self.id)
+            .label(self.label)
+            .outline()
+            .small()
+            .w(self.width)
+            .disabled(self.disabled)
+            // Native caret affordance (gpui-component button.rs dropdown_caret);
+            // no need to fake it with a "▾" text suffix.
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| menu_with_dispatch(menu, &self.entries, &dispatch))
+    }
+}
+
+/// Wire one dropdown's entries into a `PopupMenu`, handing every click to
+/// `dispatch` with the entry's handler.
+fn menu_with_dispatch(
+    mut menu: PopupMenu,
+    entries: &[MenuEntry],
+    dispatch: &MenuDispatch,
+) -> PopupMenu {
+    for entry in entries {
+        if entry.separator {
+            menu = menu.separator();
+            continue;
+        }
+        let dispatch = dispatch.clone();
+        let handler = entry.handler.clone();
+        menu = menu.item(
+            PopupMenuItem::new(entry.label.clone())
+                .checked(entry.checked)
+                .disabled(!entry.enabled)
+                .on_click(move |_, window, cx| dispatch(&handler, window, cx)),
+        );
+    }
+    menu
+}
+
+/// A checkbox with a label; the flipped value is reported through
+/// `on_change` — the checkbox owns no truth of its own.
+#[derive(IntoElement)]
+pub struct LabeledCheckbox {
+    id: ElementId,
+    label: SharedString,
+    checked: bool,
+    on_change: CheckedChange,
+}
+
+impl LabeledCheckbox {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        LabeledCheckbox {
+            id: id.into(),
+            label: label.into(),
+            checked: false,
+            on_change: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn with_on_change(mut self, on_change: CheckedChange) -> Self {
+        self.on_change = on_change;
+        self
+    }
+}
+
+impl RenderOnce for LabeledCheckbox {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Checkbox::new(self.id)
+            .label(self.label)
+            .checked(self.checked)
+            .on_change(move |checked, window, cx| (self.on_change)(*checked, window, cx))
+            // ToolHeaderStyle.swift:7: the control font is 12.
+            .text_size(px(12.0))
+            // The checkbox root lays its indicator out items_start
+            // (gpui-component checkbox.rs), which top-aligns the box against the
+            // text at this small size; centering overrides the refinement.
+            .items_center()
+    }
+}
+
+/// The header bar's labeled slider row: `Label [slider] value`.
+#[derive(IntoElement)]
+pub struct LabeledSlider {
+    label: SharedString,
+    slider: Entity<SliderState>,
+    value: SharedString,
+    slider_width: Pixels,
+}
+
+impl LabeledSlider {
+    pub fn new(
+        label: impl Into<SharedString>,
+        slider: Entity<SliderState>,
+        value: impl Into<SharedString>,
+        slider_width: Pixels,
+    ) -> Self {
+        LabeledSlider {
+            label: label.into(),
+            slider,
+            value: value.into(),
+            slider_width,
+        }
+    }
+}
+
+impl RenderOnce for LabeledSlider {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        slider_row(self.label, None)
+            .flex_shrink_0()
+            .child(
+                gpui_kit::div()
+                    .w(self.slider_width)
+                    .child(Slider::new(&self.slider)),
+            )
+            .child(
+                gpui_kit::div()
+                    .w(px(38.0))
+                    // ToolHeaderStyle.swift:7: the control font is 12.
+                    .text_size(px(12.0))
+                    .text_color(rgb_u32(FG_TEXT))
+                    .child(self.value),
+            )
+    }
+}
+
+/// The labeled-row spine the slider rows share: a flex row whose leading
+/// child is the dim control-font label, in a fixed-width column when
+/// `label_width` is given. The header bar adds a pixel-width slider and the
+/// value readout ([`LabeledSlider`]); the sheets use [`crate::ui::sheets_ui::SheetRow`]
+/// for the padded 110px variant.
+fn slider_row(label: SharedString, label_width: Option<Pixels>) -> gpui_kit::Div {
     let mut label_cell = gpui_kit::div()
         // ToolHeaderStyle.swift:7: the control font is 12.
         .text_size(px(12.0))
@@ -222,34 +393,7 @@ pub(crate) fn labeled_slider_row(label: &str, label_width: Option<Pixels>) -> gp
         .flex_row()
         .items_center()
         .gap_2()
-        .child(label_cell.child(SharedString::from(label.to_string())))
-}
-
-/// A checkbox with a label that writes the new value back through `handler`.
-pub fn labeled_checkbox(
-    app: &WeakEntity<AppState>,
-    id: impl Into<ElementId>,
-    label: &str,
-    checked: bool,
-    handler: impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static,
-) -> impl IntoElement {
-    let app = app.clone();
-    let handler = Rc::new(handler);
-    Checkbox::new(id)
-        .label(label)
-        .checked(checked)
-        .on_change(move |checked, window, cx| {
-            let handler = handler.clone();
-            let checked = *checked;
-            app.update(cx, move |state, cx| handler(state, checked, window, cx))
-                .ok();
-        })
-        // ToolHeaderStyle.swift:7: the control font is 12.
-        .text_size(px(12.0))
-        // The checkbox root lays its indicator out items_start
-        // (gpui-component checkbox.rs), which top-aligns the box against the
-        // text at this small size; centering overrides the refinement.
-        .items_center()
+        .child(label_cell.child(label))
 }
 
 /// A plain text label in header/panel style.

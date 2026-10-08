@@ -3,19 +3,20 @@
 //! filter panel opens docked per Swift's placement).
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, px};
 
 use compositor_core::adjust::LevelsChannel;
 use compositor_core::filters::FilterKind;
 
-use crate::sheets_ui::{labeled_slider, sheet_row};
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
 use crate::ui::floating_panel::FilterPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::levels_sheet::levels_channel_label;
 use crate::ui::sheets::SliderRole;
-use crate::ui::{MenuEntry, dropdown, labeled_checkbox, text_label};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change, text_label};
 
 impl AppState {
     /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
@@ -195,28 +196,28 @@ impl AppState {
                 let can_remove =
                     selected.is_some_and(|index| index > 0 && index + 1 < points.len());
                 body = body
-                    .child(sheet_row(
-                        "Channel",
-                        dropdown(
-                            &app,
-                            "curves-channel",
-                            levels_channel_label(channel),
-                            px(90.0),
-                            LevelsChannel::ALL
-                                .iter()
-                                .map(|choice| {
-                                    let choice = *choice;
-                                    MenuEntry::new(
-                                        levels_channel_label(choice),
-                                        move |state, _, cx| {
-                                            state.curves_set_channel(choice, cx);
-                                        },
-                                    )
-                                    .checked(channel == choice)
-                                })
-                                .collect(),
+                    .child(
+                        SheetRow::new("Channel").with_control(
+                            Dropdown::new("curves-channel", levels_channel_label(channel))
+                                .with_width(px(90.0))
+                                .with_entries(
+                                    LevelsChannel::ALL
+                                        .iter()
+                                        .map(|choice| {
+                                            let choice = *choice;
+                                            MenuEntry::new(
+                                                levels_channel_label(choice),
+                                                move |state, _, cx| {
+                                                    state.curves_set_channel(choice, cx);
+                                                },
+                                            )
+                                            .checked(channel == choice)
+                                        })
+                                        .collect(),
+                                )
+                                .with_dispatch(app_dispatch(&app)),
                         ),
-                    ))
+                    )
                     .child(
                         gpui_kit::div()
                             .id("curves-canvas")
@@ -267,74 +268,104 @@ impl AppState {
                     );
             }
             FilterKind::GaussianBlur => {
-                body = body.child(labeled_slider(&sliders, 0, "Radius"));
+                body = body.child(SheetRow::new("Radius").with_optional_control(
+                    sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                ));
             }
             FilterKind::MotionBlur => {
                 body = body
-                    .child(labeled_slider(&sliders, 0, "Angle"))
-                    .child(labeled_slider(&sliders, 1, "Distance"));
+                    .child(SheetRow::new("Angle").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Distance").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             FilterKind::AddNoise => {
                 let gaussian = panel.gaussian;
                 let monochromatic = panel.monochromatic;
                 body = body
-                    .child(labeled_slider(&sliders, 0, "Amount"))
-                    .child(sheet_row(
-                        "Distribution",
-                        labeled_checkbox(
-                            &app,
-                            "noise-gaussian",
-                            "Gaussian",
-                            gaussian,
-                            |state, checked, _, cx| {
-                                if let Some(panel) = state.panel_widgets.filter.as_mut() {
-                                    panel.gaussian = checked;
-                                }
-                                state.refresh_filter_preview(cx);
-                            },
-                        )
-                        .into_any_element(),
+                    .child(SheetRow::new("Amount").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ))
-                    .child(sheet_row(
-                        "",
-                        labeled_checkbox(
-                            &app,
-                            "noise-mono",
-                            "Monochromatic",
-                            monochromatic,
-                            |state, checked, _, cx| {
-                                if let Some(panel) = state.panel_widgets.filter.as_mut() {
-                                    panel.monochromatic = checked;
-                                }
-                                state.refresh_filter_preview(cx);
-                            },
-                        )
-                        .into_any_element(),
-                    ));
+                    .child(
+                        SheetRow::new("Distribution").with_control(
+                            LabeledCheckbox::new("noise-gaussian", "Gaussian")
+                                .checked(gaussian)
+                                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                    if let Some(panel) = state.panel_widgets.filter.as_mut() {
+                                        panel.gaussian = checked;
+                                    }
+                                    state.refresh_filter_preview(cx);
+                                })),
+                        ),
+                    )
+                    .child(
+                        SheetRow::new("").with_control(
+                            LabeledCheckbox::new("noise-mono", "Monochromatic")
+                                .checked(monochromatic)
+                                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                    if let Some(panel) = state.panel_widgets.filter.as_mut() {
+                                        panel.monochromatic = checked;
+                                    }
+                                    state.refresh_filter_preview(cx);
+                                })),
+                        ),
+                    );
             }
             FilterKind::LensCorrection => {
-                body = body.child(labeled_slider(&sliders, 0, "Distortion"));
+                body = body.child(SheetRow::new("Distortion").with_optional_control(
+                    sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                ));
             }
             FilterKind::CameraRaw => {
                 body = body
                     .child(text_label("White Balance", false).mb_1())
-                    .child(labeled_slider(&sliders, 0, "Temperature"))
-                    .child(labeled_slider(&sliders, 1, "Tint"))
+                    .child(SheetRow::new("Temperature").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Tint").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ))
                     .child(text_label("Light", false).mb_1())
-                    .child(labeled_slider(&sliders, 2, "Exposure"))
-                    .child(labeled_slider(&sliders, 3, "Contrast"))
-                    .child(labeled_slider(&sliders, 4, "Highlights"))
-                    .child(labeled_slider(&sliders, 5, "Shadows"))
-                    .child(labeled_slider(&sliders, 6, "Whites"))
-                    .child(labeled_slider(&sliders, 7, "Blacks"))
+                    .child(SheetRow::new("Exposure").with_optional_control(
+                        sliders.get(2).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Contrast").with_optional_control(
+                        sliders.get(3).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Highlights").with_optional_control(
+                        sliders.get(4).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Shadows").with_optional_control(
+                        sliders.get(5).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Whites").with_optional_control(
+                        sliders.get(6).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Blacks").with_optional_control(
+                        sliders.get(7).map(|slider| Slider::new(slider).flex_1()),
+                    ))
                     .child(text_label("Color", false).mb_1())
-                    .child(labeled_slider(&sliders, 8, "Vibrance"))
-                    .child(labeled_slider(&sliders, 9, "Saturation"))
+                    .child(SheetRow::new("Vibrance").with_optional_control(
+                        sliders.get(8).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Saturation").with_optional_control(
+                        sliders.get(9).map(|slider| Slider::new(slider).flex_1()),
+                    ))
                     .child(text_label("Effects", false).mb_1())
-                    .child(labeled_slider(&sliders, 10, "Texture"))
-                    .child(labeled_slider(&sliders, 11, "Clarity"))
-                    .child(labeled_slider(&sliders, 12, "Dehaze"))
-                    .child(labeled_slider(&sliders, 13, "Vignette"));
+                    .child(SheetRow::new("Texture").with_optional_control(
+                        sliders.get(10).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Clarity").with_optional_control(
+                        sliders.get(11).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Dehaze").with_optional_control(
+                        sliders.get(12).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Vignette").with_optional_control(
+                        sliders.get(13).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             _ => {
                 body = body.child(text_label(

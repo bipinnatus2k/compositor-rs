@@ -4,15 +4,15 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Disableable, Sizable};
-use gpui_kit::{Context, Entity, FontWeight, IntoElement, ParentElement, Styled, WeakEntity, px};
+use gpui_kit::{Context, Entity, FontWeight, IntoElement, ParentElement, Styled, px};
 
-use compositor_core::transform::{LayerSampling, LayerTransform};
+use compositor_core::transform::LayerSampling;
 
 use crate::state::AppState;
-use crate::ui::navigation_tool_header::checkbox;
-use crate::ui::{div_row, text_label};
+use crate::ui::{
+    Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change, div_row, text_label,
+};
 
 impl AppState {
     /// `TransformInspector.swift`'s bar controls: toggles, the numeric
@@ -36,6 +36,21 @@ impl AppState {
         // The fields gray out while nothing can transform, or while a
         // corner distort owns the edit (the handles are the controls).
         let fields_enabled = (self.tab().session.read(cx).can_transform() || has_edit) && !corners;
+        // The sampling dropdown: grays out under the same conditions.
+        let current = self
+            .transform_displayed(cx)
+            .map(|value| value.sampling)
+            .unwrap_or(LayerSampling::High);
+        let sampling_entries: Vec<MenuEntry> = LayerSampling::ALL
+            .iter()
+            .map(|sampling| {
+                let sampling = *sampling;
+                MenuEntry::new(sampling.label(), move |state, _, cx| {
+                    state.transform_change(move |value| value.sampling = sampling, cx);
+                })
+                .checked(current == sampling)
+            })
+            .collect();
 
         let controls = vec![
             text_label(if mask { "Transform Mask" } else { "Transform" }, false)
@@ -44,12 +59,9 @@ impl AppState {
                 .font_weight(FontWeight::SEMIBOLD)
                 .flex_shrink_0()
                 .into_any_element(),
-            checkbox(
-                &app,
-                "transform-auto-select",
-                "Auto-select",
-                self.tab().session.read(cx).transform_auto_select,
-                |state, checked, _, cx| {
+            LabeledCheckbox::new("transform-auto-select", "Auto-select")
+                .checked(self.tab().session.read(cx).transform_auto_select)
+                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
                     // transformAutoSelect (EditorSession.swift:198). The
                     // canvas press reads it when the next Move press lands.
                     state
@@ -58,38 +70,32 @@ impl AppState {
                         .update(cx, |session, _| session.transform_auto_select = checked);
                     state.persist_tool_defaults(cx);
                     state.touch(cx);
-                },
-            ),
-            checkbox(
-                &app,
-                "transform-show-controls",
-                "Show Controls",
-                self.tab().session.read(cx).shows_transform_controls,
-                |state, checked, _, cx| {
+                }))
+                .into_any_element(),
+            LabeledCheckbox::new("transform-show-controls", "Show Controls")
+                .checked(self.tab().session.read(cx).shows_transform_controls)
+                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session
                         .update(cx, |session, _| session.shows_transform_controls = checked);
                     state.touch(cx);
-                },
-            ),
+                }))
+                .into_any_element(),
             number_field("transform-x", "X", &self.transform_x_input, px(52.0)).into_any_element(),
             number_field("transform-y", "Y", &self.transform_y_input, px(52.0)).into_any_element(),
             number_field("transform-w", "W", &self.transform_w_input, px(52.0)).into_any_element(),
             number_field("transform-h", "H", &self.transform_h_input, px(52.0)).into_any_element(),
-            checkbox(
-                &app,
-                "transform-lock-ratio",
-                "Lock",
-                self.tab().session.read(cx).locks_transform_ratio,
-                |state, checked, _, cx| {
+            LabeledCheckbox::new("transform-lock-ratio", "Lock")
+                .checked(self.tab().session.read(cx).locks_transform_ratio)
+                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session
                         .update(cx, |session, _| session.locks_transform_ratio = checked);
                     state.touch(cx);
-                },
-            ),
+                }))
+                .into_any_element(),
             number_field(
                 "transform-scale",
                 "Scale %",
@@ -104,7 +110,12 @@ impl AppState {
                 px(48.0),
             )
             .into_any_element(),
-            sampling_dropdown(&app, self.transform_displayed(cx), fields_enabled),
+            Dropdown::new("transform-sampling", current.label())
+                .with_width(px(120.0))
+                .disabled(!fields_enabled)
+                .with_entries(sampling_entries)
+                .with_dispatch(app_dispatch(&app))
+                .into_any_element(),
             Button::new("transform-flip-h")
                 .label("Flip H")
                 .small()
@@ -185,39 +196,4 @@ fn number_field(
     div_row()
         .child(text_label(label.to_string(), true))
         .child(Input::new(state).id(id).small().w(width))
-}
-
-/// The sampling dropdown: grays out while nothing can transform, or while
-/// a corner distort owns the edit.
-fn sampling_dropdown(
-    app: &WeakEntity<AppState>,
-    value: Option<LayerTransform>,
-    enabled: bool,
-) -> gpui_kit::AnyElement {
-    let current = value
-        .map(|value| value.sampling)
-        .unwrap_or(LayerSampling::High);
-    let entries: Vec<crate::ui::MenuEntry> = LayerSampling::ALL
-        .iter()
-        .map(|sampling| {
-            let sampling = *sampling;
-            crate::ui::MenuEntry::new(sampling.label(), move |state, _, cx| {
-                state.transform_change(move |value| value.sampling = sampling, cx);
-            })
-            .checked(current == sampling)
-        })
-        .collect();
-    let app = app.clone();
-    let button = Button::new("transform-sampling")
-        .label(current.label())
-        .outline()
-        .small()
-        // Same caret affordance as the ui::dropdown helper (gpui-component
-        // button.rs dropdown_caret).
-        .dropdown_caret(true)
-        .w(px(120.0))
-        .disabled(!enabled);
-    button
-        .dropdown_menu(move |menu, _, _| crate::ui::build_menu(&app, menu, &entries))
-        .into_any_element()
 }

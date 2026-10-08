@@ -4,9 +4,9 @@
 use gpui_kit::component::input::Input;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, px};
 
-use crate::sheets_ui::sheet_row;
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::{MenuEntry, dropdown, labeled_checkbox};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change};
 
 impl AppState {
     /// The Trim sheet's body: the Based On dropdown, the four side
@@ -21,18 +21,18 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Based On",
-                dropdown(
-                    &app,
-                    "trim-based-on",
-                    match based_on {
-                        1 => "Top Left Pixel Color",
-                        2 => "Bottom Right Pixel Color",
-                        _ => "Transparent Pixels",
-                    },
-                    px(210.0),
-                    vec![
+            .child(
+                SheetRow::new("Based On").with_control(
+                    Dropdown::new(
+                        "trim-based-on",
+                        match based_on {
+                            1 => "Top Left Pixel Color",
+                            2 => "Bottom Right Pixel Color",
+                            _ => "Transparent Pixels",
+                        },
+                    )
+                    .with_width(px(210.0))
+                    .with_entries(vec![
                         MenuEntry::new("Transparent Pixels", |state, _, cx| {
                             if let Some(sheet) = state.sheet.as_mut() {
                                 sheet.based_on = 0;
@@ -51,50 +51,45 @@ impl AppState {
                             }
                             state.notify_only(cx);
                         }),
-                    ],
+                    ])
+                    .with_dispatch(app_dispatch(&app)),
                 ),
-            ))
-            .child(sheet_row(
-                "Trim",
-                gpui_kit::div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        labeled_checkbox(&app, "trim-top", "Top", sides[0], make_side_handler(0))
-                            .into_any_element(),
-                    )
-                    .child(
-                        labeled_checkbox(
-                            &app,
-                            "trim-bottom",
-                            "Bottom",
-                            sides[1],
-                            make_side_handler(1),
+            )
+            .child(
+                SheetRow::new("Trim").with_control(
+                    gpui_kit::div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            LabeledCheckbox::new("trim-top", "Top")
+                                .checked(sides[0])
+                                .with_on_change(app_on_change(&app, make_side_handler(0))),
                         )
-                        .into_any_element(),
-                    )
-                    .child(
-                        labeled_checkbox(&app, "trim-left", "Left", sides[2], make_side_handler(2))
-                            .into_any_element(),
-                    )
-                    .child(
-                        labeled_checkbox(
-                            &app,
-                            "trim-right",
-                            "Right",
-                            sides[3],
-                            make_side_handler(3),
+                        .child(
+                            LabeledCheckbox::new("trim-bottom", "Bottom")
+                                .checked(sides[1])
+                                .with_on_change(app_on_change(&app, make_side_handler(1))),
                         )
-                        .into_any_element(),
-                    ),
-            ))
-            .child(sheet_row(
-                "Tolerance",
-                Input::new(&sheet.tolerance)
-                    .id("trim-tolerance")
-                    .w(px(80.0)),
-            ))
+                        .child(
+                            LabeledCheckbox::new("trim-left", "Left")
+                                .checked(sides[2])
+                                .with_on_change(app_on_change(&app, make_side_handler(2))),
+                        )
+                        .child(
+                            LabeledCheckbox::new("trim-right", "Right")
+                                .checked(sides[3])
+                                .with_on_change(app_on_change(&app, make_side_handler(3))),
+                        ),
+                ),
+            )
+            .child(
+                SheetRow::new("Tolerance").with_control(
+                    Input::new(&sheet.tolerance)
+                        .id("trim-tolerance")
+                        .w(px(80.0)),
+                ),
+            )
             .into_any_element()
     }
 }

@@ -4,9 +4,9 @@
 use gpui_kit::component::input::Input;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, px};
 
-use crate::sheets_ui::sheet_row;
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::{labeled_checkbox, text_label};
+use crate::ui::{LabeledCheckbox, app_on_change, text_label};
 
 impl AppState {
     /// The Image Size sheet's body: width/height fields, the Percent unit
@@ -21,60 +21,53 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Width",
-                Input::new(&sheet.width).id("size-width").w(px(120.0)),
-            ))
-            .child(sheet_row(
-                "Height",
-                Input::new(&sheet.height).id("size-height").w(px(120.0)),
-            ))
-            .child(sheet_row(
-                "Unit",
-                labeled_checkbox(
-                    &app,
-                    "size-percent",
-                    "Percent",
-                    percent,
-                    |state, checked, _, cx| {
-                        if let Some(sheet) = state.sheet.as_mut() {
-                            sheet.percent = checked;
-                        }
-                        state.notify_only(cx);
-                    },
-                )
-                .into_any_element(),
-            ))
-            .child(sheet_row(
-                "Resolution",
-                gpui_kit::div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Input::new(&sheet.resolution)
-                            .id("size-resolution")
-                            .w(px(80.0)),
-                    )
-                    .child(text_label("Pixels/Inch", true)),
-            ))
-            .child(sheet_row(
-                "Constrain",
-                labeled_checkbox(
-                    &app,
-                    "size-link",
-                    "Link width and height (keep aspect)",
-                    link,
-                    |state, checked, _, cx| {
-                        if let Some(sheet) = state.sheet.as_mut() {
-                            sheet.link = checked;
-                        }
-                        state.notify_only(cx);
-                    },
-                )
-                .into_any_element(),
-            ))
+            .child(
+                SheetRow::new("Width")
+                    .with_control(Input::new(&sheet.width).id("size-width").w(px(120.0))),
+            )
+            .child(
+                SheetRow::new("Height")
+                    .with_control(Input::new(&sheet.height).id("size-height").w(px(120.0))),
+            )
+            .child(
+                SheetRow::new("Unit").with_control(
+                    LabeledCheckbox::new("size-percent", "Percent")
+                        .checked(percent)
+                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            if let Some(sheet) = state.sheet.as_mut() {
+                                sheet.percent = checked;
+                            }
+                            state.notify_only(cx);
+                        })),
+                ),
+            )
+            .child(
+                SheetRow::new("Resolution").with_control(
+                    gpui_kit::div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Input::new(&sheet.resolution)
+                                .id("size-resolution")
+                                .w(px(80.0)),
+                        )
+                        .child(text_label("Pixels/Inch", true)),
+                ),
+            )
+            .child(
+                SheetRow::new("Constrain").with_control(
+                    LabeledCheckbox::new("size-link", "Link width and height (keep aspect)")
+                        .checked(link)
+                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            if let Some(sheet) = state.sheet.as_mut() {
+                                sheet.link = checked;
+                            }
+                            state.notify_only(cx);
+                        })),
+                ),
+            )
             .into_any_element()
     }
 }

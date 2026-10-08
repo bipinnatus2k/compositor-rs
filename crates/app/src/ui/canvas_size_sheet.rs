@@ -7,9 +7,9 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, prelude::FluentBuilder as _, px,
 };
 
-use crate::sheets_ui::sheet_row;
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::labeled_checkbox;
+use crate::ui::{LabeledCheckbox, app_on_change};
 
 impl AppState {
     /// The Canvas Size sheet's body: width/height fields, the Relative
@@ -24,31 +24,27 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Width",
-                Input::new(&sheet.width).id("canvas-width").w(px(120.0)),
-            ))
-            .child(sheet_row(
-                "Height",
-                Input::new(&sheet.height).id("canvas-height").w(px(120.0)),
-            ))
-            .child(sheet_row(
-                "Relative",
-                labeled_checkbox(
-                    &app,
-                    "canvas-relative",
-                    "Relative (add to current size)",
-                    relative,
-                    |state, checked, _, cx| {
-                        if let Some(sheet) = state.sheet.as_mut() {
-                            sheet.relative = checked;
-                        }
-                        state.notify_only(cx);
-                    },
-                )
-                .into_any_element(),
-            ))
-            .child(sheet_row("Anchor", anchor_picker(anchor, cx)))
+            .child(
+                SheetRow::new("Width")
+                    .with_control(Input::new(&sheet.width).id("canvas-width").w(px(120.0))),
+            )
+            .child(
+                SheetRow::new("Height")
+                    .with_control(Input::new(&sheet.height).id("canvas-height").w(px(120.0))),
+            )
+            .child(
+                SheetRow::new("Relative").with_control(
+                    LabeledCheckbox::new("canvas-relative", "Relative (add to current size)")
+                        .checked(relative)
+                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            if let Some(sheet) = state.sheet.as_mut() {
+                                sheet.relative = checked;
+                            }
+                            state.notify_only(cx);
+                        })),
+                ),
+            )
+            .child(SheetRow::new("Anchor").with_control(anchor_picker(anchor, cx)))
             .into_any_element()
     }
 }

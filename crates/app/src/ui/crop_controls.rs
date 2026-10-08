@@ -6,8 +6,8 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{Context, IntoElement, px};
 
 use crate::state::AppState;
-use crate::ui::dropdown;
 use crate::ui::navigation_tool_header::menu_entries;
+use crate::ui::{Dropdown, app_dispatch};
 
 impl AppState {
     /// `CropControls.swift`'s bar controls: the aspect-ratio dropdown and
@@ -33,7 +33,11 @@ impl AppState {
             |session, value| session.crop_ratio_choice = value.to_string(),
         );
         vec![
-            dropdown(&app, "crop-ratio", choice.clone(), px(92.0), entries).into_any_element(),
+            Dropdown::new("crop-ratio", choice.clone())
+                .with_width(px(92.0))
+                .with_entries(entries)
+                .with_dispatch(app_dispatch(&app))
+                .into_any_element(),
             Button::new("crop-apply")
                 .label("Apply")
                 .small()

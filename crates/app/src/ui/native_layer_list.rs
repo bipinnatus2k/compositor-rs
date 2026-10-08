@@ -23,7 +23,7 @@ use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
 
 use crate::state::AppState;
-use crate::ui::{MenuEntry, dropdown, text_label};
+use crate::ui::{Dropdown, MenuEntry, app_dispatch, text_label};
 
 const THUMB: f32 = 30.0;
 
@@ -241,13 +241,12 @@ impl AppState {
                         .items_center()
                         .gap_2()
                         .child(text_label("Blend", true))
-                        .child(dropdown(
-                            &app,
-                            "blend-mode",
-                            blend_label,
-                            px(130.0),
-                            self.blend_menu_entries(cx),
-                        ))
+                        .child(
+                            Dropdown::new("blend-mode", blend_label)
+                                .with_width(px(130.0))
+                                .with_entries(self.blend_menu_entries(cx))
+                                .with_dispatch(app_dispatch(&app)),
+                        )
                         .child(text_label("Opacity", true))
                         .child(gpui_kit::div().w(px(60.0)).child(
                             gpui_kit::component::slider::Slider::new(&self.opacity_slider),

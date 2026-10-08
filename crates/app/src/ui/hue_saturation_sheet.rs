@@ -1,14 +1,15 @@
 //! Port of the Hue/Saturation sheet (`HueSaturationSheet.swift`) as
 //! the floating panel: open/OK/Cancel actions and the panel body.
 
+use gpui_kit::component::slider::Slider;
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled};
 
-use crate::sheets_ui::{labeled_slider, sheet_row};
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
 use crate::ui::floating_panel::HueSaturationPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::labeled_checkbox;
 use crate::ui::sheets::SliderRole;
+use crate::ui::{LabeledCheckbox, app_on_change};
 
 impl AppState {
     /// `session.hueSaturation != nil` → adjustmentPanel, title
@@ -75,25 +76,33 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(labeled_slider(&sliders, 0, "Hue"))
-            .child(labeled_slider(&sliders, 1, "Saturation"))
-            .child(labeled_slider(&sliders, 2, "Lightness"))
-            .child(sheet_row(
-                "Colorize",
-                labeled_checkbox(
-                    &app,
-                    "hue-colorize",
-                    "Colorize",
-                    colorize,
-                    |state, checked, _, cx| {
-                        if let Some(panel) = state.panel_widgets.hue_saturation.as_mut() {
-                            panel.colorize = checked;
-                        }
-                        state.apply_slider(SliderRole::Hue, 0.0, cx);
-                    },
-                )
-                .into_any_element(),
-            ))
+            .child(
+                SheetRow::new("Hue").with_optional_control(
+                    sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Saturation").with_optional_control(
+                    sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Lightness").with_optional_control(
+                    sliders.get(2).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Colorize").with_control(
+                    LabeledCheckbox::new("hue-colorize", "Colorize")
+                        .checked(colorize)
+                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            if let Some(panel) = state.panel_widgets.hue_saturation.as_mut() {
+                                panel.colorize = checked;
+                            }
+                            state.apply_slider(SliderRole::Hue, 0.0, cx);
+                        })),
+                ),
+            )
             .into_any_element()
     }
 }

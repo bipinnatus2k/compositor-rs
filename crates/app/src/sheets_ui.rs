@@ -1,16 +1,15 @@
 //! The sheet host: the centered overlay panel with its title bar and
 //! footer, the per-sheet body dispatcher, the OK/Cancel actions, and the
-//! shared row/slider helpers. Each sheet's content lives beside its Swift
+//! shared [`SheetRow`]. Each sheet's content lives beside its Swift
 //! source file (`ui/*_sheet.rs`); the arms with no Swift sheet view — the
 //! port's NSAlert/NSSavePanel stand-ins — keep their bodies here.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Styled, Window, canvas, point,
-    px, rgba, size,
+    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    Styled, Window, canvas, point, px, rgba, size,
 };
 
 use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
@@ -47,20 +46,51 @@ fn parse_input_f64(input: &Entity<InputState>, cx: &gpui_kit::App) -> Option<f64
     input.read(cx).value().trim().parse::<f64>().ok()
 }
 
-pub(crate) fn sheet_row(label: &str, control: impl gpui_kit::IntoElement) -> gpui_kit::Div {
-    gpui_kit::div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .py_0p5()
-        .child(
-            gpui_kit::div()
-                .w(px(110.0))
-                .flex_shrink_0()
-                .child(text_label(label.to_string(), true)),
-        )
-        .child(control)
+/// One sheet row: the fixed 110px dim label column, vertical padding, and
+/// the row's control (`CanvasSizeSheet` and friends' `sheet` rows).
+#[derive(IntoElement)]
+pub struct SheetRow {
+    label: String,
+    control: Option<AnyElement>,
+}
+
+impl SheetRow {
+    pub fn new(label: impl Into<String>) -> Self {
+        SheetRow {
+            label: label.into(),
+            control: None,
+        }
+    }
+
+    pub fn with_control(mut self, control: impl IntoElement) -> Self {
+        self.control = Some(control.into_any_element());
+        self
+    }
+
+    /// The row's control, when the caller's source may be absent (a sheet
+    /// whose slider list ran out).
+    pub fn with_optional_control(mut self, control: Option<impl IntoElement>) -> Self {
+        self.control = control.map(|control| control.into_any_element());
+        self
+    }
+}
+
+impl RenderOnce for SheetRow {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        gpui_kit::div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .py_0p5()
+            .child(
+                gpui_kit::div()
+                    .w(px(110.0))
+                    .flex_shrink_0()
+                    .child(text_label(self.label, true)),
+            )
+            .children(self.control)
+    }
 }
 
 impl AppState {
@@ -292,11 +322,11 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Path",
-                Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
-            ))
-            .child(sheet_row("", text_label(hint, true)))
+            .child(
+                SheetRow::new("Path")
+                    .with_control(Input::new(&sheet.path).id("sheet-path").w(px(270.0))),
+            )
+            .child(SheetRow::new("").with_control(text_label(hint, true)))
             .into_any_element()
     }
 
@@ -604,24 +634,6 @@ impl AppState {
 }
 
 // MARK: Helpers
-
-/// A labeled slider row bound to one of the sheet's sliders: the shared
-/// spine ([`crate::ui::labeled_slider_row`]) with the sheets' fixed 110px
-/// label column, vertical padding, and a full-width slider. (Shape frozen
-/// by the panel bodies' call sites.)
-pub(crate) fn labeled_slider(
-    sliders: &[Entity<SliderState>],
-    index: usize,
-    label: &str,
-) -> gpui_kit::AnyElement {
-    let row = crate::ui::labeled_slider_row(label, Some(px(110.0))).py_0p5();
-    match sliders.get(index) {
-        Some(slider) => row
-            .child(gpui_kit::div().flex_1().child(Slider::new(slider)))
-            .into_any_element(),
-        None => row.into_any_element(),
-    }
-}
 
 /// The Levels histogram, painted as thin bars.
 pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {

@@ -7,8 +7,6 @@
 //! NavigationToolHeader.swift's own subject and stay here, with the
 //! Gradient branch beside them pending its own carve.
 
-use std::rc::Rc;
-
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -23,7 +21,9 @@ use compositor_core::session::{BrushToolMode, EditorSession};
 use compositor_core::tools::brush::GradientShape;
 
 use crate::state::{AppState, CanvasDrag};
-use crate::ui::{MenuEntry, dropdown, labeled_slider, text_label};
+use crate::ui::{
+    Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch, app_on_change, text_label,
+};
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
 /// eraser-variant flag). The letter only names the button element (kept so
@@ -333,50 +333,48 @@ impl AppState {
                 // 32's file contract, so the controls stay with the shell.
                 let settings = self.tab().session.read(cx).gradient_settings;
                 header = header
-                    .child(dropdown(
-                        &app,
-                        "gradient-shape",
-                        match settings.shape {
-                            GradientShape::Linear => "Linear",
-                            GradientShape::Radial => "Radial",
-                        },
-                        px(84.0),
-                        menu_entries(
+                    .child(
+                        Dropdown::new(
+                            "gradient-shape",
+                            match settings.shape {
+                                GradientShape::Linear => "Linear",
+                                GradientShape::Radial => "Radial",
+                            },
+                        )
+                        .with_width(px(84.0))
+                        .with_entries(menu_entries(
                             [
                                 (GradientShape::Linear, "Linear"),
                                 (GradientShape::Radial, "Radial"),
                             ],
                             settings.shape,
                             |session, value| session.gradient_settings.shape = value,
-                        ),
-                    ))
-                    .child(checkbox(
-                        &app,
-                        "gradient-fg-bg",
-                        "Foreground to Background",
-                        settings.foreground_to_background,
-                        |state, checked, _, cx| {
-                            state.tab().session.update(cx, |session, _| {
-                                session.gradient_settings.foreground_to_background = checked
-                            });
-                            state.touch(cx);
-                        },
-                    ))
-                    .child(checkbox(
-                        &app,
-                        "gradient-reverse",
-                        "Reverse",
-                        settings.reversed,
-                        |state, checked, _, cx| {
-                            state.tab().session.update(cx, |session, _| {
-                                session.gradient_settings.reversed = checked
-                            });
-                            state.touch(cx);
-                        },
-                    ))
-                    .child(labeled_slider(
+                        ))
+                        .with_dispatch(app_dispatch(&app)),
+                    )
+                    .child(
+                        LabeledCheckbox::new("gradient-fg-bg", "Foreground to Background")
+                            .checked(settings.foreground_to_background)
+                            .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                state.tab().session.update(cx, |session, _| {
+                                    session.gradient_settings.foreground_to_background = checked
+                                });
+                                state.touch(cx);
+                            })),
+                    )
+                    .child(
+                        LabeledCheckbox::new("gradient-reverse", "Reverse")
+                            .checked(settings.reversed)
+                            .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                state.tab().session.update(cx, |session, _| {
+                                    session.gradient_settings.reversed = checked
+                                });
+                                state.touch(cx);
+                            })),
+                    )
+                    .child(LabeledSlider::new(
                         "Opacity",
-                        &self.gradient_slider,
+                        self.gradient_slider.clone(),
                         format!("{:.0}%", settings.opacity * 100.0),
                         px(80.0),
                     ));
@@ -409,34 +407,6 @@ impl AppState {
 
         header.into_any_element()
     }
-}
-
-/// A checkbox whose handler receives the app, the new value, window and ctx.
-pub(crate) fn checkbox(
-    app: &gpui_kit::WeakEntity<AppState>,
-    id: &'static str,
-    label: &str,
-    checked: bool,
-    handler: impl Fn(&mut AppState, bool, &mut gpui_kit::Window, &mut Context<AppState>) + 'static,
-) -> gpui_kit::AnyElement {
-    let app = app.clone();
-    let handler = Rc::new(handler);
-    gpui_kit::component::checkbox::Checkbox::new(id)
-        .label(label)
-        .checked(checked)
-        .on_change(move |checked, window, cx| {
-            let handler = handler.clone();
-            let checked = *checked;
-            app.update(cx, move |state, cx| handler(state, checked, window, cx))
-                .ok();
-        })
-        // ToolHeaderStyle.swift:7: the control font is 12.
-        .text_size(px(12.0))
-        // The checkbox root lays its indicator out items_start
-        // (gpui-component checkbox.rs), which top-aligns the box against the
-        // text at this small size; centering overrides the refinement.
-        .items_center()
-        .into_any_element()
 }
 
 fn tool_button(

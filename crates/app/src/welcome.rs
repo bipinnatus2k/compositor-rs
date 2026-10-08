@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 
 use crate::project::Step;
-use crate::sheets_ui::sheet_row;
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
 use crate::ui::text_label;
 
@@ -118,20 +118,22 @@ impl AppState {
             .px_3()
             .py_2()
             .gap_1()
-            .child(sheet_row(
-                "Width",
-                Input::new(&self.welcome_width_input)
-                    .id("welcome-width")
-                    .w(px(140.0))
-                    .disabled(disabled),
-            ))
-            .child(sheet_row(
-                "Height",
-                Input::new(&self.welcome_height_input)
-                    .id("welcome-height")
-                    .w(px(140.0))
-                    .disabled(disabled),
-            ))
+            .child(
+                SheetRow::new("Width").with_control(
+                    Input::new(&self.welcome_width_input)
+                        .id("welcome-width")
+                        .w(px(140.0))
+                        .disabled(disabled),
+                ),
+            )
+            .child(
+                SheetRow::new("Height").with_control(
+                    Input::new(&self.welcome_height_input)
+                        .id("welcome-height")
+                        .w(px(140.0))
+                        .disabled(disabled),
+                ),
+            )
             .child(if valid {
                 text_label("Transparent canvas · sRGB", true)
             } else {

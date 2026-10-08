@@ -11,7 +11,7 @@ use gpui_kit::{
 };
 
 use crate::state::AppState;
-use crate::ui::{MenuEntry, div_row, dropdown, text_label};
+use crate::ui::{Dropdown, MenuEntry, app_dispatch, div_row, text_label};
 
 pub(crate) const FONT_MENU_CAP: usize = 250;
 
@@ -149,7 +149,11 @@ impl AppState {
         };
 
         let mut controls = vec![
-            dropdown(&app, "type-font", font, px(150.0), entries).into_any_element(),
+            Dropdown::new("type-font", font)
+                .with_width(px(150.0))
+                .with_entries(entries)
+                .with_dispatch(app_dispatch(&app))
+                .into_any_element(),
             // The unit hugs its field (Swift unitSuffix HStack spacing 2,
             // ToolHeaderStyle.swift:13-18): a tighter gap than the row's
             // control spacing.

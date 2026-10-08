@@ -4,16 +4,17 @@
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled, px};
 
 use compositor_core::adjust::LevelsChannel;
 use compositor_core::adjust::levels_auto::LevelsAuto;
 
-use crate::sheets_ui::{histogram_view, labeled_slider, sheet_row};
+use crate::sheets_ui::{SheetRow, histogram_view};
 use crate::state::AppState;
 use crate::ui::floating_panel::{LevelsPanelState, PanelPlacement, panel_names};
 use crate::ui::sheets::SliderRole;
-use crate::ui::{MenuEntry, dropdown, labeled_checkbox};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change};
 
 /// The Levels/Curves channel picker's labels (LevelsSheet.swift's Picker).
 pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
@@ -123,42 +124,39 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Preview",
-                labeled_checkbox(
-                    &app,
-                    "levels-preview",
-                    "Preview",
-                    preview,
-                    |state, checked, _, cx| {
-                        if let Some(panel) = state.panel_widgets.levels.as_mut() {
-                            panel.preview = checked;
-                        }
-                        state.refresh_levels_preview(cx);
-                    },
-                )
-                .into_any_element(),
-            ))
-            .child(sheet_row(
-                "Channel",
-                dropdown(
-                    &app,
-                    "levels-channel",
-                    match channel {
-                        1 => "Red",
-                        2 => "Green",
-                        3 => "Blue",
-                        _ => "RGB",
-                    },
-                    px(90.0),
-                    vec![
+            .child(
+                SheetRow::new("Preview").with_control(
+                    LabeledCheckbox::new("levels-preview", "Preview")
+                        .checked(preview)
+                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            if let Some(panel) = state.panel_widgets.levels.as_mut() {
+                                panel.preview = checked;
+                            }
+                            state.refresh_levels_preview(cx);
+                        })),
+                ),
+            )
+            .child(
+                SheetRow::new("Channel").with_control(
+                    Dropdown::new(
+                        "levels-channel",
+                        match channel {
+                            1 => "Red",
+                            2 => "Green",
+                            3 => "Blue",
+                            _ => "RGB",
+                        },
+                    )
+                    .with_width(px(90.0))
+                    .with_entries(vec![
                         MenuEntry::new("RGB", |state, _, cx| set_levels_channel(state, 0, cx)),
                         MenuEntry::new("Red", |state, _, cx| set_levels_channel(state, 1, cx)),
                         MenuEntry::new("Green", |state, _, cx| set_levels_channel(state, 2, cx)),
                         MenuEntry::new("Blue", |state, _, cx| set_levels_channel(state, 3, cx)),
-                    ],
+                    ])
+                    .with_dispatch(app_dispatch(&app)),
                 ),
-            ))
+            )
             .child(
                 gpui_kit::div()
                     .w_full()
@@ -167,36 +165,57 @@ impl AppState {
                     .overflow_hidden()
                     .child(histogram_view(histogram)),
             )
-            .child(labeled_slider(&sliders, 0, "Input Black"))
-            .child(labeled_slider(&sliders, 1, "Gamma"))
-            .child(labeled_slider(&sliders, 2, "Input White"))
-            .child(labeled_slider(&sliders, 3, "Output Black"))
-            .child(labeled_slider(&sliders, 4, "Output White"))
-            .child(sheet_row(
-                "Auto",
-                gpui_kit::div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .child(auto_button(
-                        "levels-auto-contrast",
-                        "Contrast",
-                        LevelsAuto::Contrast,
-                        cx,
-                    ))
-                    .child(auto_button(
-                        "levels-auto-color",
-                        "Color",
-                        LevelsAuto::Color,
-                        cx,
-                    ))
-                    .child(auto_button(
-                        "levels-auto-neutral",
-                        "Neutral",
-                        LevelsAuto::Neutral,
-                        cx,
-                    )),
-            ))
+            .child(
+                SheetRow::new("Input Black").with_optional_control(
+                    sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Gamma").with_optional_control(
+                    sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Input White").with_optional_control(
+                    sliders.get(2).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Output Black").with_optional_control(
+                    sliders.get(3).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Output White").with_optional_control(
+                    sliders.get(4).map(|slider| Slider::new(slider).flex_1()),
+                ),
+            )
+            .child(
+                SheetRow::new("Auto").with_control(
+                    gpui_kit::div()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .child(auto_button(
+                            "levels-auto-contrast",
+                            "Contrast",
+                            LevelsAuto::Contrast,
+                            cx,
+                        ))
+                        .child(auto_button(
+                            "levels-auto-color",
+                            "Color",
+                            LevelsAuto::Color,
+                            cx,
+                        ))
+                        .child(auto_button(
+                            "levels-auto-neutral",
+                            "Neutral",
+                            LevelsAuto::Neutral,
+                            cx,
+                        )),
+                ),
+            )
             .into_any_element()
     }
 }

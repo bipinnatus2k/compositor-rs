@@ -3,11 +3,12 @@
 //! dropdown.
 
 use gpui_kit::component::input::Input;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder as _, px};
 
-use crate::sheets_ui::{labeled_slider, sheet_row};
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::{MenuEntry, dropdown, text_label};
+use crate::ui::{Dropdown, MenuEntry, app_dispatch, text_label};
 
 impl AppState {
     /// The JPEG export sheet's body: path field, the live encoded preview
@@ -40,10 +41,10 @@ impl AppState {
             .flex()
             .flex_col()
             .gap_1()
-            .child(sheet_row(
-                "Path",
-                Input::new(&sheet.path).id("sheet-path").w(px(270.0)),
-            ))
+            .child(
+                SheetRow::new("Path")
+                    .with_control(Input::new(&sheet.path).id("sheet-path").w(px(270.0))),
+            )
             .child(
                 gpui_kit::div()
                     .w(px(280.0))
@@ -58,41 +59,37 @@ impl AppState {
                         frame.child(gpui_kit::img(image).max_w_full().max_h_full())
                     }),
             )
-            .child(sheet_row("", text_label(status, true)))
-            .child(sheet_row(
-                "Quality",
-                labeled_slider(&sliders, 0, &quality_text),
-            ))
-            .child(sheet_row(
-                "Matte",
-                dropdown(
-                    &app,
-                    "jpeg-matte",
-                    if matte == 1 { "Black" } else { "White" },
-                    px(140.0),
-                    vec![
-                        MenuEntry::new("White", |state: &mut AppState, _, cx| {
-                            if let Some(sheet) = state.sheet.as_mut() {
-                                sheet.preset = 0;
-                            }
-                            state.refresh_jpeg_preview(cx);
-                        }),
-                        MenuEntry::new("Black", |state: &mut AppState, _, cx| {
-                            if let Some(sheet) = state.sheet.as_mut() {
-                                sheet.preset = 1;
-                            }
-                            state.refresh_jpeg_preview(cx);
-                        }),
-                    ],
+            .child(SheetRow::new("").with_control(text_label(status, true)))
+            .child(SheetRow::new("Quality").with_control(
+                SheetRow::new(quality_text).with_optional_control(
+                    sliders.first().map(|slider| Slider::new(slider).flex_1()),
                 ),
             ))
-            .child(sheet_row(
-                "",
-                text_label(
-                    "Transparency flattens onto the matte color. JPEG has no alpha.",
-                    true,
+            .child(
+                SheetRow::new("Matte").with_control(
+                    Dropdown::new("jpeg-matte", if matte == 1 { "Black" } else { "White" })
+                        .with_width(px(140.0))
+                        .with_entries(vec![
+                            MenuEntry::new("White", |state: &mut AppState, _, cx| {
+                                if let Some(sheet) = state.sheet.as_mut() {
+                                    sheet.preset = 0;
+                                }
+                                state.refresh_jpeg_preview(cx);
+                            }),
+                            MenuEntry::new("Black", |state: &mut AppState, _, cx| {
+                                if let Some(sheet) = state.sheet.as_mut() {
+                                    sheet.preset = 1;
+                                }
+                                state.refresh_jpeg_preview(cx);
+                            }),
+                        ])
+                        .with_dispatch(app_dispatch(&app)),
                 ),
-            ))
+            )
+            .child(SheetRow::new("").with_control(text_label(
+                "Transparency flattens onto the matte color. JPEG has no alpha.",
+                true,
+            )))
             .into_any_element()
     }
 }

@@ -3,6 +3,7 @@
 //! segment / effect swatch helpers.
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px,
@@ -10,7 +11,7 @@ use gpui_kit::{
 
 use compositor_core::effects::LayerEffectKind;
 
-use crate::sheets_ui::{labeled_slider, sheet_row};
+use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
 use crate::ui::floating_panel::EffectsPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
@@ -238,36 +239,62 @@ impl AppState {
         match kind {
             LayerEffectKind::Stroke => {
                 body = body
-                    .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                    .child(labeled_slider(&sliders, 0, "Size (px)"))
-                    .child(labeled_slider(&sliders, 1, "Opacity (%)"));
+                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(SheetRow::new("Size (px)").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Opacity (%)").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             LayerEffectKind::Shadow => {
                 body = body
-                    .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                    .child(labeled_slider(&sliders, 0, "Opacity (%)"))
-                    .child(labeled_slider(&sliders, 1, "Angle (°)"))
-                    .child(labeled_slider(&sliders, 2, "Distance (px)"))
-                    .child(labeled_slider(&sliders, 3, "Blur (px)"));
+                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(SheetRow::new("Opacity (%)").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Angle (°)").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Distance (px)").with_optional_control(
+                        sliders.get(2).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Blur (px)").with_optional_control(
+                        sliders.get(3).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             LayerEffectKind::ColorOverlay => {
                 body = body
-                    .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                    .child(labeled_slider(&sliders, 0, "Opacity (%)"));
+                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(SheetRow::new("Opacity (%)").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             LayerEffectKind::InnerShadow => {
                 body = body
-                    .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                    .child(labeled_slider(&sliders, 0, "Opacity (%)"))
-                    .child(labeled_slider(&sliders, 1, "Angle (°)"))
-                    .child(labeled_slider(&sliders, 2, "Distance (px)"))
-                    .child(labeled_slider(&sliders, 3, "Blur (px)"));
+                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(SheetRow::new("Opacity (%)").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Angle (°)").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Distance (px)").with_optional_control(
+                        sliders.get(2).map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Blur (px)").with_optional_control(
+                        sliders.get(3).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
             LayerEffectKind::OuterGlow | LayerEffectKind::InnerGlow => {
                 body = body
-                    .child(sheet_row("Color", effect_swatch(color, kind, cx)))
-                    .child(labeled_slider(&sliders, 0, "Size (px)"))
-                    .child(labeled_slider(&sliders, 1, "Opacity (%)"));
+                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(SheetRow::new("Size (px)").with_optional_control(
+                        sliders.first().map(|slider| Slider::new(slider).flex_1()),
+                    ))
+                    .child(SheetRow::new("Opacity (%)").with_optional_control(
+                        sliders.get(1).map(|slider| Slider::new(slider).flex_1()),
+                    ));
             }
         }
         body.into_any_element()

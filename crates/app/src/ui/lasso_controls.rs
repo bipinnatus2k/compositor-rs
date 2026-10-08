@@ -10,12 +10,14 @@ use gpui_kit::{AnyElement, AppContext, Context, IntoElement, ParentElement, Styl
 use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::SelectionAmountOperation;
 
-use crate::sheets_ui::{parse_input_usize, sheet_row};
+use crate::sheets_ui::{SheetRow, parse_input_usize};
 use crate::state::AppState;
 use crate::ui::floating_panel::AmountPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::navigation_tool_header::{checkbox, menu_entries};
-use crate::ui::{dropdown, labeled_slider, text_label};
+use crate::ui::navigation_tool_header::menu_entries;
+use crate::ui::{
+    Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on_change, text_label,
+};
 
 impl AppState {
     /// `session.selectionAmountOperation` → selectionAmountPanel, title
@@ -176,22 +178,23 @@ impl AppState {
         let maximum = amount_maximum(panel.operation);
         let cx_app: &gpui_kit::App = cx;
         let valid = parse_amount(&tolerance.read(cx_app).value(), maximum).is_some();
-        let mut body = gpui_kit::div().flex().flex_col().gap_1().child(sheet_row(
-            "Amount",
-            gpui_kit::div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .flex_1()
-                .child(
-                    gpui_kit::div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Slider::new(&slider)),
-                )
-                .child(Input::new(&tolerance).id("amount-value").w(px(64.0))),
-        ));
+        let mut body = gpui_kit::div().flex().flex_col().gap_1().child(
+            SheetRow::new("Amount").with_control(
+                gpui_kit::div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .child(
+                        gpui_kit::div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Slider::new(&slider)),
+                    )
+                    .child(Input::new(&tolerance).id("amount-value").w(px(64.0))),
+            ),
+        );
         if !valid {
             body = body.child(text_label(
                 format!("Enter a whole number from 1 to {maximum} px."),
@@ -207,24 +210,24 @@ impl AppState {
         let app = cx.entity().downgrade();
         let kind = self.tab().session.read(cx).marquee_kind;
         vec![
-            dropdown(
-                &app,
+            Dropdown::new(
                 "marquee-kind",
                 if kind == LassoKind::Ellipse {
                     "Ellipse"
                 } else {
                     "Rectangle"
                 },
-                px(100.0),
-                menu_entries(
-                    [
-                        (LassoKind::Rectangle, "Rectangle"),
-                        (LassoKind::Ellipse, "Ellipse"),
-                    ],
-                    kind,
-                    |session, value| session.marquee_kind = value,
-                ),
             )
+            .with_width(px(100.0))
+            .with_entries(menu_entries(
+                [
+                    (LassoKind::Rectangle, "Rectangle"),
+                    (LassoKind::Ellipse, "Ellipse"),
+                ],
+                kind,
+                |session, value| session.marquee_kind = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
             .into_any_element(),
         ]
     }
@@ -235,24 +238,24 @@ impl AppState {
         let app = cx.entity().downgrade();
         let kind = self.tab().session.read(cx).lasso_kind;
         vec![
-            dropdown(
-                &app,
+            Dropdown::new(
                 "lasso-kind",
                 if kind == LassoKind::Polygonal {
                     "Polygonal"
                 } else {
                     "Freehand"
                 },
-                px(100.0),
-                menu_entries(
-                    [
-                        (LassoKind::Freehand, "Freehand"),
-                        (LassoKind::Polygonal, "Polygonal"),
-                    ],
-                    kind,
-                    |session, value| session.lasso_kind = value,
-                ),
             )
+            .with_width(px(100.0))
+            .with_entries(menu_entries(
+                [
+                    (LassoKind::Freehand, "Freehand"),
+                    (LassoKind::Polygonal, "Polygonal"),
+                ],
+                kind,
+                |session, value| session.lasso_kind = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
             .into_any_element(),
         ]
     }
@@ -266,53 +269,47 @@ impl AppState {
             (session.wand_mode, session.wand_settings)
         };
         vec![
-            dropdown(
-                &app,
+            Dropdown::new(
                 "wand-mode",
                 match mode {
                     WandMode::Wand => "Wand",
                     WandMode::Object => "Object",
                 },
-                px(84.0),
-                menu_entries(
-                    [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
-                    mode,
-                    |session, value| session.wand_mode = value,
-                ),
             )
+            .with_width(px(84.0))
+            .with_entries(menu_entries(
+                [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
+                mode,
+                |session, value| session.wand_mode = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
             .into_any_element(),
-            labeled_slider(
+            LabeledSlider::new(
                 "Tolerance",
-                &self.wand_slider,
+                self.wand_slider.clone(),
                 format!("{}", settings.tolerance),
                 px(90.0),
             )
             .into_any_element(),
-            checkbox(
-                &app,
-                "wand-contiguous",
-                "Contiguous",
-                settings.contiguous,
-                |state, checked, _, cx| {
+            LabeledCheckbox::new("wand-contiguous", "Contiguous")
+                .checked(settings.contiguous)
+                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session
                         .update(cx, |session, _| session.wand_settings.contiguous = checked);
                     state.touch(cx);
-                },
-            ),
-            checkbox(
-                &app,
-                "wand-all-layers",
-                "Sample All Layers",
-                settings.sample_all_layers,
-                |state, checked, _, cx| {
+                }))
+                .into_any_element(),
+            LabeledCheckbox::new("wand-all-layers", "Sample All Layers")
+                .checked(settings.sample_all_layers)
+                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
                     state.tab().session.update(cx, |session, _| {
                         session.wand_settings.sample_all_layers = checked
                     });
                     state.touch(cx);
-                },
-            ),
+                }))
+                .into_any_element(),
         ]
     }
 }

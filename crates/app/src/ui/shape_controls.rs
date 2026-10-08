@@ -7,7 +7,7 @@ use compositor_core::document::ShapeKind;
 
 use crate::state::AppState;
 use crate::ui::navigation_tool_header::menu_entries;
-use crate::ui::{dropdown, text_label};
+use crate::ui::{Dropdown, app_dispatch, text_label};
 
 impl AppState {
     /// `ShapeControls.swift`'s bar controls: the Rectangle/Rounded/Ellipse/
@@ -22,12 +22,9 @@ impl AppState {
             ShapeKind::Line => "Line",
         };
         vec![
-            dropdown(
-                &app,
-                "shape-kind",
-                label(kind),
-                px(150.0),
-                menu_entries(
+            Dropdown::new("shape-kind", label(kind))
+                .with_width(px(150.0))
+                .with_entries(menu_entries(
                     [
                         (ShapeKind::Rectangle, "Rectangle"),
                         (ShapeKind::RoundedRectangle, "Rounded Rectangle"),
@@ -36,9 +33,9 @@ impl AppState {
                     ],
                     kind,
                     |session, value| session.shape_kind = value,
-                ),
-            )
-            .into_any_element(),
+                ))
+                .with_dispatch(app_dispatch(&app))
+                .into_any_element(),
             text_label("Drag on the canvas · Shift-U switches shape", true).into_any_element(),
         ]
     }
