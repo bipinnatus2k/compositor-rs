@@ -69,10 +69,13 @@ pub enum CanvasDrag {
     Warp(WarpStroke),
     /// The Shape tool dragging a shape out; the draft rect grows live.
     Shape { start: CGPoint },
-    /// Move tool drag.
+    /// Move tool drag. `duplicate` is the Option modifier at the press: the
+    /// first drag tick duplicates the layer and drags the copy
+    /// (`duplicatesTransformOnDrag`).
     MoveLayer {
         start_origin: compositor_core::transform::LayerTransform,
         start: CGPoint,
+        duplicate: bool,
     },
     /// Crop drag; the drag lives in the session.
     Crop,

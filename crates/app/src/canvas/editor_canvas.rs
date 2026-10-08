@@ -474,7 +474,7 @@ impl AppState {
                 self.begin_gradient(doc, cx);
             }
             NavigationTool::Move => {
-                self.begin_move(doc, event.modifiers.control, cx);
+                self.begin_move(doc, event.modifiers.control, event.modifiers.alt, cx);
             }
             NavigationTool::Crop => {
                 self.begin_crop(doc, cx);
@@ -593,14 +593,32 @@ impl AppState {
             Some(CanvasDrag::MoveLayer {
                 start_origin,
                 start,
+                duplicate,
             }) => {
-                let (start_origin, start) = (*start_origin, *start);
+                let (start_origin, start, duplicate) = (*start_origin, *start, *duplicate);
+                if duplicate {
+                    // Option turns the first drag tick into a duplicate: the
+                    // copy becomes the transform target and follows the rest
+                    // of the drag (duplicatesTransformOnDrag,
+                    // EditorCanvas.swift:1589). The flag clears so later
+                    // ticks only move the copy.
+                    if let Some(CanvasDrag::MoveLayer {
+                        duplicate: flag, ..
+                    }) = self.drag.as_mut()
+                    {
+                        *flag = false;
+                    }
+                    self.tab()
+                        .session
+                        .update(cx, |session, _| session.begin_duplicate_transform());
+                }
                 let delta = CGPoint::new(doc.x - start.x, doc.y - start.y);
                 let mut value = start_origin;
                 value.origin.x += delta.x;
                 value.origin.y += delta.y;
                 // Moving snaps to the canvas and the other layers; resizing
-                // and rotating are left alone (EditorCanvas.dragTransform).
+                // and rotating are left alone (EditorCanvas.dragTransform),
+                // and Control drags freely (EditorCanvas.swift:1602).
                 let moving: Vec<uuid::Uuid> = {
                     let session = self.workspace.current().session.read(cx);
                     session
@@ -612,10 +630,13 @@ impl AppState {
                         })
                         .unwrap_or_default()
                 };
-                let value = self
-                    .tab()
-                    .session
-                    .update(cx, |session, _| session.snapped_move(value, &moving, 10.0));
+                let value = if event.modifiers.control {
+                    value
+                } else {
+                    self.tab()
+                        .session
+                        .update(cx, |session, _| session.snapped_move(value, &moving, 10.0))
+                };
                 self.tab()
                     .session
                     .update(cx, |session, _| session.preview_transform(value));
@@ -1386,7 +1407,7 @@ impl AppState {
 
     // MARK: Move
 
-    fn begin_move(&mut self, doc: CGPoint, command: bool, cx: &mut Context<Self>) {
+    fn begin_move(&mut self, doc: CGPoint, command: bool, option: bool, cx: &mut Context<Self>) {
         // A picked layer becomes the transform target before the drag starts.
         if self.tab().session.read(cx).transform_edit.is_none() {
             let active_id = self.tab().session.read(cx).active_layer_id;
@@ -1426,6 +1447,9 @@ impl AppState {
             Some(CanvasDrag::MoveLayer {
                 start_origin: draft,
                 start: doc,
+                // A Move drag duplicates when Option is held
+                // (duplicatesTransformOnDrag, EditorCanvas.swift:2127).
+                duplicate: option,
             }),
             cx,
         );
@@ -1723,9 +1747,16 @@ fn transform_press_layer(
         .rev()
         .find(|l| l.asset.is_some() && l.transform.contains(pixel))
         .map(|l| l.id);
-    let active = active_id
-        .and_then(|id| order.iter().find(|l| l.id == id))
-        .copied();
+    // The active layer is only the drag target when it has pixels, isn't a
+    // group, and is effectively visible (EditorCanvas.swift:1320-1322).
+    let visible = document.effective_visible_ids();
+    let active = active_id.and_then(|id| {
+        order
+            .iter()
+            .find(|l| l.id == id)
+            .filter(|l| l.asset.is_some() && !l.is_group && visible.contains(&l.id))
+            .copied()
+    });
     // Cmd picks the layer under the pointer on its own.
     if command
         && can_pick
@@ -2355,7 +2386,9 @@ mod tests {
         paint_target, ruler_axis_at, shape_drag_rect, transform_press_layer,
     };
     use crate::state::RULER_SIZE;
-    use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, LayerMask, ShapeKind};
+    use compositor_core::document::{
+        CanvasDocument, GuideAxis, ImageLayer, LayerMask, NavigationTool, ShapeKind,
+    };
     use compositor_core::geometry::{CGPoint, CGRect, CGSize};
     use compositor_core::raster::{Bitmap, ImportedImage};
     use compositor_core::selection::{DocumentSelection, SelectionPath};
@@ -2738,6 +2771,252 @@ mod tests {
         session.transform_auto_select = false;
         move_click(&mut session, CGPoint::new(180.0, 70.0), false);
         assert_eq!(session.active_layer_id, Some(background));
+    }
+
+    /// The active-layer guards of `transformPressLayer`
+    /// (EditorCanvas.swift:1320-1322): the active layer is only the drag
+    /// target when it has pixels, isn't a group, and is effectively
+    /// visible. Hidden layers aren't in `renderLayers` either, so they are
+    /// never under the pointer and auto-select can't pick them.
+    #[test]
+    fn transform_press_active_layer_needs_pixels_group_and_visibility() {
+        let mut doc = CanvasDocument::new(100, 100);
+
+        // A group active: no pixels of its own, never the drag target —
+        // and with auto-select on the press still finds nothing to pick.
+        let mut group = opaque_layer(80, 80, [255, 0, 0, 255], CGPoint::ZERO);
+        group.asset = None;
+        group.is_group = true;
+        let group_id = group.id;
+        doc.layers = vec![group];
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(group_id),
+                false,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            None
+        );
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(group_id),
+                true,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            None
+        );
+
+        // A hidden active layer is no target either; invisible layers
+        // aren't under the pointer, so auto-select on changes nothing.
+        let mut hidden = opaque_layer(80, 80, [255, 0, 0, 255], CGPoint::ZERO);
+        let hidden_id = hidden.id;
+        hidden.is_visible = false;
+        doc.layers = vec![hidden];
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(hidden_id),
+                false,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            None
+        );
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(hidden_id),
+                true,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            None
+        );
+
+        // Effective visibility runs through groups: a visible layer under
+        // a hidden folder is hidden with it.
+        let mut parent = opaque_layer(80, 80, [255, 0, 0, 255], CGPoint::ZERO);
+        parent.asset = None;
+        parent.is_group = true;
+        let parent_id = parent.id;
+        let mut child = opaque_layer(50, 50, [0, 255, 0, 255], CGPoint::ZERO);
+        let child_id = child.id;
+        child.parent_id = Some(parent_id);
+        doc.layers = vec![parent, child];
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(child_id),
+                false,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            Some((child_id, false)),
+            "visible under a visible folder"
+        );
+        doc.layers
+            .iter_mut()
+            .find(|l| l.id == parent_id)
+            .unwrap()
+            .is_visible = false;
+        assert_eq!(
+            transform_press_layer(
+                &doc,
+                Some(child_id),
+                false,
+                false,
+                true,
+                CGPoint::new(10.0, 10.0)
+            ),
+            None
+        );
+    }
+
+    fn near(a: CGPoint, b: CGPoint) -> bool {
+        (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5
+    }
+
+    /// The Move tool's press-drag-release as the canvas runs it:
+    /// `begin_move`'s pick half and transient transform, the
+    /// `CanvasDrag::MoveLayer` tick — where Option duplicates on the first
+    /// tick (`duplicatesTransformOnDrag`, EditorCanvas.swift:1589) and
+    /// Control skips the snap ("Control drags freely", :1602) — and the
+    /// release commit (`canvas_mouse_up`).
+    fn move_drag(
+        session: &mut EditorSession,
+        from: CGPoint,
+        to: CGPoint,
+        command: bool,
+        option: bool,
+        control: bool,
+    ) {
+        if session.transform_edit.is_none() {
+            let active_id = session.active_layer_id;
+            let auto_select = session.transform_auto_select;
+            let document = session.document.clone().unwrap();
+            if let Some((id, picked)) =
+                transform_press_layer(&document, active_id, auto_select, command, true, from)
+                && picked
+            {
+                session.select_layer(Some(id));
+            }
+        }
+        if session.transform_edit.is_none() && session.can_transform() {
+            session.begin_transform_persistent(false);
+        }
+        let Some(draft) = session.transform_edit.as_ref().map(|edit| edit.draft) else {
+            return;
+        };
+        // The first drag tick: Option duplicates, and the copy becomes the
+        // transform target.
+        if option {
+            session.begin_duplicate_transform();
+        }
+        // The draft follows the whole pointer delta (TransformDrag.updated
+        // in move mode).
+        let mut value = draft;
+        value.origin.x += to.x - from.x;
+        value.origin.y += to.y - from.y;
+        let moving: Vec<Uuid> = session
+            .transform_edit
+            .as_ref()
+            .map(|edit| match &edit.group {
+                Some(group) => group.originals.iter().map(|(id, _)| *id).collect(),
+                None => vec![edit.layer_id],
+            })
+            .unwrap_or_default();
+        let value = if control {
+            value
+        } else {
+            session.snapped_move(value, &moving, 10.0)
+        };
+        session.preview_transform(value);
+        session.commit_transform();
+    }
+
+    /// A 100 × 100 red layer centered in the document
+    /// (`TransformPressTests.makeCanvas`: "centered: 150–250 × 100–200").
+    fn insert_centered_red_layer(session: &mut EditorSession) {
+        let mut image = Bitmap::new(100, 100);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        session.insert_image(ImportedImage::new(image, "Red"), None);
+    }
+
+    /// `draggingOutsideTheLayerMovesIt` (TransformPressTests.swift:48-54):
+    /// with the Move tool a press outside the layer's bounds still drags
+    /// it — the layer follows the whole delta. Control is held so the move
+    /// doesn't snap (the Swift case's doc comment: without it a 20 × 10
+    /// drag lands inside `TransformSnap.distance` and the layer springs
+    /// back — the snapping working, not the press failing).
+    #[test]
+    fn dragging_outside_the_layer_moves_it() {
+        let mut session = EditorSession::new();
+        session.create_document(400, 300, false);
+        insert_centered_red_layer(&mut session);
+        session.select_tool(NavigationTool::Move);
+
+        move_drag(
+            &mut session,
+            CGPoint::new(20.0, 20.0),
+            CGPoint::new(40.0, 30.0),
+            false,
+            false,
+            true,
+        );
+        assert!(
+            session.transform_edit.is_none(),
+            "the transient transform closes on release"
+        );
+        let origin = session.active_layer().unwrap().transform.origin;
+        assert!(
+            near(origin, CGPoint::new(170.0, 110.0)),
+            "layer origin {origin:?}"
+        );
+    }
+
+    /// `optionDraggingOutsideTheLayerDuplicatesIt`
+    /// (TransformPressTests.swift:56-63): an Option drag outside the layer
+    /// duplicates it — the original stays and the copy follows the delta.
+    #[test]
+    fn option_dragging_outside_the_layer_duplicates_it() {
+        let mut session = EditorSession::new();
+        session.create_document(400, 300, false);
+        insert_centered_red_layer(&mut session);
+        session.select_tool(NavigationTool::Move);
+
+        move_drag(
+            &mut session,
+            CGPoint::new(20.0, 20.0),
+            CGPoint::new(40.0, 30.0),
+            false,
+            true,
+            true,
+        );
+        let origins: Vec<CGPoint> = session
+            .document
+            .as_ref()
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.transform.origin)
+            .collect();
+        assert_eq!(origins.len(), 2, "{origins:?}");
+        assert!(
+            origins.iter().any(|o| near(*o, CGPoint::new(150.0, 100.0)))
+                && origins.iter().any(|o| near(*o, CGPoint::new(170.0, 110.0))),
+            "the original stays and the copy moves: {origins:?}"
+        );
     }
 
     #[test]
