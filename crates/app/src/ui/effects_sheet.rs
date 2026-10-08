@@ -25,10 +25,11 @@ impl AppState {
         // No preview capture: every slider change is committed to the layer's
         // effects right away (one undo step per change, as Swift's
         // changeEffects does).
-        let editing = self.tab().session.editing_effects();
+        let editing = self.tab().session.read(cx).editing_effects();
         let kind = self
             .tab()
             .session
+            .read(cx)
             .effects_editing
             .map(|editing| editing.kind)
             .unwrap_or(LayerEffectKind::Stroke);
@@ -177,7 +178,9 @@ impl AppState {
         if !self.panels.close(panel_names::EFFECTS_PANEL) {
             return;
         }
-        self.tab().session.finish_effects_editing(false);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.finish_effects_editing(false));
         self.panel_widgets.effects = None;
         self.sync_panel_guard();
         self.touch(cx);
@@ -189,7 +192,9 @@ impl AppState {
         if !self.panels.is_visible(panel_names::EFFECTS_PANEL) {
             return;
         }
-        self.tab().session.finish_effects_editing(true);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.finish_effects_editing(true));
         self.panel_widgets.effects = None;
         self.panels.close(panel_names::EFFECTS_PANEL);
         self.sync_panel_guard();
@@ -209,7 +214,7 @@ impl AppState {
             .unwrap_or(LayerEffectKind::Stroke);
         let inside = panel.inside;
         let sliders = panel.sliders.clone();
-        let color = self.tab().session.editing_effects().color(kind);
+        let color = self.tab().session.read(cx).editing_effects().color(kind);
         let title_row = |cx: &mut Context<Self>| {
             let mut row = gpui_kit::div()
                 .flex()
@@ -307,10 +312,12 @@ fn stroke_segment_button(
 /// Stroke's Outside/Inside change goes through the session like every slider,
 /// so the canvas and the undo trail follow (`EffectsSheet.swift`'s picker).
 fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppState>) {
-    state.tab().session.change_effects(|effects| {
-        if let Some(stroke) = effects.stroke.as_mut() {
-            stroke.inside = inside;
-        }
+    state.tab().session.update(cx, |session, _| {
+        session.change_effects(|effects| {
+            if let Some(stroke) = effects.stroke.as_mut() {
+                stroke.inside = inside;
+            }
+        })
     });
     if let Some(panel) = state.panel_widgets.effects.as_mut() {
         panel.inside = inside;

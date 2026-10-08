@@ -14,8 +14,13 @@ impl AppState {
     /// the Apply/Cancel buttons (both dead while no crop frame exists).
     pub(crate) fn crop_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
         let app = cx.entity().downgrade();
-        let choice = self.tab().session.crop_ratio_choice.clone();
-        let has_crop = self.tab().session.crop_rect.is_some();
+        let (choice, has_crop) = {
+            let session = self.tab().session.read(cx);
+            (
+                session.crop_ratio_choice.clone(),
+                session.crop_rect.is_some(),
+            )
+        };
         let entries = menu_entries(
             [
                 ("Free", "Free"),
@@ -35,7 +40,9 @@ impl AppState {
                 .primary()
                 .disabled(!has_crop)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.tab().session.commit_crop();
+                    this.tab()
+                        .session
+                        .update(cx, |session, _| session.commit_crop());
                     this.touch(cx);
                 }))
                 .into_any_element(),
@@ -44,7 +51,9 @@ impl AppState {
                 .small()
                 .disabled(!has_crop)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.tab().session.cancel_crop();
+                    this.tab()
+                        .session
+                        .update(cx, |session, _| session.cancel_crop());
                     this.touch(cx);
                 }))
                 .into_any_element(),

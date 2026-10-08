@@ -14,7 +14,7 @@ impl AppState {
     /// `session.hueSaturation != nil` → adjustmentPanel, title
     /// "Hue/Saturation" (`ContentView.swift:208-215`).
     pub fn open_hue_saturation_panel(&mut self, cx: &mut Context<Self>) {
-        self.begin_preview();
+        self.begin_preview(cx);
         let panel = HueSaturationPanelState {
             sliders: vec![
                 self.make_slider(-180.0, 180.0, 0.0, SliderRole::Hue, cx),
@@ -38,8 +38,10 @@ impl AppState {
         if !self.panels.close(panel_names::ADJUSTMENT_PANEL) {
             return;
         }
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(false);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
         }
         self.panel_widgets.hue_saturation = None;
         self.after_panel_editing_closed(cx);
@@ -49,8 +51,10 @@ impl AppState {
         if !self.panels.is_visible(panel_names::ADJUSTMENT_PANEL) {
             return;
         }
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(true);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
         } else {
             self.commit_preview_pixels("Hue/Saturation", cx);
         }

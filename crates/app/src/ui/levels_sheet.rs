@@ -31,7 +31,7 @@ impl AppState {
     /// layer for the live preview and computes the histogram, exactly as the
     /// sheet's `build_sheet` did.
     pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
-        self.begin_preview();
+        self.begin_preview(cx);
         let mut panel = LevelsPanelState {
             sliders: vec![
                 self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
@@ -52,7 +52,7 @@ impl AppState {
             // Levels.swift:90-96).
             let coverage = crate::ui::sheets::histogram_coverage(
                 self.preview_base_transform,
-                self.tab().session.selection().cloned(),
+                self.tab().session.read(cx).selection().cloned(),
                 pixels.width,
                 pixels.height,
             );
@@ -79,8 +79,10 @@ impl AppState {
         if !self.panels.close(panel_names::LEVELS_PANEL) {
             return;
         }
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(false);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
         }
         self.panel_widgets.levels = None;
         self.after_panel_editing_closed(cx);
@@ -93,8 +95,10 @@ impl AppState {
             return;
         }
         // Editing an adjustment layer: the previewed settings are the commit.
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(true);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
         } else {
             self.commit_preview_pixels("Levels", cx);
         }

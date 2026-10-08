@@ -64,14 +64,25 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.color_picker.is_some() || !self.tab().session.can_edit_palette() {
+        if self.tab().session.read(cx).color_picker.is_some()
+            || !self.tab().session.read(cx).can_edit_palette()
+        {
             return;
         }
-        self.tab().session.open_color_picker(background);
-        let Some(picker) = self.tab().session.color_picker.as_ref() else {
+        self.tab()
+            .session
+            .update(cx, |session, _| session.open_color_picker(background));
+        let hex = self
+            .tab()
+            .session
+            .read(cx)
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.color().hex());
+        let Some(hex) = hex else {
             return;
         };
-        let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
+        let hex = cx.new(|cx| InputState::new(window, cx).default_value(hex));
         // A stale drag from a previous open must not survive.
         cx.default_global::<PickerFieldState>().drag = None;
         self.picker_ui = Some(PickerUi { hex });
@@ -81,6 +92,7 @@ impl AppState {
         let title = self
             .tab()
             .session
+            .read(cx)
             .color_picker
             .as_ref()
             .map(|picker| picker.target.title())
@@ -105,14 +117,20 @@ impl AppState {
                 .unwrap_or_default();
             // A well-formed hex entry overrides the field (Swift's
             // commitHex on submit).
-            if let Some(color) = PaletteColor::from_hex(&text)
-                && let Some(picker) = self.tab().session.color_picker.as_mut()
-            {
-                picker.hsb = PickerHSB::from_rgb(color);
+            if let Some(color) = PaletteColor::from_hex(&text) {
+                self.tab().session.update(cx, |session, _| {
+                    if let Some(picker) = session.color_picker.as_mut() {
+                        picker.hsb = PickerHSB::from_rgb(color);
+                    }
+                });
             }
-            self.tab().session.close_color_picker(true);
+            self.tab()
+                .session
+                .update(cx, |session, _| session.close_color_picker(true));
         } else {
-            self.tab().session.close_color_picker(false);
+            self.tab()
+                .session
+                .update(cx, |session, _| session.close_color_picker(false));
         }
         self.picker_ui = None;
         self.panels
@@ -200,25 +218,27 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        {
-            let Some(picker) = self.tab().session.color_picker.as_mut() else {
-                return;
-            };
-            apply(&mut picker.hsb);
-        }
-        if matches!(
+        let is_effect = matches!(
             self.tab()
                 .session
+                .read(cx)
                 .color_picker
                 .as_ref()
                 .map(|picker| &picker.target),
             Some(ColorPickerTarget::Effect { .. })
-        ) {
-            self.tab().session.preview_effect_color();
-        }
+        );
+        self.tab().session.update(cx, |session, _| {
+            if let Some(picker) = session.color_picker.as_mut() {
+                apply(&mut picker.hsb);
+            }
+            if is_effect {
+                session.preview_effect_color();
+            }
+        });
         let text = self
             .tab()
             .session
+            .read(cx)
             .color_picker
             .as_ref()
             .map(|picker| picker.color().hex())
@@ -241,7 +261,7 @@ pub(crate) fn color_picker_panel_body(
     state: &mut AppState,
     cx: &mut Context<AppState>,
 ) -> Option<AnyElement> {
-    let picker = state.tab().session.color_picker.as_ref()?;
+    let picker = state.tab().session.read(cx).color_picker.as_ref()?;
     let color = picker.color();
     let hsb = picker.hsb;
     let ui = state.picker_ui.as_ref()?;

@@ -79,7 +79,9 @@ impl AppState {
         let Some((width, height)) = self.welcome_size(cx) else {
             return;
         };
-        self.tab().session.create_document(width, height, true);
+        self.tab().session.update(cx, |session, _| {
+            session.create_document(width, height, true)
+        });
         self.request_refit();
         self.touch(cx);
     }
@@ -152,12 +154,12 @@ impl AppState {
                     .label(OPEN_PROJECT_LABEL)
                     .small()
                     .disabled(disabled)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| match this.workspace.open(None) {
+                    .on_click(cx.listener(
+                        |this, _, window, cx| match this.workspace.open(None, cx) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(_) => {}
-                        }),
-                    ),
+                        },
+                    )),
             )
             // File > Import Images' entry point: the same shared flow the
             // menu action runs (workspace.rs `prompt_import_images`), so the

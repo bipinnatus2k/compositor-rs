@@ -4,6 +4,26 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-08 C 步：每 tab 一个 `Entity<EditorSession>`）
+
+33 号票落地（裁定全文见 `docs/adr/0001-editor-session-entity-model.md`）：
+`ProjectTab.session` 从值持有改为 `Entity<EditorSession>`（`ProjectTab::new`
+内 `cx.new` 构造）；全 app 约 590 处访问面机械改形为
+`session.read(cx)` / `session.update(cx, …)`；`AppState` 对活动 tab 的
+session 实体挂 `cx.observe`（tab 切换后重挂，非活动 tab 不观察）。
+行为不变，测试 892 项全绿，core 零改动。tabs.rs 的 XCTest 移植改为
+`#[gpui_kit::test]`。
+
+**有意偏差（记入 ADR 否决项）**：Swift 的 `ProjectWorkspace` 是
+`@Observable` 类；Rust 保持普通结构体挂 `AppState`——签页开关（建/关/
+切换 tab、quit 流程）低频，窗口级失效已足够，做成实体只引入第二个观察
+边界而无失效收益。若日后签页出现高频突变（如拖动重排），再重开裁定。
+
+后续既定方向（parked 37 号票）：(a) 迁 (b)——`DocumentHistory` 与四个对
+话框对象（`LevelsEdit`/`HueSaturationEdit`/`FilterEdit`/
+`ColorPickerState`，Swift 均为独立 `@Observable` 类）拆独立实体，通知作
+用域细化到按 tab/按关注点。
+
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
 三个方向并行（标尺参考线+PixelMove / ToolDefaults+快捷键设置 UI / 会话测试套件），主线完成接线与收尾。测试 659 → **748** 全绿（core lib 575 + 集成 104 + app lib 69）。

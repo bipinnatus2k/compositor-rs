@@ -18,9 +18,11 @@ impl AppState {
     /// Spot Healing / Smear) or the Clone Stamp checkboxes.
     pub(crate) fn brush_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
         let app = cx.entity().downgrade();
-        let brush = self.tab().session.brush_settings;
-        let tool = self.tab().session.tool;
-        let erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
+        let brush = self.tab().session.read(cx).brush_settings;
+        let (tool, erasing) = {
+            let session = self.tab().session.read(cx);
+            (session.tool, session.brush_mode == BrushToolMode::Erase)
+        };
 
         let mut controls = vec![
             labeled_slider(
@@ -53,7 +55,7 @@ impl AppState {
             .into_any_element(),
         ];
         if tool == NavigationTool::Brush {
-            let mode = self.tab().session.brush_mode;
+            let mode = self.tab().session.read(cx).brush_mode;
             controls.push(
                 dropdown(
                     &app,
@@ -73,7 +75,7 @@ impl AppState {
             );
         }
         if tool == NavigationTool::SpotHealing {
-            let mode = self.tab().session.spot_healing_mode;
+            let mode = self.tab().session.read(cx).spot_healing_mode;
             let label = |mode: SpotHealingMode| match mode {
                 SpotHealingMode::ContentAware => "Content Aware",
                 SpotHealingMode::CreateTexture => "Create Texture",
@@ -99,7 +101,7 @@ impl AppState {
             );
         }
         if tool == NavigationTool::Blur {
-            let mode = self.tab().session.blur_mode;
+            let mode = self.tab().session.read(cx).blur_mode;
             let label = |mode: BlurToolMode| match mode {
                 BlurToolMode::Liquify => "Liquify",
                 BlurToolMode::Blur => "Blur",
@@ -125,15 +127,20 @@ impl AppState {
             );
         }
         if tool == NavigationTool::CloneStamp {
-            let aligned = self.tab().session.clone_settings.aligned;
-            let all_layers = self.tab().session.clone_settings.sample_all_layers;
+            let (aligned, all_layers) = {
+                let clone = self.tab().session.read(cx).clone_settings;
+                (clone.aligned, clone.sample_all_layers)
+            };
             controls.push(checkbox(
                 &app,
                 "clone-aligned",
                 "Aligned",
                 aligned,
                 |state, checked, _, cx| {
-                    state.tab().session.clone_settings.aligned = checked;
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.clone_settings.aligned = checked);
                     state.touch(cx);
                 },
             ));
@@ -143,7 +150,9 @@ impl AppState {
                 "Sample All Layers",
                 all_layers,
                 |state, checked, _, cx| {
-                    state.tab().session.clone_settings.sample_all_layers = checked;
+                    state.tab().session.update(cx, |session, _| {
+                        session.clone_settings.sample_all_layers = checked
+                    });
                     state.touch(cx);
                 },
             ));

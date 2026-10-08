@@ -20,3 +20,8 @@ image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+# Test-only entity/test-harness support; features unify with the normal
+# dependency for test builds only.
+gpui-kit = { version = "0.7.0", features = ["test-support"] }

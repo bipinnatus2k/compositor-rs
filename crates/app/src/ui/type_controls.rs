@@ -93,8 +93,10 @@ pub(crate) fn alignment_buttons(
                     let app = app.clone();
                     move |_, _, cx| {
                         app.update(cx, |state, cx| {
-                            state.tab().session.change_text_style(move |style| {
-                                style.alignment = alignment;
+                            state.tab().session.update(cx, |session, _| {
+                                session.change_text_style(move |style| {
+                                    style.alignment = alignment;
+                                })
                             });
                             state.touch(cx);
                         })
@@ -112,7 +114,7 @@ impl AppState {
     /// draft is open, Edit Text otherwise).
     pub(crate) fn type_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
         let app = cx.entity().downgrade();
-        let style = self.tab().session.current_text_style();
+        let style = self.tab().session.read(cx).current_text_style();
         let font = style.font_name.clone();
         let names = font_menu_names(&font, available_font_names(), FONT_MENU_CAP);
         let entries = names
@@ -121,8 +123,10 @@ impl AppState {
                 let chosen = name.clone();
                 MenuEntry::new(name.clone(), move |state, _, cx| {
                     let chosen = chosen.clone();
-                    state.tab().session.change_text_style(move |style| {
-                        style.font_name = chosen;
+                    state.tab().session.update(cx, |session, _| {
+                        session.change_text_style(move |style| {
+                            style.font_name = chosen;
+                        })
                     });
                     state.touch(cx);
                 })
@@ -130,16 +134,19 @@ impl AppState {
             })
             .collect();
         let rgb = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-        let color = self.tab().session.type_color();
+        let color = self.tab().session.read(cx).type_color();
         let color_rgb = (rgb(color.red) << 16) | (rgb(color.green) << 8) | rgb(color.blue);
-        let has_document = self.tab().session.document.is_some();
-        let has_draft = self.tab().session.text_draft.is_some();
-        let active_is_text = self
-            .tab()
-            .session
-            .active_layer()
-            .and_then(|layer| layer.live_text())
-            .is_some();
+        let (has_document, has_draft, active_is_text) = {
+            let session = self.tab().session.read(cx);
+            (
+                session.document.is_some(),
+                session.text_draft.is_some(),
+                session
+                    .active_layer()
+                    .and_then(|layer| layer.live_text())
+                    .is_some(),
+            )
+        };
 
         let mut controls = vec![
             dropdown(&app, "type-font", font, px(150.0), entries).into_any_element(),
@@ -195,7 +202,9 @@ impl AppState {
                     .small()
                     .disabled(!has_document)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.tab().session.cancel_text();
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.cancel_text());
                         this.sync_inline_text(window, cx);
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);
@@ -209,7 +218,9 @@ impl AppState {
                     .primary()
                     .disabled(!has_document)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.tab().session.finish_text();
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.finish_text());
                         this.sync_inline_text(window, cx);
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);
@@ -223,7 +234,9 @@ impl AppState {
                     .small()
                     .disabled(!has_document || !active_is_text)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.tab().session.edit_active_text();
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.edit_active_text());
                         this.sync_inline_text(window, cx);
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);

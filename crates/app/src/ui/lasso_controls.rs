@@ -28,16 +28,23 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.selection_amount_operation.is_some() {
+        if self
+            .tab()
+            .session
+            .read(cx)
+            .selection_amount_operation
+            .is_some()
+        {
             return;
         }
-        self.tab().session.selection_amount_operation = Some(operation);
-        let session = &self.tab().session;
-        let amount = match operation {
-            SelectionAmountOperation::Expand => session.selection_expand_amount,
-            SelectionAmountOperation::Contract => session.selection_contract_amount,
-            SelectionAmountOperation::Feather => session.selection_feather_amount,
-        };
+        let amount = self.tab().session.update(cx, |session, _| {
+            session.selection_amount_operation = Some(operation);
+            match operation {
+                SelectionAmountOperation::Expand => session.selection_expand_amount,
+                SelectionAmountOperation::Contract => session.selection_contract_amount,
+                SelectionAmountOperation::Feather => session.selection_feather_amount,
+            }
+        });
         let tolerance = cx.new(|cx| InputState::new(window, cx).default_value(amount.to_string()));
         let maximum = amount_maximum(operation);
         let slider = cx.new(|_| {
@@ -111,7 +118,9 @@ impl AppState {
         if !self.panels.close(panel_names::SELECTION_AMOUNT_PANEL) {
             return;
         }
-        self.tab().session.selection_amount_operation = None;
+        self.tab()
+            .session
+            .update(cx, |session, _| session.selection_amount_operation = None);
         self.panel_widgets.amount = None;
         self.sync_panel_guard();
         self.touch(cx);
@@ -132,7 +141,9 @@ impl AppState {
                 .map(|panel| parse_input_usize(&panel.tolerance, cx_app).unwrap_or(0))
                 .unwrap_or(0) as i64
         };
-        self.tab().session.confirm_selection_amount(amount);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.confirm_selection_amount(amount));
         self.panel_widgets.amount = None;
         self.panels.close(panel_names::SELECTION_AMOUNT_PANEL);
         self.sync_panel_guard();
@@ -194,7 +205,7 @@ impl AppState {
     /// shape picker.
     pub(crate) fn marquee_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let app = cx.entity().downgrade();
-        let kind = self.tab().session.marquee_kind;
+        let kind = self.tab().session.read(cx).marquee_kind;
         vec![
             dropdown(
                 &app,
@@ -222,7 +233,7 @@ impl AppState {
     /// kind picker.
     pub(crate) fn lasso_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let app = cx.entity().downgrade();
-        let kind = self.tab().session.lasso_kind;
+        let kind = self.tab().session.read(cx).lasso_kind;
         vec![
             dropdown(
                 &app,
@@ -250,8 +261,10 @@ impl AppState {
     /// the tolerance slider and the sample checkboxes.
     pub(crate) fn wand_controls(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let app = cx.entity().downgrade();
-        let mode = self.tab().session.wand_mode;
-        let settings = self.tab().session.wand_settings;
+        let (mode, settings) = {
+            let session = self.tab().session.read(cx);
+            (session.wand_mode, session.wand_settings)
+        };
         vec![
             dropdown(
                 &app,
@@ -281,7 +294,10 @@ impl AppState {
                 "Contiguous",
                 settings.contiguous,
                 |state, checked, _, cx| {
-                    state.tab().session.wand_settings.contiguous = checked;
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.wand_settings.contiguous = checked);
                     state.touch(cx);
                 },
             ),
@@ -291,7 +307,9 @@ impl AppState {
                 "Sample All Layers",
                 settings.sample_all_layers,
                 |state, checked, _, cx| {
-                    state.tab().session.wand_settings.sample_all_layers = checked;
+                    state.tab().session.update(cx, |session, _| {
+                        session.wand_settings.sample_all_layers = checked
+                    });
                     state.touch(cx);
                 },
             ),

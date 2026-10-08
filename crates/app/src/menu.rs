@@ -6,13 +6,13 @@
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, px};
+use gpui_kit::{App, Context, IntoElement, ParentElement, Styled, Window, px};
 
 use crate::keys;
 use crate::state::AppState;
 
-pub fn render_menu_bar(state: &AppState) -> gpui_kit::AnyElement {
-    let session = &state.current_tab().session;
+pub fn render_menu_bar(state: &AppState, cx: &App) -> gpui_kit::AnyElement {
+    let session = state.current_tab().session.read(cx);
     let rulers = session.shows_rulers;
     let grid = session.shows_grid;
     let guides = session.shows_guides;

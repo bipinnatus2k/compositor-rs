@@ -931,17 +931,17 @@ impl AppState {
             match compositor_core::project::load(&dir) {
                 Ok(data) => match compositor_core::project::document_from_project(&data) {
                     Ok((document, active)) => {
-                        self.tab().session.active_layer_id =
-                            active.or_else(|| document.layers.last().map(|layer| layer.id));
-                        self.tab().session.selected_layer_ids = self
-                            .tab()
-                            .session
-                            .active_layer_id
-                            .map(|id| vec![id])
-                            .unwrap_or_default();
-                        self.tab().session.document = Some(document);
-                        self.tab().session.history.reset();
-                        self.tab().session.mark_saved();
+                        self.tab().session.update(cx, |session, _| {
+                            session.active_layer_id =
+                                active.or_else(|| document.layers.last().map(|layer| layer.id));
+                            session.selected_layer_ids = session
+                                .active_layer_id
+                                .map(|id| vec![id])
+                                .unwrap_or_default();
+                            session.document = Some(document);
+                            session.history.reset();
+                            session.mark_saved();
+                        });
                         self.fit_for = FitDims::REFIT;
                         self.set_status(format!("Opened {}", dir.display()), cx);
                     }
@@ -966,7 +966,11 @@ impl AppState {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Photoshop".to_string());
-            match self.tab().session.import_photoshop_data(&name, &data) {
+            match self
+                .tab()
+                .session
+                .update(cx, |session, _| session.import_photoshop_data(&name, &data))
+            {
                 Ok(notes) => {
                     self.fit_for = FitDims::REFIT;
                     self.set_status(
@@ -1003,21 +1007,27 @@ impl AppState {
                     .file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Image".to_string());
-                if self.tab().session.document.is_none() {
-                    self.tab().session.create_document(width, height, true);
+                if self.tab().session.read(cx).document.is_none() {
+                    self.tab().session.update(cx, |session, _| {
+                        session.create_document(width, height, true)
+                    });
                 }
                 let layer = compositor_core::document::ImageLayer::with_asset(
                     compositor_core::raster::ImportedImage::new(bitmap, name),
                     CGPoint::ZERO,
                 );
                 let id = layer.id;
-                self.history_edit("Open", move |session| {
-                    if let Some(document) = session.document.as_mut() {
-                        let slot = document.layers.len();
-                        document.layers.insert(slot, layer);
-                    }
-                    session.select_layer(Some(id));
-                });
+                self.history_edit(
+                    "Open",
+                    move |session| {
+                        if let Some(document) = session.document.as_mut() {
+                            let slot = document.layers.len();
+                            document.layers.insert(slot, layer);
+                        }
+                        session.select_layer(Some(id));
+                    },
+                    cx,
+                );
                 self.fit_for = FitDims::REFIT;
                 self.set_status(format!("Opened {}", path), cx);
             }

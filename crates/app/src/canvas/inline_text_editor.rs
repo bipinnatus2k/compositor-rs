@@ -472,12 +472,17 @@ impl AppState {
     /// The draft's layer raster width (`layer?.asset.image.width`), 0 when
     /// the draft has no layer or asset yet — the scale point-text growth
     /// measures against.
-    pub fn inline_text_asset_width(&self, draft: &compositor_core::session::TextDraft) -> f64 {
+    pub fn inline_text_asset_width(
+        &self,
+        draft: &compositor_core::session::TextDraft,
+        cx: &gpui_kit::App,
+    ) -> f64 {
         draft
             .layer_id
             .and_then(|id| {
                 self.current_tab()
                     .session
+                    .read(cx)
                     .document
                     .as_ref()?
                     .layer(id)
@@ -494,10 +499,11 @@ impl AppState {
     pub fn inline_text_shown(
         &self,
         draft: &compositor_core::session::TextDraft,
+        cx: &gpui_kit::App,
     ) -> (CGSize, LayerTransform) {
         let measured = inline_text_measured_size(&draft.style);
         let logical = draft.style.box_size.unwrap_or(measured);
-        let asset_width = self.inline_text_asset_width(draft);
+        let asset_width = self.inline_text_asset_width(draft, cx);
         let transform = inline_text_shown_transform(
             draft.origin,
             draft.transform,
@@ -510,7 +516,7 @@ impl AppState {
 
     /// Whether the inline editor's input currently owns the keyboard.
     pub fn inline_text_focused(&self, window: &mut Window, cx: &gpui_kit::App) -> bool {
-        self.current_tab().session.text_draft.is_some()
+        self.current_tab().session.read(cx).text_draft.is_some()
             && self
                 .inline_text_input
                 .read(cx)
@@ -524,7 +530,7 @@ impl AppState {
     /// the text (`synchronize`'s `shownStyle != style` half). `set_value`
     /// emits no events, so this never loops into `inline_text_changed`.
     pub fn sync_inline_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.tab().session.text_draft.clone() else {
+        let Some(draft) = self.tab().session.read(cx).text_draft.clone() else {
             self.inline_text_open = false;
             self.inline_text_pushed = None;
             return;
@@ -560,27 +566,37 @@ impl AppState {
     pub fn inline_text_changed(&mut self, text: &str, cx: &mut Context<Self>) {
         self.inline_text_pushed = Some(text.to_string());
         self.inline_text_caret_phase = std::time::Instant::now();
-        let Some(draft) = self.tab().session.text_draft.as_mut() else {
-            return;
-        };
-        if text.chars().count() > INLINE_TEXT_MAX_CHARS {
-            return;
-        }
-        if draft.style.content != text {
-            draft.style.content = text.to_string();
-            // Point text's shown box grows with the measurement on the next
-            // frame (`inline_text_shown_transform`); the draft's own
-            // transform stays as the layer left it — the commit scales the
-            // fresh raster against the old asset (`apply_text`), exactly as
-            // Swift's `textDidChange` only refreshes the display.
+        let changed = self.tab().session.update(cx, |session, _| {
+            let Some(draft) = session.text_draft.as_mut() else {
+                return false;
+            };
+            if text.chars().count() > INLINE_TEXT_MAX_CHARS {
+                return false;
+            }
+            if draft.style.content != text {
+                draft.style.content = text.to_string();
+                // Point text's shown box grows with the measurement on the
+                // next frame (`inline_text_shown_transform`); the draft's own
+                // transform stays as the layer left it — the commit scales
+                // the fresh raster against the old asset (`apply_text`),
+                // exactly as Swift's `textDidChange` only refreshes the
+                // display.
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
             self.touch(cx);
         }
     }
 
     /// ⌘Return in the inline editor (`finishText`).
     pub fn commit_inline_text(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.text_draft.is_some() {
-            self.tab().session.finish_text();
+        if self.tab().session.read(cx).text_draft.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_text());
             self.inline_text_open = false;
             self.touch(cx);
         }
@@ -622,8 +638,10 @@ impl AppState {
     /// Escape in the inline editor (`cancelText`): the draft is dropped and
     /// the layer keeps whatever it had.
     pub fn cancel_inline_text(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.text_draft.is_some() {
-            self.tab().session.cancel_text();
+        if self.tab().session.read(cx).text_draft.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.cancel_text());
             self.inline_text_open = false;
             self.touch(cx);
         }
@@ -633,8 +651,8 @@ impl AppState {
     /// axis-aligned bounds of the (possibly rotated) frame — gpui has no
     /// element-level rotation, so the text itself stays upright (see the
     /// module note on `render_inline_text_overlay`).
-    pub fn inline_text_overlay(&self) -> Option<InlineTextOverlay> {
-        let draft = self.current_tab().session.text_draft.as_ref()?;
+    pub fn inline_text_overlay(&self, cx: &gpui_kit::App) -> Option<InlineTextOverlay> {
+        let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
         let measured = inline_text_measured_size(&draft.style);
         let logical = draft.style.box_size.unwrap_or(measured);
         let ((ox, oy), (w, h)) = inline_text_box(
@@ -642,7 +660,7 @@ impl AppState {
             draft.transform,
             draft.style.box_size,
             measured,
-            self.inline_text_asset_width(draft),
+            self.inline_text_asset_width(draft, cx),
             self.zoom,
             self.pan,
         );
@@ -708,13 +726,13 @@ impl AppState {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        let overlay = self.inline_text_overlay()?;
+        let overlay = self.inline_text_overlay(cx)?;
         let input = self.inline_text_input.clone();
         let on_press = cx.listener(|this, event: &gpui_kit::MouseDownEvent, _window, cx| {
             let local = this.local_position(event.position);
             let doc = this.screen_to_doc(local.0, local.1);
-            if this.tab().session.text_draft.is_some()
-                && let Some(handle) = this.inline_text_handle_hit(doc)
+            if this.tab().session.read(cx).text_draft.is_some()
+                && let Some(handle) = this.inline_text_handle_hit(doc, cx)
             {
                 this.begin_inline_text_resize(doc, handle, cx);
             }
@@ -894,9 +912,9 @@ impl AppState {
     /// (`InlineTextEditor.hitTest`/`handle(at:)`). The editor is hit-tested
     /// against what is on screen, so point text that has grown while typing
     /// uses its shown transform, not the draft's stale one.
-    pub fn inline_text_handle_hit(&self, doc: CGPoint) -> Option<usize> {
-        let draft = self.current_tab().session.text_draft.as_ref()?;
-        let (logical, transform) = self.inline_text_shown(draft);
+    pub fn inline_text_handle_hit(&self, doc: CGPoint, cx: &gpui_kit::App) -> Option<usize> {
+        let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
+        let (logical, transform) = self.inline_text_shown(draft, cx);
         let handle_size = inline_text_handle_size(&transform, logical, self.zoom);
         let local = inline_text_local_point(&transform, logical, doc);
         inline_text_handle_at(local, logical, handle_size)
@@ -915,15 +933,17 @@ impl AppState {
         handle: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut draft) = self.current_tab().session.text_draft.clone() else {
+        let Some(mut draft) = self.current_tab().session.read(cx).text_draft.clone() else {
             return;
         };
-        let (measured, transform) = self.inline_text_shown(&draft);
+        let (measured, transform) = self.inline_text_shown(&draft, cx);
         if draft.style.box_size.is_none() {
             draft.style.box_size = Some(measured);
             draft.transform = Some(transform);
             draft.origin = transform.origin;
-            self.tab().session.text_draft = Some(draft.clone());
+            self.tab()
+                .session
+                .update(cx, |session, _| session.text_draft = Some(draft.clone()));
         }
         let source = draft.style.box_size.unwrap_or(measured);
         self.set_drag(Some(CanvasDrag::TextResize {

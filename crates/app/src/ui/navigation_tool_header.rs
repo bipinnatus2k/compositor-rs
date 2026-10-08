@@ -147,7 +147,10 @@ where
         .map(|(value, label)| {
             let assign = set.clone();
             MenuEntry::new(label, move |state, _, cx| {
-                assign(&mut state.tab().session, value);
+                state
+                    .tab()
+                    .session
+                    .update(cx, |session, _| assign(session, value));
                 state.touch(cx);
             })
             .checked(current == value)
@@ -170,11 +173,20 @@ impl AppState {
             return;
         }
         if self.current_tab().busy.is_project_busy
-            || self.current_tab().session.adjustment_editing_id.is_some()
+            || self
+                .current_tab()
+                .session
+                .read(cx)
+                .adjustment_editing_id
+                .is_some()
         {
             return;
         }
-        if !self.tab().session.select_tool(tool) {
+        if !self
+            .tab()
+            .session
+            .update(cx, |session, _| session.select_tool(tool))
+        {
             return;
         }
         // A shape drag dies with the switch (Swift's cancelShape :335); it
@@ -187,16 +199,22 @@ impl AppState {
 
     pub fn set_tool_eraser(&mut self, cx: &mut Context<Self>) {
         self.set_tool(NavigationTool::Brush, cx);
-        self.tab().session.brush_mode = BrushToolMode::Erase;
+        self.tab()
+            .session
+            .update(cx, |session, _| session.brush_mode = BrushToolMode::Erase);
         self.touch(cx);
     }
 
     // MARK: Tool rail
 
     pub fn render_tool_rail(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let active = self.tab().session.tool;
-        let eraser_active = self.tab().session.tool == NavigationTool::Brush
-            && self.tab().session.brush_mode == BrushToolMode::Erase;
+        let (active, eraser_active) = {
+            let session = self.tab().session.read(cx);
+            (
+                session.tool,
+                session.tool == NavigationTool::Brush && session.brush_mode == BrushToolMode::Erase,
+            )
+        };
 
         let mut rail = gpui_kit::div()
             .flex()
@@ -228,8 +246,8 @@ impl AppState {
 
         // Foreground / background swatches: clicking either opens the color
         // picker on it (ColorPalette.swift:60; the X key still swaps).
-        let foreground = self.tab().session.palette_color(false);
-        let background = self.tab().session.palette_color(true);
+        let foreground = self.tab().session.read(cx).palette_color(false);
+        let background = self.tab().session.read(cx).palette_color(true);
         rail = rail.child(
             gpui_kit::div()
                 .mt_2()
@@ -260,8 +278,10 @@ impl AppState {
 
     pub fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let app = cx.entity().downgrade();
-        let tool = self.tab().session.tool;
-        let erasing = self.tab().session.brush_mode == BrushToolMode::Erase;
+        let (tool, erasing) = {
+            let session = self.tab().session.read(cx);
+            (session.tool, session.brush_mode == BrushToolMode::Erase)
+        };
 
         let mut header = gpui_kit::div()
             // Stateful so the bar can scroll sideways (overflow_x_scroll is a
@@ -310,7 +330,7 @@ impl AppState {
             NavigationTool::Gradient => {
                 // Swift home: GradientControls.swift. It is not in ticket
                 // 32's file contract, so the controls stay with the shell.
-                let settings = self.tab().session.gradient_settings;
+                let settings = self.tab().session.read(cx).gradient_settings;
                 header = header
                     .child(dropdown(
                         &app,
@@ -335,11 +355,9 @@ impl AppState {
                         "Foreground to Background",
                         settings.foreground_to_background,
                         |state, checked, _, cx| {
-                            state
-                                .tab()
-                                .session
-                                .gradient_settings
-                                .foreground_to_background = checked;
+                            state.tab().session.update(cx, |session, _| {
+                                session.gradient_settings.foreground_to_background = checked
+                            });
                             state.touch(cx);
                         },
                     ))
@@ -349,7 +367,9 @@ impl AppState {
                         "Reverse",
                         settings.reversed,
                         |state, checked, _, cx| {
-                            state.tab().session.gradient_settings.reversed = checked;
+                            state.tab().session.update(cx, |session, _| {
+                                session.gradient_settings.reversed = checked
+                            });
                             state.touch(cx);
                         },
                     ))
@@ -500,7 +520,7 @@ fn zoom_button(
             app.update(cx, |state, cx| match command {
                 ZoomCommand::Fit => {
                     let viewport = state.viewport_size();
-                    state.zoom_fit(viewport);
+                    state.zoom_fit(viewport, cx);
                     state.touch(cx);
                 }
                 ZoomCommand::ActualSize => {

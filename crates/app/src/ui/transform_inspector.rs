@@ -22,21 +22,20 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Vec<gpui_kit::AnyElement> {
         let app = cx.entity().downgrade();
-        let edit = self.tab().session.transform_edit.as_ref();
+        let edit = self.tab().session.read(cx).transform_edit.as_ref();
         let has_edit = edit.is_some();
         let corners = edit.map(|edit| edit.corners.is_some()).unwrap_or(false);
         let mask = edit.map(|edit| edit.mask).unwrap_or_else(|| {
-            self.tab().session.is_mask_selected
-                && self
-                    .tab()
-                    .session
+            let session = self.tab().session.read(cx);
+            session.is_mask_selected
+                && session
                     .active_layer()
                     .and_then(|layer| layer.mask.as_ref().map(|mask| !mask.is_linked))
                     .unwrap_or(false)
         });
         // The fields gray out while nothing can transform, or while a
         // corner distort owns the edit (the handles are the controls).
-        let fields_enabled = (self.tab().session.can_transform() || has_edit) && !corners;
+        let fields_enabled = (self.tab().session.read(cx).can_transform() || has_edit) && !corners;
 
         let controls = vec![
             text_label(if mask { "Transform Mask" } else { "Transform" }, false)
@@ -54,7 +53,7 @@ impl AppState {
                     // transformAutoSelect (EditorSession.swift:198). The
                     // canvas click-through itself is canvas-side wiring.
                     state.transform_auto_select = checked;
-                    state.persist_tool_defaults();
+                    state.persist_tool_defaults(cx);
                     state.touch(cx);
                 },
             ),
@@ -62,9 +61,12 @@ impl AppState {
                 &app,
                 "transform-show-controls",
                 "Show Controls",
-                self.tab().session.shows_transform_controls,
+                self.tab().session.read(cx).shows_transform_controls,
                 |state, checked, _, cx| {
-                    state.tab().session.shows_transform_controls = checked;
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.shows_transform_controls = checked);
                     state.touch(cx);
                 },
             ),
@@ -76,9 +78,12 @@ impl AppState {
                 &app,
                 "transform-lock-ratio",
                 "Lock",
-                self.tab().session.locks_transform_ratio,
+                self.tab().session.read(cx).locks_transform_ratio,
                 |state, checked, _, cx| {
-                    state.tab().session.locks_transform_ratio = checked;
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.locks_transform_ratio = checked);
                     state.touch(cx);
                 },
             ),
@@ -96,7 +101,7 @@ impl AppState {
                 px(48.0),
             )
             .into_any_element(),
-            sampling_dropdown(&app, self.transform_displayed(), fields_enabled),
+            sampling_dropdown(&app, self.transform_displayed(cx), fields_enabled),
             Button::new("transform-flip-h")
                 .label("Flip H")
                 .small()
@@ -120,7 +125,9 @@ impl AppState {
                 .small()
                 .disabled(!has_edit)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.tab().session.cancel_transform();
+                    this.tab()
+                        .session
+                        .update(cx, |session, _| session.cancel_transform());
                     this.sync_transform_inputs(window, cx);
                     this.touch(cx);
                 }))
@@ -131,7 +138,9 @@ impl AppState {
                 .primary()
                 .disabled(!has_edit)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.tab().session.commit_transform();
+                    this.tab()
+                        .session
+                        .update(cx, |session, _| session.commit_transform());
                     this.sync_transform_inputs(window, cx);
                     this.touch(cx);
                 }))

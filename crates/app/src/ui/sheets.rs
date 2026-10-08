@@ -104,7 +104,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> SheetState {
         let (doc_w, doc_h) = {
-            let size = self.doc_size();
+            let size = self.doc_size(cx);
             (size.0 as usize, size.1 as usize)
         };
         let base = SheetState {
@@ -134,6 +134,7 @@ impl AppState {
                 let resolution = self
                     .current_tab()
                     .session
+                    .read(cx)
                     .document
                     .as_ref()
                     .map(|d| d.resolution as usize)
@@ -174,17 +175,12 @@ impl AppState {
     }
 
     /// Captures the active layer's pixels so adjustment panels can preview.
-    pub(crate) fn begin_preview(&mut self) {
-        self.preview_base = self
-            .tab()
-            .session
-            .active_layer()
+    pub(crate) fn begin_preview(&mut self, cx: &gpui_kit::App) {
+        let layer = self.tab().session.read(cx).active_layer().cloned();
+        self.preview_base = layer
+            .as_ref()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
-        self.preview_base_transform = self
-            .tab()
-            .session
-            .active_layer()
-            .map(|layer| layer.transform);
+        self.preview_base_transform = layer.as_ref().map(|layer| layer.transform);
         self.preview = self.preview_base.clone();
     }
 
@@ -230,9 +226,12 @@ impl AppState {
                 let preview = panel.preview;
                 // Editing an adjustment layer: sliders feed the session's
                 // Levels editor, which previews through the live composite.
-                if self.tab().session.adjustment_editing_id.is_some() {
-                    self.tab().session.levels = Some(self.levels_settings_from_panel(cx));
-                    self.tab().session.preview_adjustment_editing(preview);
+                if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+                    let settings = self.levels_settings_from_panel(cx);
+                    self.tab().session.update(cx, |session, _| {
+                        session.levels = Some(settings);
+                        session.preview_adjustment_editing(preview);
+                    });
                     return;
                 }
                 if let Some(base) = self.preview_base.clone() {
@@ -240,7 +239,7 @@ impl AppState {
                         let settings = self.levels_settings_from_panel(cx);
                         let mut adjusted = base.as_ref().clone();
                         levels_apply_settings(&mut adjusted, &settings);
-                        adjusted = self.blend_adjusted(adjusted);
+                        adjusted = self.blend_adjusted(adjusted, cx);
                         self.preview = Some(std::sync::Arc::new(adjusted));
                     } else {
                         self.preview = Some(base);
@@ -271,21 +270,23 @@ impl AppState {
                     );
                 }
                 // The adjustment-layer editor previews through the session.
-                if self.tab().session.adjustment_editing_id.is_some() {
-                    self.tab().session.hue_saturation = Some(settings);
-                    self.tab().session.preview_adjustment_editing(true);
+                if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+                    self.tab().session.update(cx, |session, _| {
+                        session.hue_saturation = Some(settings);
+                        session.preview_adjustment_editing(true);
+                    });
                     return;
                 }
                 if let Some(base) = self.preview_base.clone() {
                     let mut adjusted = base.as_ref().clone();
                     hue_saturation_apply(&mut adjusted, &settings);
-                    adjusted = self.blend_adjusted(adjusted);
+                    adjusted = self.blend_adjusted(adjusted, cx);
                     self.preview = Some(std::sync::Arc::new(adjusted));
                 }
             }
             SliderRole::CameraRaw(_) => {
                 let settings = self.filter_settings_from_panel(cx);
-                self.apply_filter_preview(FilterKind::CameraRaw, settings);
+                self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
             }
             SliderRole::Effect(_) => {
                 self.apply_effects_sliders(cx);
@@ -300,7 +301,7 @@ impl AppState {
                 };
                 let kind = panel.kind;
                 let settings = self.filter_settings_from_panel(cx);
-                self.apply_filter_preview(kind, settings);
+                self.apply_filter_preview(kind, settings, cx);
             }
         }
         self.revision += 1;
@@ -314,9 +315,12 @@ impl AppState {
             return;
         };
         let preview = panel.preview;
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.levels = Some(self.levels_settings_from_panel(cx));
-            self.tab().session.preview_adjustment_editing(preview);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            let settings = self.levels_settings_from_panel(cx);
+            self.tab().session.update(cx, |session, _| {
+                session.levels = Some(settings);
+                session.preview_adjustment_editing(preview);
+            });
             self.revision += 1;
             cx.notify();
             return;
@@ -328,7 +332,7 @@ impl AppState {
             let settings = self.levels_settings_from_panel(cx);
             let mut adjusted = base.as_ref().clone();
             levels_apply_settings(&mut adjusted, &settings);
-            adjusted = self.blend_adjusted(adjusted);
+            adjusted = self.blend_adjusted(adjusted, cx);
             self.preview = Some(std::sync::Arc::new(adjusted));
         } else {
             self.preview = Some(base);
@@ -464,7 +468,7 @@ impl AppState {
     /// selection, as `LevelsFilter.run`/`HueSaturationFilter.run` do before
     /// the pixels reach the layer (Levels.swift:80-82, HueSaturation.swift:
     /// 244-250). Without a selection the adjustment stands alone.
-    fn blend_adjusted(&self, adjusted: Bitmap) -> Bitmap {
+    fn blend_adjusted(&self, adjusted: Bitmap, cx: &gpui_kit::App) -> Bitmap {
         let Some(base) = self.preview_base.as_deref() else {
             return adjusted;
         };
@@ -472,7 +476,7 @@ impl AppState {
             base,
             adjusted,
             self.preview_base_transform,
-            self.current_tab().session.selection().cloned(),
+            self.current_tab().session.read(cx).selection().cloned(),
         )
     }
 
@@ -483,7 +487,7 @@ impl AppState {
         };
         let kind = panel.kind;
         let settings = self.filter_settings_from_panel(cx);
-        self.apply_filter_preview(kind, settings);
+        self.apply_filter_preview(kind, settings, cx);
         self.revision += 1;
         cx.notify();
     }
@@ -499,10 +503,13 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.add_effect(kind);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.add_effect(kind));
         if self
             .tab()
             .session
+            .read(cx)
             .effects_editing
             .map(|editing| editing.kind)
             == Some(kind)
@@ -517,7 +524,9 @@ impl AppState {
     /// and state live on the core session in `color_picker.rs`). Nothing is
     /// written into the layer until the picker closes.
     pub fn open_effect_color_picker(&mut self, kind: LayerEffectKind, cx: &mut Context<Self>) {
-        self.tab().session.open_effect_color_picker(kind);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.open_effect_color_picker(kind));
         self.touch(cx);
     }
 
@@ -540,9 +549,8 @@ impl AppState {
             (kind, values)
         };
         let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
-        self.tab()
-            .session
-            .change_effects(move |effects| match kind {
+        self.tab().session.update(cx, move |session, _| {
+            session.change_effects(move |effects| match kind {
                 LayerEffectKind::Stroke => {
                     if let Some(stroke) = effects.stroke.as_mut() {
                         stroke.size = value(0);
@@ -582,7 +590,8 @@ impl AppState {
                         glow.opacity = value(1) / 100.0;
                     }
                 }
-            });
+            })
+        });
         self.touch(cx);
     }
 }

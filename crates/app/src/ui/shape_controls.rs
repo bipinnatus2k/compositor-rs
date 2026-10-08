@@ -14,7 +14,7 @@ impl AppState {
     /// Line picker and the drag hint.
     pub(crate) fn shape_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
         let app = cx.entity().downgrade();
-        let kind = self.tab().session.shape_kind;
+        let kind = self.tab().session.read(cx).shape_kind;
         let label = |kind: ShapeKind| match kind {
             ShapeKind::Rectangle => "Rectangle",
             ShapeKind::RoundedRectangle => "Rounded Rectangle",

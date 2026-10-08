@@ -35,13 +35,13 @@ impl AppState {
         use gpui_kit::component::tab::{Tab, TabBar};
         use gpui_kit::component::{Disableable, Selectable};
 
-        let can_switch = self.workspace.can_switch();
+        let can_switch = self.workspace.can_switch(cx);
         let selected = self.workspace.selected_id();
         let tabs: Vec<(crate::project::TabId, String, bool)> = self
             .workspace
             .tabs()
             .iter()
-            .map(|tab| (tab.id, tab.title(), tab.session.is_modified()))
+            .map(|tab| (tab.id, tab.title(cx), tab.session.read(cx).is_modified()))
             .collect();
 
         let mut bar = TabBar::new("project-tabs")
@@ -54,7 +54,8 @@ impl AppState {
                 .selected(active)
                 .disabled(!can_switch && !active)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.workspace.select(id) {
+                    if this.workspace.select(id, cx) {
+                        this.sync_session_observer(cx);
                         this.request_refit();
                         this.touch(cx);
                     }
@@ -72,15 +73,16 @@ impl AppState {
                     // (ProjectTabs.swift:242); the port's icon-only button
                     // says the same to assistive tech.
                     .accessibility_label(format!("Close {title}"))
-                    .on_click(cx.listener(
-                        move |this, _, window, cx| match this.workspace.close(id) {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        match this.workspace.close(id, cx) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(()) => {
+                                this.sync_session_observer(cx);
                                 this.request_refit();
                                 this.touch(cx);
                             }
-                        },
-                    )),
+                        }
+                    })),
             );
             bar = bar.child(tab);
         }
@@ -94,8 +96,9 @@ impl AppState {
                 .compact()
                 .disabled(!can_switch)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if this.workspace.can_switch() {
-                        this.workspace.add_tab(true);
+                    if this.workspace.can_switch(cx) {
+                        this.workspace.add_tab(true, cx);
+                        this.sync_session_observer(cx);
                         this.request_refit();
                         this.touch(cx);
                     }
@@ -119,7 +122,8 @@ impl AppState {
             })
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
                 let paths = dropped.paths().to_vec();
-                let failures = this.workspace.receive(&paths, None, None);
+                let failures = this.workspace.receive(&paths, None, None, cx);
+                this.sync_session_observer(cx);
                 if !failures.is_empty() {
                     this.set_status(failures.join("; "), cx);
                 }

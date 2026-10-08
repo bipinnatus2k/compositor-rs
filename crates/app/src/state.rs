@@ -308,9 +308,9 @@ pub fn transform_field_texts(
 }
 
 /// Everything the window shows, owned as a single GPUI entity. The document
-/// lives in the workspace's tabs (`workspace.current_mut().session`):
-/// every tab carries its own session, controller and busy snapshot, exactly
-/// like Swift's `ProjectWorkspace` (design doc §1, plan A).
+/// lives in the workspace's tabs (`workspace.current().session.read(cx)`):
+/// every tab carries its own session entity, controller and busy snapshot,
+/// exactly like Swift's `ProjectWorkspace` (design doc §1, plan A; ADR 0001).
 pub struct AppState {
     pub workspace: crate::tabs::ProjectWorkspace,
     pub focus: FocusHandle,
@@ -428,6 +428,13 @@ pub struct AppState {
     /// Bake / Remove Links / Cancel answer, while the three-button Confirm
     /// sheet is up.
     pub delete_ask_ids: Option<Vec<uuid::Uuid>>,
+    /// The observe subscription on the active tab's session entity
+    /// (ADR 0001): a session-entity notify re-renders the window.
+    /// Re-attached whenever the active tab changes
+    /// ([`AppState::sync_session_observer`]); non-active tabs are not
+    /// observed. Kept in a dedicated field — not `subscriptions` — so a tab
+    /// switch drops the outgoing tab's observation.
+    session_observer: Option<(Entity<EditorSession>, Subscription)>,
 }
 
 /// What continues after a mid-flow save panel completes.
@@ -529,21 +536,26 @@ impl AppState {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut workspace = crate::tabs::ProjectWorkspace::new();
+        let workspace = crate::tabs::ProjectWorkspace::new(cx);
         // The window opens on one 1280×800 document, as before.
         workspace
-            .current_mut()
+            .current()
             .session
-            .create_document(1280, 800, true);
+            .update(cx, |session, _| session.create_document(1280, 800, true));
         // The persisted auto-select toggle is app-global in this port (Swift
         // keeps it per-session — docs/rust-vs-swift-diff-report.md); the
         // session-side defaults are applied per tab in ProjectTab::new, so
         // the panel sliders seed from already-persisted settings.
         let transform_auto_select = crate::settings::stored_auto_select();
-        let brush = workspace.current().session.brush_settings;
-        let wand_tolerance = workspace.current().session.wand_settings.tolerance;
-        let gradient_opacity = workspace.current().session.gradient_settings.opacity;
-        let style = workspace.current().session.current_text_style();
+        let (brush, wand_tolerance, gradient_opacity, style) = {
+            let session = workspace.current().session.read(cx);
+            (
+                session.brush_settings,
+                session.wand_settings.tolerance,
+                session.gradient_settings.opacity,
+                session.current_text_style(),
+            )
+        };
         let number_input = |value: f64, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).default_value(format_number(value)))
         };
@@ -633,23 +645,29 @@ impl AppState {
             pending_save: None,
             filter_seed: time_seed(),
             delete_ask_ids: None,
+            session_observer: None,
         };
         state.subscribe_sliders(cx);
         state.subscribe_inputs(cx);
+        state.sync_session_observer(cx);
         // `on_window_should_close` → `workspace.close_window` (two-phase):
         // a pending unsaved-changes dialog vetoes the close and presents
         // itself; once the flow completes the window closes for real.
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            view.update(cx, |state, cx| match state.workspace.close_window() {
-                crate::project::Step::Done(true) => {
-                    window.remove_window();
-                    true
-                }
-                crate::project::Step::Done(false) => false,
-                crate::project::Step::Pending(pending) => {
-                    state.present_pending(pending, window, cx);
-                    false
+            view.update(cx, |state, cx| {
+                let step = state.workspace.close_window(cx);
+                state.sync_session_observer(cx);
+                match step {
+                    crate::project::Step::Done(true) => {
+                        window.remove_window();
+                        true
+                    }
+                    crate::project::Step::Done(false) => false,
+                    crate::project::Step::Pending(pending) => {
+                        state.present_pending(pending, window, cx);
+                        false
+                    }
                 }
             })
             .unwrap_or(true)
@@ -665,21 +683,33 @@ impl AppState {
     /// Space keyDown: the canvas pans until the key comes back up
     /// (EditorCanvas.swift:1825).
     pub fn space_down(&mut self, cx: &mut Context<Self>) {
-        if self.space_saved_tool.is_some()
-            || self.tab().session.document.is_none()
-            || self.tab().session.text_draft.is_some()
-        {
+        if self.space_saved_tool.is_some() {
             return;
         }
-        self.space_saved_tool = Some(self.tab().session.tool);
-        self.tab().session.tool = compositor_core::document::NavigationTool::Hand;
+        let (has_document, has_draft, tool) = {
+            let session = self.tab().session.read(cx);
+            (
+                session.document.is_some(),
+                session.text_draft.is_some(),
+                session.tool,
+            )
+        };
+        if !has_document || has_draft {
+            return;
+        }
+        self.space_saved_tool = Some(tool);
+        self.tab().session.update(cx, |session, _| {
+            session.tool = compositor_core::document::NavigationTool::Hand
+        });
         self.touch(cx);
     }
 
     /// Space keyUp: the saved tool comes back (EditorCanvas.swift:1866).
     pub fn space_up(&mut self, cx: &mut Context<Self>) {
         if let Some(tool) = self.space_saved_tool.take() {
-            self.tab().session.tool = tool;
+            self.tab()
+                .session
+                .update(cx, |session, _| session.tool = tool);
             self.touch(cx);
         }
     }
@@ -687,28 +717,32 @@ impl AppState {
     /// Number keys set the active tool's opacity (Photoshop-style).
     pub fn opacity_digit(&mut self, digit: i32, window: &mut Window, cx: &mut Context<Self>) {
         let uptime = self.uptime();
-        self.tab().session.type_opacity_digit(digit, uptime);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.type_opacity_digit(digit, uptime));
         // Keep the panel sliders truthful (Swift's bindings follow the same
         // settings).
         use compositor_core::document::NavigationTool;
-        let tool = self.tab().session.tool;
-        let active_opacity = self
-            .tab()
-            .session
-            .active_layer()
-            .map(|l| l.opacity)
-            .unwrap_or(1.0);
+        let (tool, active_opacity, brush_opacity, gradient_opacity) = {
+            let session = self.tab().session.read(cx);
+            (
+                session.tool,
+                session.active_layer().map(|l| l.opacity).unwrap_or(1.0),
+                session.brush_settings.opacity,
+                session.gradient_settings.opacity,
+            )
+        };
         let sync: Option<(Entity<SliderState>, f32)> = match tool {
             NavigationTool::Brush
             | NavigationTool::SpotHealing
             | NavigationTool::CloneStamp
             | NavigationTool::Blur => Some((
                 self.brush_sliders[2].clone(),
-                (self.tab().session.brush_settings.opacity * 100.0) as f32,
+                (brush_opacity * 100.0) as f32,
             )),
             NavigationTool::Gradient => Some((
                 self.gradient_slider.clone(),
-                (self.tab().session.gradient_settings.opacity * 100.0) as f32,
+                (gradient_opacity * 100.0) as f32,
             )),
             NavigationTool::Move => {
                 Some((self.opacity_slider.clone(), (active_opacity * 100.0) as f32))
@@ -729,35 +763,39 @@ impl AppState {
 
     /// Option-arrows step the edited text's tracking (InlineTextEditor.swift:18-19).
     pub fn adjust_text_tracking(&mut self, delta: f64, cx: &mut Context<Self>) {
-        if self.tab().session.text_draft.is_none() {
+        if self.tab().session.read(cx).text_draft.is_none() {
             return;
         }
-        self.tab()
-            .session
-            .change_text_style(|style| style.tracking += delta);
+        self.tab().session.update(cx, |session, _| {
+            session.change_text_style(|style| style.tracking += delta)
+        });
         self.touch(cx);
     }
 
     /// Option-arrows step the edited text's leading, counting from whatever
     /// Auto works out to; up closes the lines up (InlineTextEditor.swift:20-22).
     pub fn adjust_text_leading(&mut self, down: bool, step: f64, cx: &mut Context<Self>) {
-        if self.tab().session.text_draft.is_none() {
+        if self.tab().session.read(cx).text_draft.is_none() {
             return;
         }
-        self.tab().session.change_text_style(|style| {
-            style.leading = if down {
-                style.line_height() + step
-            } else {
-                (style.line_height() - step).max(1.0)
-            };
+        self.tab().session.update(cx, |session, _| {
+            session.change_text_style(|style| {
+                style.leading = if down {
+                    style.line_height() + step
+                } else {
+                    (style.line_height() - step).max(1.0)
+                };
+            })
         });
         self.touch(cx);
     }
 
     /// ⌘Return finishes the text being edited (InlineTextEditor.swift:25-27).
     pub fn finish_text_edit(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.text_draft.is_some() {
-            self.tab().session.finish_text();
+        if self.tab().session.read(cx).text_draft.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_text());
             self.touch(cx);
         }
     }
@@ -812,7 +850,7 @@ impl AppState {
             return;
         }
         // Space holds the Hand tool; a text draft keeps typing into the box.
-        if key == "space" && bare && self.tab().session.text_draft.is_none() {
+        if key == "space" && bare && self.tab().session.read(cx).text_draft.is_none() {
             self.space_down(cx);
             cx.stop_propagation();
             return;
@@ -877,13 +915,15 @@ impl AppState {
                     let value = match event {
                         SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
                     };
-                    let brush = &mut state.tab().session.brush_settings;
-                    match index {
-                        0 => brush.diameter = value as f64,
-                        1 => brush.hardness = (value / 100.0) as f64,
-                        2 => brush.opacity = (value / 100.0) as f64,
-                        _ => brush.smoothing = value as f64,
-                    }
+                    state.tab().session.update(cx, |session, _| {
+                        let brush = &mut session.brush_settings;
+                        match index {
+                            0 => brush.diameter = value as f64,
+                            1 => brush.hardness = (value / 100.0) as f64,
+                            2 => brush.opacity = (value / 100.0) as f64,
+                            _ => brush.smoothing = value as f64,
+                        }
+                    });
                     state.revision += 1;
                     cx.notify();
                 });
@@ -894,11 +934,11 @@ impl AppState {
             let value = match event {
                 SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
             };
-            {
-                state.tab().session.wand_settings.tolerance = value as i32;
-                state.revision += 1;
-                cx.notify();
-            }
+            state.tab().session.update(cx, |session, _| {
+                session.wand_settings.tolerance = value as i32
+            });
+            state.revision += 1;
+            cx.notify();
         });
         self.subscriptions.push(subscription);
         let gradient_slider = self.gradient_slider.clone();
@@ -908,7 +948,9 @@ impl AppState {
                 let value = match event {
                     SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
                 };
-                state.tab().session.gradient_settings.opacity = (value / 100.0) as f64;
+                state.tab().session.update(cx, |session, _| {
+                    session.gradient_settings.opacity = (value / 100.0) as f64
+                });
                 state.revision += 1;
                 cx.notify();
             },
@@ -920,18 +962,16 @@ impl AppState {
             |state, _slider, event: &SliderEvent, cx| {
                 match event {
                     SliderEvent::Change(value) => {
-                        state.tab().session.begin_opacity_edit();
-                        state
-                            .tab()
-                            .session
-                            .set_layer_opacity((value.start() / 100.0) as f64);
+                        state.tab().session.update(cx, |session, _| {
+                            session.begin_opacity_edit();
+                            session.set_layer_opacity((value.start() / 100.0) as f64);
+                        });
                     }
                     SliderEvent::Release(value) => {
-                        state
-                            .tab()
-                            .session
-                            .set_layer_opacity((value.start() / 100.0) as f64);
-                        state.tab().session.finish_opacity_edit();
+                        state.tab().session.update(cx, |session, _| {
+                            session.set_layer_opacity((value.start() / 100.0) as f64);
+                            session.finish_opacity_edit();
+                        });
                     }
                 }
                 state.revision += 1;
@@ -943,8 +983,10 @@ impl AppState {
 
     /// `[` / `]` shrink and grow the brush, keeping the slider in sync.
     pub fn resize_brush(&mut self, factor: f64, window: &mut Window, cx: &mut Context<Self>) {
-        let next = (self.tab().session.brush_settings.diameter * factor).clamp(1.0, 300.0);
-        self.tab().session.brush_settings.diameter = next;
+        let next = (self.tab().session.read(cx).brush_settings.diameter * factor).clamp(1.0, 300.0);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.brush_settings.diameter = next);
         let slider = self.brush_sliders[0].clone();
         slider.update(cx, |state, cx| {
             state.set_value(
@@ -963,8 +1005,10 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.change_brush_hardness(increase);
-        let next = self.tab().session.brush_settings.hardness;
+        self.tab()
+            .session
+            .update(cx, |session, _| session.change_brush_hardness(increase));
+        let next = self.tab().session.read(cx).brush_settings.hardness;
         let slider = self.brush_sliders[1].clone();
         slider.update(cx, |state, cx| {
             state.set_value(
@@ -979,16 +1023,17 @@ impl AppState {
     /// Content-Aware Fill (Shift-Delete): heals the selection from surrounding
     /// pixels and commits it as one undo step, without opening a sheet.
     pub fn run_content_aware_fill(&mut self, cx: &mut Context<Self>) {
-        let Some(base) = self
+        let base = self
             .tab()
             .session
+            .read(cx)
             .active_layer()
-            .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()))
-        else {
+            .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
+        let Some(base) = base else {
             return;
         };
-        let selection = self.selection_clip();
-        if self.tab().session.selection().is_none() {
+        let selection = self.selection_clip(cx);
+        if self.tab().session.read(cx).selection().is_none() {
             return;
         }
         let job = FilterJob::builder(
@@ -1002,14 +1047,19 @@ impl AppState {
         .with_seed(time_seed())
         .build();
         let result = compositor_core::filters::run_filter(&job);
-        if let Some(id) = self.tab().session.active_layer_id {
-            self.history_edit("Content-Aware Fill", move |session| {
-                if let Some(doc) = session.document.as_mut()
-                    && let Some(layer) = doc.layer_mut(id)
-                {
-                    layer.asset = Some(ImportedImage::new(result, layer.name.clone()));
-                }
-            });
+        let id = self.tab().session.read(cx).active_layer_id;
+        if let Some(id) = id {
+            self.history_edit(
+                "Content-Aware Fill",
+                move |session| {
+                    if let Some(doc) = session.document.as_mut()
+                        && let Some(layer) = doc.layer_mut(id)
+                    {
+                        layer.asset = Some(ImportedImage::new(result, layer.name.clone()));
+                    }
+                },
+                cx,
+            );
         }
         self.touch(cx);
     }
@@ -1032,7 +1082,7 @@ impl AppState {
         if let Some(editor) = self.curves_editor.as_ref() {
             settings.curves = editor.settings.clone();
         }
-        self.apply_filter_preview(FilterKind::Curves, settings);
+        self.apply_filter_preview(FilterKind::Curves, settings, cx);
         self.touch(cx);
     }
 
@@ -1051,23 +1101,23 @@ impl AppState {
             TextStyleField::Size => {
                 if let Some(value) = parse_field(text) {
                     let value = clamp_font_size(value);
-                    self.tab()
-                        .session
-                        .change_text_style(move |style| style.font_size = value);
+                    self.tab().session.update(cx, |session, _| {
+                        session.change_text_style(move |style| style.font_size = value)
+                    });
                 }
             }
             TextStyleField::Tracking => {
                 if let Some(value) = parse_field(text) {
-                    self.tab()
-                        .session
-                        .change_text_style(move |style| style.tracking = value);
+                    self.tab().session.update(cx, |session, _| {
+                        session.change_text_style(move |style| style.tracking = value)
+                    });
                 }
             }
             TextStyleField::Leading => {
                 let value = leading_from_text(text);
-                self.tab()
-                    .session
-                    .change_text_style(move |style| style.leading = value);
+                self.tab().session.update(cx, |session, _| {
+                    session.change_text_style(move |style| style.leading = value)
+                });
             }
         }
         self.touch(cx);
@@ -1076,7 +1126,7 @@ impl AppState {
     /// Pushes the current style back into the Type header's fields (Swift's
     /// `sync`, run when a value may have moved under an unfocused field).
     pub fn sync_text_style_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let style = self.tab().session.current_text_style();
+        let style = self.tab().session.read(cx).current_text_style();
         let fields = [
             (&self.type_size_input, format_number(style.font_size)),
             (&self.type_tracking_input, format_number(style.tracking)),
@@ -1095,11 +1145,13 @@ impl AppState {
     /// than in `color_picker_ui` because that module only knows the palette
     /// targets.
     pub fn open_text_color_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab().session.color_picker.is_some() {
+        if self.tab().session.read(cx).color_picker.is_some() {
             return;
         }
-        self.tab().session.open_text_color_picker();
-        if self.tab().session.color_picker.is_some() {
+        self.tab()
+            .session
+            .update(cx, |session, _| session.open_text_color_picker());
+        if self.tab().session.read(cx).color_picker.is_some() {
             self.build_picker_ui(window, cx);
         }
         self.touch(cx);
@@ -1108,13 +1160,19 @@ impl AppState {
     /// Builds the picker widgets for whatever target the session just
     /// opened (`open_color_picker_ui`'s widget half).
     fn build_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = self.tab().session.color_picker.as_ref() else {
+        let Some((title, hex)) = self
+            .tab()
+            .session
+            .read(cx)
+            .color_picker
+            .as_ref()
+            .map(|picker| (picker.target.title(), picker.color().hex()))
+        else {
             return;
         };
         // The text color's picker lives in the same floating panel as the
         // palette one (ColorPickerSheet.swift:170-182).
-        let title = picker.target.title();
-        let hex = cx.new(|cx| InputState::new(window, cx).default_value(picker.color().hex()));
+        let hex = cx.new(|cx| InputState::new(window, cx).default_value(hex));
         self.picker_ui = Some(crate::ui::color_picker_sheet::PickerUi { hex });
         self.panels.show(
             crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
@@ -1129,12 +1187,13 @@ impl AppState {
     /// The transform the inspector's fields show: the draft while an edit is
     /// open, else the active layer's (or its unlinked mask's) transform
     /// (`session.editedTransform`).
-    pub fn transform_displayed(&self) -> Option<LayerTransform> {
-        if let Some(edit) = self.current_tab().session.transform_edit.as_ref() {
+    pub fn transform_displayed(&self, cx: &App) -> Option<LayerTransform> {
+        let session = self.current_tab().session.read(cx);
+        if let Some(edit) = session.transform_edit.as_ref() {
             return Some(edit.draft);
         }
-        let layer = self.current_tab().session.active_layer()?;
-        let mask_alone = self.current_tab().session.is_mask_selected
+        let layer = session.active_layer()?;
+        let mask_alone = session.is_mask_selected
             && layer
                 .mask
                 .as_ref()
@@ -1149,13 +1208,13 @@ impl AppState {
 
     /// 100% scale: the layer's pixels, else the displayed size
     /// (`transformPixelSize ?? activeLayer?.size ?? value.size`).
-    pub fn transform_pixel_size(&self) -> CGSize {
-        if let Some(layer) = self.current_tab().session.active_layer()
+    pub fn transform_pixel_size(&self, cx: &App) -> CGSize {
+        if let Some(layer) = self.current_tab().session.read(cx).active_layer()
             && let Some(asset) = layer.asset.as_ref()
         {
             return CGSize::new(asset.image.width as f64, asset.image.height as f64);
         }
-        self.transform_displayed()
+        self.transform_displayed(cx)
             .map(|value| value.size)
             .unwrap_or(CGSize::new(1.0, 1.0))
     }
@@ -1167,15 +1226,17 @@ impl AppState {
         update: impl FnOnce(&mut LayerTransform),
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.transform_edit.is_none() {
-            self.tab().session.begin_transform();
-        }
-        let Some(edit) = self.tab().session.transform_edit.as_ref() else {
-            return;
-        };
-        let mut value = edit.draft;
-        update(&mut value);
-        self.tab().session.preview_transform(value);
+        self.tab().session.update(cx, |session, _| {
+            if session.transform_edit.is_none() {
+                session.begin_transform();
+            }
+            let Some(edit) = session.transform_edit.as_ref() else {
+                return;
+            };
+            let mut value = edit.draft;
+            update(&mut value);
+            session.preview_transform(value);
+        });
         self.touch(cx);
     }
 
@@ -1194,7 +1255,7 @@ impl AppState {
             TransformField::X => self.transform_change(|value| value.origin.x = number, cx),
             TransformField::Y => self.transform_change(|value| value.origin.y = number, cx),
             TransformField::Width | TransformField::Height => {
-                let lock = self.tab().session.locks_transform_ratio;
+                let lock = self.tab().session.read(cx).locks_transform_ratio;
                 let width = field == TransformField::Width;
                 self.transform_change(
                     move |value| *value = resize_transform(*value, number, width, lock),
@@ -1205,7 +1266,7 @@ impl AppState {
                 if number <= 0.0 {
                     return;
                 }
-                let pixel_size = self.transform_pixel_size();
+                let pixel_size = self.transform_pixel_size(cx);
                 self.transform_change(move |value| *value = value.scaled(number, pixel_size), cx);
             }
             TransformField::Rotation => {
@@ -1217,10 +1278,10 @@ impl AppState {
     /// Pushes the displayed transform back into the inspector's fields
     /// (`TransformValueField.sync`).
     pub fn sync_transform_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(value) = self.transform_displayed() else {
+        let Some(value) = self.transform_displayed(cx) else {
             return;
         };
-        let pixel_size = self.transform_pixel_size();
+        let pixel_size = self.transform_pixel_size(cx);
         for (field, text) in transform_field_texts(value, pixel_size) {
             let input = match field {
                 TransformField::X => &self.transform_x_input,
@@ -1303,6 +1364,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// (Re)attaches the window's observer to the active tab's session
+    /// entity (ADR 0001): while a session entity itself notifies, the
+    /// window re-renders. Idempotent — call after any workspace flow that
+    /// may have changed the active tab; the outgoing tab's observation is
+    /// dropped by the replacement, so non-active tabs are not observed
+    /// (notification-scope refinement beyond the active tab is ticket 37).
+    pub(crate) fn sync_session_observer(&mut self, cx: &mut Context<Self>) {
+        let session = self.workspace.current().session.clone();
+        if self
+            .session_observer
+            .as_ref()
+            .is_some_and(|(observed, _)| observed.entity_id() == session.entity_id())
+        {
+            return;
+        }
+        let subscription = cx.observe(&session, |_, _, cx| cx.notify());
+        self.session_observer = Some((session, subscription));
+    }
+
     pub fn notify_only(&mut self, cx: &mut Context<Self>) {
         cx.notify();
     }
@@ -1310,8 +1390,8 @@ impl AppState {
     /// The composite for canvas display: mask resamples cap at 2048 pixels
     /// while a transform edit drives the placements (`clipImage`'s
     /// interactive `limit`).
-    pub fn composite_bitmap(&self, document: &CanvasDocument) -> Bitmap {
-        if self.current_tab().session.transform_edit.is_some() {
+    pub fn composite_bitmap(&self, document: &CanvasDocument, cx: &App) -> Bitmap {
+        if self.current_tab().session.read(cx).transform_edit.is_some() {
             compositor_core::render::draw_live_composite_interactive(document, true)
         } else {
             compositor_core::render::draw_live_composite(document)
@@ -1334,7 +1414,7 @@ impl AppState {
         if sheet.jpeg_ready == Some((quality, matte)) {
             return;
         }
-        let Some(document) = self.tab().session.document.clone() else {
+        let Some(document) = self.tab().session.read(cx).document.clone() else {
             return;
         };
         let composite = compositor_core::render::draw_live_composite(&document);
@@ -1368,9 +1448,10 @@ impl AppState {
 
     // MARK: View transform
 
-    pub fn doc_size(&self) -> (f64, f64) {
+    pub fn doc_size(&self, cx: &App) -> (f64, f64) {
         self.current_tab()
             .session
+            .read(cx)
             .document
             .as_ref()
             .map(|d| (d.width as f64, d.height as f64))
@@ -1386,8 +1467,8 @@ impl AppState {
     }
 
     /// The document rect in viewport pixels.
-    pub fn image_rect(&self) -> Bounds<Pixels> {
-        let (w, h) = self.doc_size();
+    pub fn image_rect(&self, cx: &App) -> Bounds<Pixels> {
+        let (w, h) = self.doc_size(cx);
         let (x, y) = self.doc_to_screen(0.0, 0.0);
         Bounds::<Pixels>::new(
             Point::new(px(x), px(y)),
@@ -1405,8 +1486,8 @@ impl AppState {
         self.revision += 1;
     }
 
-    pub fn zoom_fit(&mut self, viewport: (f32, f32)) {
-        let (w, h) = self.doc_size();
+    pub fn zoom_fit(&mut self, viewport: (f32, f32), cx: &App) {
+        let (w, h) = self.doc_size(cx);
         if w <= 0.0 || h <= 0.0 || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
             return;
         }
@@ -1447,8 +1528,9 @@ impl AppState {
 
     /// The composited canvas, with any in-progress stroke or adjustment
     /// preview standing in for the active layer's pixels.
-    pub fn composite(&self) -> Option<Bitmap> {
-        let document = self.current_tab().session.document.as_ref()?;
+    pub fn composite(&self, cx: &App) -> Option<Bitmap> {
+        let session = self.current_tab().session.read(cx);
+        let document = session.document.as_ref()?;
         // While the inline text editor is open, its draft's layer is held
         // out of the composite (`EditorCanvas`'s draw loop skips
         // `layer.id == session.textDraft?.layerID`): the overlay input paints
@@ -1456,9 +1538,7 @@ impl AppState {
         // underneath. The layer returns as soon as the draft is committed or
         // cancelled — no draft, no skip — and every other layer, plus the
         // preview branches below, compose as usual against the rest.
-        let held = self
-            .current_tab()
-            .session
+        let held = session
             .text_draft
             .as_ref()
             .and_then(|draft| draft.layer_id)
@@ -1468,7 +1548,7 @@ impl AppState {
                 doc
             });
         let document = held.as_ref().unwrap_or(document);
-        let active_id = self.current_tab().session.active_layer_id;
+        let active_id = session.active_layer_id;
         let override_pixels =
             |doc: &mut CanvasDocument, pixels: &Bitmap, transform: LayerTransform| {
                 if let Some(id) = active_id
@@ -1483,24 +1563,24 @@ impl AppState {
         {
             let mut doc = document.clone();
             override_pixels(&mut doc, preview, *base_transform);
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         // A pixel move shows the lifted pixels rebuilt at the offset, placed
         // by the layer's own transform (the rebuilt grid is the layer's).
-        if let Some(move_state) = &self.current_tab().session.pixel_move
+        if let Some(move_state) = &session.pixel_move
             && let Some(pixels) = move_state.moved_pixels()
-            && let Some(layer) = self.current_tab().session.active_layer()
+            && let Some(layer) = session.active_layer()
         {
             let mut doc = document.clone();
             override_pixels(&mut doc, &pixels, layer.transform);
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         // A stroke in progress overrides the active layer too.
         if let Some(CanvasDrag::Stroke(edit, _)) = &self.drag {
             let result = edit.result();
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         // A Smudge / Liquify stroke shows its document-size working copy in
         // place of the layer, exactly as the Swift canvas does.
@@ -1514,7 +1594,7 @@ impl AppState {
                     document.size(),
                 ),
             );
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         // The Shape tool previews its layer live while dragging.
         if let Some(CanvasDrag::Shape { .. }) = &self.drag
@@ -1533,22 +1613,23 @@ impl AppState {
             layer.transform =
                 compositor_core::transform::LayerTransform::new(rect.origin, rect.size);
             doc.layers.push(layer);
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         // A gradient drag previews the fill.
         if let Some(CanvasDrag::Gradient(edit, start, _)) = &self.drag {
-            let result = self.gradient_result(edit, *start);
+            let result = self.gradient_result(edit, *start, cx);
             let mut doc = document.clone();
             override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(self.composite_bitmap(&doc));
+            return Some(self.composite_bitmap(&doc, cx));
         }
         Some(render::draw_live_composite(document))
     }
 
-    pub(crate) fn gradient_result(&self, edit: &RasterEdit, start: CGPoint) -> Bitmap {
-        let settings = self.current_tab().session.gradient_settings;
-        let fg = straight_of(self.current_tab().session.palette_color(false));
-        let bg = straight_of(self.current_tab().session.palette_color(true));
+    pub(crate) fn gradient_result(&self, edit: &RasterEdit, start: CGPoint, cx: &App) -> Bitmap {
+        let session = self.current_tab().session.read(cx);
+        let settings = session.gradient_settings;
+        let fg = straight_of(session.palette_color(false));
+        let bg = straight_of(session.palette_color(true));
         // "Foreground to Transparent" runs fg at full alpha down to fg at zero
         // alpha (Gradient.swift:78-80) — repeating the fg color fills solid.
         let mut colors = if settings.foreground_to_background {
@@ -1586,14 +1667,15 @@ impl AppState {
         &mut self,
         id: uuid::Uuid,
         layer: &ImageLayer,
+        cx: &App,
     ) -> Option<Arc<RenderImage>> {
-        let mask_selected = self.tab().session.is_mask_selected && layer.mask.is_some();
+        let mask_selected = self.tab().session.read(cx).is_mask_selected && layer.mask.is_some();
         if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected))
             && *rev == self.revision
         {
             return Some(image.clone());
         }
-        let document = self.tab().session.document.as_ref()?;
+        let document = self.tab().session.read(cx).document.as_ref()?;
         let canvas =
             compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
         // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
@@ -1622,6 +1704,7 @@ impl AppState {
         let current = self
             .tab()
             .session
+            .read(cx)
             .document
             .as_ref()
             .and_then(|d| d.layer(id))
@@ -1650,7 +1733,9 @@ impl AppState {
     pub fn commit_rename(&mut self, cx: &mut Context<Self>) {
         if let (Some(id), Some(input)) = (self.rename, self.rename_input.clone()) {
             let text = input.read(cx).value().to_string();
-            self.tab().session.rename_layer(id, &text);
+            self.tab()
+                .session
+                .update(cx, |session, _| session.rename_layer(id, &text));
         }
         self.rename = None;
         self.rename_input = None;
@@ -1667,23 +1752,23 @@ impl AppState {
     // MARK: Sheets
 
     /// Wraps a document mutation in one undo step named `name`
-    /// (`session.history.begin/end`; the borrow shape needs the session in a
-    /// local, since the receiver and the arguments share `self`).
-    pub(crate) fn history_edit(&mut self, name: &str, edit: impl FnOnce(&mut EditorSession)) {
-        {
-            let session = self.tab();
-            session.session.history.begin(
-                name,
-                &session.session.document,
-                session.session.active_layer_id,
-            );
-        }
-        edit(&mut self.tab().session);
-        let session = self.tab();
-        session
-            .session
-            .history
-            .end(&session.session.document, session.session.active_layer_id);
+    /// (`session.history.begin/end`; one entity update so the begin, the
+    /// edit and the end run on the same session borrow).
+    pub(crate) fn history_edit(
+        &mut self,
+        name: &str,
+        edit: impl FnOnce(&mut EditorSession),
+        cx: &mut Context<Self>,
+    ) {
+        self.tab().session.update(cx, |session, _| {
+            session
+                .history
+                .begin(name, &session.document, session.active_layer_id);
+            edit(session);
+            session
+                .history
+                .end(&session.document, session.active_layer_id);
+        });
     }
 
     pub fn close_sheet(&mut self, cx: &mut Context<Self>) {
@@ -1706,18 +1791,22 @@ impl AppState {
     pub fn commit_preview_pixels(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(preview) = self.preview.clone() {
             let transform = self.preview_base_transform.unwrap_or_default();
-            self.history_edit(name, move |session| {
-                if let Some(id) = session.active_layer_id
-                    && let Some(doc) = session.document.as_mut()
-                    && let Some(layer) = doc.layer_mut(id)
-                {
-                    layer.asset = Some(ImportedImage::new(
-                        preview.as_ref().clone(),
-                        layer.name.clone(),
-                    ));
-                    layer.transform = transform;
-                }
-            });
+            self.history_edit(
+                name,
+                move |session| {
+                    if let Some(id) = session.active_layer_id
+                        && let Some(doc) = session.document.as_mut()
+                        && let Some(layer) = doc.layer_mut(id)
+                    {
+                        layer.asset = Some(ImportedImage::new(
+                            preview.as_ref().clone(),
+                            layer.name.clone(),
+                        ));
+                        layer.transform = transform;
+                    }
+                },
+                cx,
+            );
         }
         self.preview = None;
         self.preview_base = None;
@@ -1728,25 +1817,25 @@ impl AppState {
     }
 
     /// The active selection clipped to the canvas (`selection?.clip(canvas:)`).
-    pub(crate) fn selection_clip(&self) -> Option<compositor_core::selection::SelectionClip> {
-        self.current_tab()
-            .session
-            .selection()
-            .and_then(|selection| {
-                self.current_tab()
-                    .session
-                    .document
-                    .as_ref()
-                    .map(|document| selection.clip(document.size()))
-            })
+    pub(crate) fn selection_clip(
+        &self,
+        cx: &App,
+    ) -> Option<compositor_core::selection::SelectionClip> {
+        let session = self.current_tab().session.read(cx);
+        session.selection().and_then(|selection| {
+            session
+                .document
+                .as_ref()
+                .map(|document| selection.clip(document.size()))
+        })
     }
 
     /// Whether deleting the current selection must ask first: the deleted
     /// layers supply live masks to layers that stay (`deleteWithLiveMaskChoice`'s
     /// guard, LiveLayerMask.swift:110-114). Plain deletes answer false and go
     /// through `delete_selected_layers` as before.
-    pub fn delete_needs_ask(&self) -> bool {
-        let session = &self.current_tab().session;
+    pub fn delete_needs_ask(&self, cx: &App) -> bool {
+        let session = self.current_tab().session.read(cx);
         if !session.can_edit_layers() {
             return false;
         }
@@ -1765,8 +1854,8 @@ impl AppState {
     /// The layers a delete of the selection removes — the id set
     /// `delete_selected_layers` computes (the selected layers, top level;
     /// folders take their contents through `descendant_ids`).
-    pub(crate) fn delete_candidates(&self) -> Vec<uuid::Uuid> {
-        let session = &self.current_tab().session;
+    pub(crate) fn delete_candidates(&self, cx: &App) -> Vec<uuid::Uuid> {
+        let session = self.current_tab().session.read(cx);
         match session.document.as_ref() {
             Some(document) => delete_candidate_ids(document, &session.selected_layer_ids),
             None => Vec::new(),
@@ -1774,18 +1863,25 @@ impl AppState {
     }
 
     /// Runs `filter` over the preview base and shows it live on canvas.
-    pub fn apply_filter_preview(&mut self, kind: FilterKind, settings: FilterSettings) {
+    pub fn apply_filter_preview(
+        &mut self,
+        kind: FilterKind,
+        settings: FilterSettings,
+        cx: &mut Context<Self>,
+    ) {
         // Editing an adjustment layer: the settings go to the session's
         // filter editor and the layer previews through the live composite.
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.filter_edit = Some(settings);
-            self.tab().session.preview_adjustment_editing(true);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab().session.update(cx, |session, _| {
+                session.filter_edit = Some(settings);
+                session.preview_adjustment_editing(true);
+            });
             return;
         }
         let Some(base) = self.preview_base.clone() else {
             return;
         };
-        let selection = self.selection_clip();
+        let selection = self.selection_clip(cx);
         let job = FilterJob::builder(kind, &base, settings)
             .with_selection(selection)
             // The seed was drawn when the panel opened and is reused for the
@@ -1820,7 +1916,7 @@ impl AppState {
             hue,
         );
         self.camera_raw_samples_defringe = false;
-        self.apply_filter_preview(FilterKind::CameraRaw, settings);
+        self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
     }
 
     /// `updateCameraRawReadout` — the RGB under the pointer; outside the
@@ -1864,7 +1960,7 @@ impl AppState {
             settings.camera_raw.temperature = temperature;
             settings.camera_raw.tint = tint;
         }
-        self.apply_filter_preview(FilterKind::CameraRaw, settings);
+        self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
     }
 
     // MARK: Keys

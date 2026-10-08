@@ -376,8 +376,10 @@ impl AppState {
             _ => {}
         }
         // An adjustment editing session restores the opening settings.
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(false);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
         }
         self.close_sheet(cx);
     }
@@ -390,8 +392,10 @@ impl AppState {
         let kind_before = self.sheet.as_ref().map(|sheet| sheet.kind);
         // Editing an adjustment layer: the settings previewed live, OK keeps
         // them as one undo step and skips the layer-pixel commit paths.
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(true);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
             self.close_sheet(cx);
             return;
         }
@@ -412,11 +416,11 @@ impl AppState {
                     )
                 };
                 if percent {
-                    let (w, h) = self.doc_size();
+                    let (w, h) = self.doc_size(cx);
                     width = ((w * width as f64) / 100.0).round() as usize;
                     height = ((h * height as f64) / 100.0).round() as usize;
                 }
-                self.with_current_tab(|controller, session, busy| {
+                self.with_current_tab(cx, |controller, session, busy| {
                     controller.finish_image_size(
                         session,
                         busy,
@@ -440,13 +444,13 @@ impl AppState {
                     )
                 };
                 if relative {
-                    let (w, h) = self.doc_size();
+                    let (w, h) = self.doc_size(cx);
                     width += w as usize;
                     height += h as usize;
                 }
                 let mut options = CanvasSizeOptions::new(width.max(1), height.max(1));
                 options.anchor = anchor.min(8);
-                self.with_current_tab(|controller, session, busy| {
+                self.with_current_tab(cx, |controller, session, busy| {
                     controller.finish_canvas_size(session, busy, Some(&options));
                 });
                 self.request_refit();
@@ -487,7 +491,8 @@ impl AppState {
                 let data = match data {
                     Some(data) => data,
                     None => {
-                        let Some(document) = self.current_tab().session.document.clone() else {
+                        let Some(document) = self.current_tab().session.read(cx).document.clone()
+                        else {
                             self.set_status("Nothing to export", cx);
                             return;
                         };
@@ -552,7 +557,7 @@ impl AppState {
                     right: sides[3],
                     tolerance,
                 };
-                self.with_current_tab(|controller, session, busy| {
+                self.with_current_tab(cx, |controller, session, busy| {
                     controller.finish_trim(session, busy, Some(&options));
                 });
                 self.request_refit();
@@ -573,10 +578,10 @@ impl AppState {
 
     /// Fills the active layer with one color, honoring the selection.
     pub fn fill_active(&mut self, color: [u8; 4], name: &str, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.document.clone() else {
+        let Some(document) = self.tab().session.read(cx).document.clone() else {
             return;
         };
-        let Some(id) = self.tab().session.active_layer_id else {
+        let Some(id) = self.tab().session.read(cx).active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {

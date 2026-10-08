@@ -22,7 +22,7 @@ impl AppState {
     /// title = the filter's label; Camera Raw opens
     /// `DockedToMainWindowRight`, every other filter `Automatic`.
     pub fn open_filter_panel(&mut self, kind: FilterKind, cx: &mut Context<Self>) {
-        self.begin_preview();
+        self.begin_preview(cx);
         let mut panel = FilterPanelState {
             kind,
             sliders: Vec::new(),
@@ -126,8 +126,10 @@ impl AppState {
         if !self.panels.close(panel_names::FILTER_PANEL) {
             return;
         }
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(false);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
         }
         self.panel_widgets.filter = None;
         self.curves_editor = None;
@@ -140,8 +142,10 @@ impl AppState {
         if !self.panels.is_visible(panel_names::FILTER_PANEL) {
             return;
         }
-        if self.tab().session.adjustment_editing_id.is_some() {
-            self.tab().session.finish_adjustment_editing(true);
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
         } else {
             let name = self
                 .panel_widgets
