@@ -40,7 +40,7 @@ gpui-kit, the Rust UI framework.
 | `AdjustmentEditing.swift` | `core::session` | the adjustment-layer editing session (preview/commit/cancel, bound to its layer) |
 | `SelectionEdits.swift` | `core::session` | fill/clear/invert selected pixels, mask from selection, adjustment creation |
 | `KeyboardShortcuts.swift` | `app::shortcuts` | action catalog with per-action overrides, conflict validation, persisted customizations |
-| `EditorSession` + extensions | `core::session` | the operation state machine with the original undo names and guards, project-busy flags included (`can_start_project_operation`) |
+| `EditorSession` + extensions | `core::session` | the operation state machine with the original undo names and guards, busy/import/sheet flags included (`can_start_project_operation`) |
 | `IO/ProjectStore.swift` (`.comp` package) | `core::project` | manifest JSON v1–9 semantics, validation limits, atomic save |
 | `IO/PSD/*` | `core::psd` | PSD reader/writer, RLE, layer records, vector paths |
 | SwiftUI UI | `crates/app` (gpui-kit) | tool rail, per-tool options header, canvas viewport with rulers/guides/grid/selection ants/crop overlay, layers panel (blend/opacity/thumbnails/rename), sheets (New/Image Size/Canvas Size/Levels with histogram/Hue-Saturation/Filters/Camera Raw with 14 sliders/Trim/Export), menus, Photoshop-style shortcuts |

@@ -361,6 +361,10 @@ pub struct EditorSession {
     pub active_layer_id: Option<Uuid>,
     pub selected_layer_ids: Vec<Uuid>,
     pub is_mask_selected: bool,
+    /// The layer being renamed in place (`renamingLayerID`,
+    /// EditorSession.swift:560, stage-D ticket 35). The edit field itself is
+    /// app-side widget state with no Swift counterpart.
+    pub renaming_layer_id: Option<Uuid>,
     pub collapsed_group_ids: std::collections::HashSet<Uuid>,
     pub history: DocumentHistory,
     /// An Option-drag duplicate in progress (`transformDuplicate`): the
@@ -383,7 +387,8 @@ pub struct EditorSession {
     // here.
     /// `isProjectBusy`: a project operation (save/export/open/canvas size)
     /// is running. `@ObservationIgnored` in Swift (:118) — controls dim via
-    /// `showsBusy` after the indicator delay, which stays app-side here.
+    /// `showsBusy` after the indicator delay; the port has no busy
+    /// indicator yet.
     pub is_project_busy: bool,
     /// `isImporting`: an image import is in flight. In Swift it brackets the
     /// `importImages`/`drainImports` decode window (:726-755); the port's
@@ -466,8 +471,24 @@ pub struct EditorSession {
     pub crop_ratio_choice: String,
     pub crop_drag: Option<CropDrag>,
 
-    // Sheets (the UI reads these to present its dialogs)
+    // Sheets & import flags (the UI reads these to present its dialogs).
+    // `showsImporter`/`importError`/`showsConversionSheet` moved in with
+    // stage-D ticket 35. Nothing writes them yet: the importer sheet and
+    // the PSD conversion sheet are not ported (images run through the
+    // native file dialog), and the failures Swift feeds `importError`
+    // surface through the app's own channels instead — the status bar for
+    // receives, the workspace alert queue for layer copies (Swift clears
+    // the field when the alert's OK closes; a write without that alert
+    // would latch the guards below). They are still counted here,
+    // condition for condition with Swift :151.
     pub shows_new_document: bool,
+    /// `showsImporter` (EditorSession.swift:514).
+    pub shows_importer: bool,
+    /// `importError` (:516): the last import's failure line(s) for the UI
+    /// to surface.
+    pub import_error: Option<String>,
+    /// `showsConversionSheet` (:517): the PSD conversion-notes ask is up.
+    pub shows_conversion_sheet: bool,
     pub levels: Option<crate::adjust::LevelsSettings>,
     pub levels_layer_id: Option<Uuid>,
     pub hue_saturation: Option<crate::adjust::HueSaturationSettings>,
@@ -521,6 +542,7 @@ impl Default for EditorSession {
             active_layer_id: None,
             selected_layer_ids: Vec::new(),
             is_mask_selected: false,
+            renaming_layer_id: None,
             collapsed_group_ids: std::collections::HashSet::new(),
             transform_duplicate: None,
             pixel_clipboard: None,
@@ -571,6 +593,9 @@ impl Default for EditorSession {
             crop_ratio_choice: "Free".to_string(),
             crop_drag: None,
             shows_new_document: false,
+            shows_importer: false,
+            import_error: None,
+            shows_conversion_sheet: false,
             levels: None,
             levels_layer_id: None,
             hue_saturation: None,
@@ -697,11 +722,9 @@ impl EditorSession {
     // MARK: Project-operation guards
 
     /// `canStartProjectOperation` (EditorSession.swift:150-152), condition
-    /// for condition. The four Swift conditions with no core field yet —
-    /// `showsImporter`, `renamingLayerID`, `importError`,
-    /// `showsConversionSheet` — stay app-side UI state (stage-D ticket 35
-    /// owns their move); nothing evaluates them here, and the app's
-    /// `can_switch` does not yet either.
+    /// for condition — complete since stage-D ticket 35 moved the last four
+    /// flags (`showsImporter`, `renamingLayerID`, `importError`,
+    /// `showsConversionSheet`) in.
     pub fn can_start_project_operation(&self) -> bool {
         self.selection_amount_operation.is_none() // selectionAmountOperation == nil
             && self.text_draft.is_none() // textDraft == nil
@@ -710,7 +733,11 @@ impl EditorSession {
             && !self.has_brush_stroke // brushStroke == nil && warpStroke == nil
             && self.levels.is_none() // levels == nil
             && !self.shows_new_document // !showsNewDocument
+            && !self.shows_importer // !showsImporter
+            && self.renaming_layer_id.is_none() // renamingLayerID == nil
+            && self.import_error.is_none() // importError == nil
             && self.adjustment_editing_id.is_none() // adjustmentEditingID == nil
+            && !self.shows_conversion_sheet // !showsConversionSheet
     }
 
     /// `ProjectController.begin` (ProjectController.swift:16-22), moved onto
@@ -6412,9 +6439,21 @@ mod project_install_tests {
         s.shows_new_document = true;
         assert!(!s.can_start_project_operation());
         s.shows_new_document = false;
+        s.shows_importer = true;
+        assert!(!s.can_start_project_operation());
+        s.shows_importer = false;
+        s.renaming_layer_id = Some(Uuid::new_v4());
+        assert!(!s.can_start_project_operation());
+        s.renaming_layer_id = None;
+        s.import_error = Some("x: the image could not be read.".into());
+        assert!(!s.can_start_project_operation());
+        s.import_error = None;
         s.levels = Some(crate::adjust::LevelsSettings::default());
         assert!(!s.can_start_project_operation());
         s.levels = None;
+        s.shows_conversion_sheet = true;
+        assert!(!s.can_start_project_operation());
+        s.shows_conversion_sheet = false;
         assert!(s.can_start_project_operation());
 
         // `begin` (:16-22): the pending crop frame dies as the busy hold
@@ -6434,8 +6473,8 @@ mod project_install_tests {
     }
 
     /// Port of `HistoryTests.historyBlockedDuringImportsAndDialogs`
-    /// (:83-101). The `showsImporter` pair has no core field (app-side sheet
-    /// state; ticket 35) — its redo half stays unported.
+    /// (:83-101) — complete since stage-D ticket 35 added the session's
+    /// `shows_importer`.
     #[test]
     fn history_blocked_during_imports_and_dialogs() {
         let mut s = EditorSession::new();
@@ -6453,6 +6492,10 @@ mod project_install_tests {
 
         s.undo();
         assert!(s.document.is_none());
+        s.shows_importer = true;
+        s.redo();
+        assert!(s.document.is_none());
+        s.shows_importer = false;
         s.redo();
         assert!(s.document.is_some());
     }

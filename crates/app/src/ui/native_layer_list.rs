@@ -523,7 +523,7 @@ impl AppState {
             )
         };
         let in_folder = layer.parent_id.is_some();
-        let rename_input = self.rename == Some(id);
+        let renaming = self.tab().session.read(cx).renaming_layer_id == Some(id);
         // Swift indents one 24px step per hierarchy level, capped at 8, and
         // a clipped layer steps in another 24 — the same distance a folder
         // step takes, and the two add up (NativeLayerList.swift:625-631).
@@ -543,7 +543,7 @@ impl AppState {
             .rounded_sm()
             .on_click(cx.listener(move |this, event, window, cx| {
                 let double = click_count(event) >= 2;
-                if this.rename == Some(id) {
+                if this.tab().session.read(cx).renaming_layer_id == Some(id) {
                     return;
                 }
                 this.tab()
@@ -736,7 +736,7 @@ impl AppState {
 
         // Name (or the rename input).
         let mut name_cell = gpui_kit::div().flex_1().min_w_0();
-        if rename_input {
+        if renaming {
             if let Some(input) = self.rename_input.clone() {
                 name_cell = name_cell.child(
                     gpui_kit::component::input::Input::new(&input)

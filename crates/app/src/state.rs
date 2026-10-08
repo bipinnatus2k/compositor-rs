@@ -335,7 +335,9 @@ pub struct AppState {
     pub panels: crate::ui::floating_panel::FloatingPanels,
     pub panel_widgets: crate::ui::floating_panel::PanelWidgets,
     pub status: Option<String>,
-    pub rename: Option<uuid::Uuid>,
+    /// The layers-panel rename edit field (`renamingLayerID`'s widget half;
+    /// the session flag itself lives in the core session since stage-D
+    /// ticket 35).
     pub rename_input: Option<Entity<InputState>>,
     thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
     /// Document dims the viewport was last fit for, and the tab it was fit
@@ -603,7 +605,6 @@ impl AppState {
             panels: crate::ui::floating_panel::FloatingPanels::new(),
             panel_widgets: crate::ui::floating_panel::PanelWidgets::default(),
             status: None,
-            rename: None,
             rename_input: None,
             thumbnails: HashMap::new(),
             fit_for: FitDims::REFIT,
@@ -1726,26 +1727,31 @@ impl AppState {
             },
         );
         self.subscriptions.push(subscription);
-        self.rename = Some(id);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.renaming_layer_id = Some(id));
         self.rename_input = Some(input);
         self.notify_only(cx);
     }
 
     pub fn commit_rename(&mut self, cx: &mut Context<Self>) {
-        if let (Some(id), Some(input)) = (self.rename, self.rename_input.clone()) {
+        let id = self.tab().session.read(cx).renaming_layer_id;
+        if let (Some(id), Some(input)) = (id, self.rename_input.clone()) {
             let text = input.read(cx).value().to_string();
-            self.tab()
-                .session
-                .update(cx, |session, _| session.rename_layer(id, &text));
+            self.tab().session.update(cx, |session, _| {
+                session.rename_layer(id, &text);
+                session.renaming_layer_id = None;
+            });
         }
-        self.rename = None;
         self.rename_input = None;
         self.touch(cx);
     }
 
     #[allow(dead_code)]
     pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.rename = None;
+        self.tab()
+            .session
+            .update(cx, |session, _| session.renaming_layer_id = None);
         self.rename_input = None;
         self.notify_only(cx);
     }

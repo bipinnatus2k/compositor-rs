@@ -44,10 +44,47 @@ brushStroke+warpStroke 的合并布尔，Swift 守卫逐处成对 nil 判空）�
 `can_use_history`（Swift :563-567 的 busy 三子句）、`createDocument`
 （:893-895）、`selectTool`（:334）。core 测试移植
 `HistoryTests.historyBlockedDuringImportsAndDialogs`（showsImporter 半段
-除外）与 `ProjectTests.projectOperationsBlockEditsAndQueueImageImports`
+除外，35 号票补齐）与
+`ProjectTests.projectOperationsBlockEditsAndQueueImageImports`
 的同步半段；画布笔画经 `set_drag` 镜像 `has_brush_stroke`。测试 895 项
 全绿（core lib 614 + app lib 171 + 集成 110；33 号票基线 892 + 本票
 新增 3）。
+
+## 架构裁定（2026-10-08 D 步二：导入/重命名散字段进 core session）
+
+35 号票落地。对照 Swift `EditorSession` 状态清单逐字段清点后，余下四个
+住在 session 上的小 UI 标志搬进 `core::session::EditorSession`：
+`renaming_layer_id`（`renamingLayerID` :560；app 侧 `AppState.rename`
+删除，输入框控件 `rename_input` 无 Swift 对应物，留 app）、
+`import_error`（`importError` :516；`ProjectTab.import_error` 删除）、
+`shows_importer`（`showsImporter` :514）与 `shows_conversion_sheet`
+（`showsConversionSheet` :517，均新增字段）。`can_start_project_operation`
+与 `can_use_history` 补齐四条子句，自此与 Swift :151 / :564-566 逐条
+对齐（`canStartProjectOperation` 全部 13 条皆有 core 对应）。
+
+三个新开关暂无写入点：port 的图片导入走原生文件对话框（以 `is_importing`
+括住提示窗口，见 34 号票注），PSD 转换确认表未移植，而 Swift 喂给
+`importError` 的失败经既有 app 渠道呈现——receive 失败进状态栏，
+copy_layer 失败进 workspace 错误队列（drain 成 Alert 表）。Swift 侧
+`importError` 由告警 OK 置 nil（ContentView.swift:256-258）；port 无该
+告警，照写会把两条守卫闩死（tab 无法切换/保存/撤销），故字段先行就位、
+写入点留给导入告警移植。`can_switch`/`copyLayer` 目标守卫读
+`can_start_project_operation()`，随之自动获得"重命名中不切 tab"等
+Swift 行为。core 测试的
+`HistoryTests.historyBlockedDuringImportsAndDialogs` showsImporter 半段
+补齐，`can_start_project_operation` 守卫测试扩到新四条。
+
+对照后**不搬**的（归属拿不准或有意偏离，留待后续票）：`transformAutoSelect`
+（:198，port 已文档化为 app 全局持久化偏离，等 canvas picking 接线）、
+`viewport`（:170，zoom/pan/fit 为窗口级状态的结构性偏离）、`shapeDraft`
+（:241，port 以 `CanvasDrag::Shape` 建模——手势族，本票排除）、以及
+port 整体缺失的 session 字段（`cropError` :175、`showsSampleRing` :106、
+`heldSelectionMode` :244、`hueSampleMode`/`hueTargeting`/`hueTargetDrag`
+:258-260、`objectSelectionSettings` :266、`filterSettings` :253、
+`conversionRequest` :518、`rawDevelop`/`showsRawDevelop` :522-523、
+`showsBusy` :130、`brushRevision` :287、`parkedBrushTips` :223、
+`skipsInitialClipboardCanvasSize` :103 deviation #7）——为未移植流程预留
+空字段属投机，各流程落地时随迁。
 
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
@@ -388,7 +425,7 @@ brushStroke+warpStroke 的合并布尔，Swift 守卫逐处成对 nil 判空）�
 - `clipImage` 的 LRU 缓存（8 项/64MP，`LayerMask.swift:110-166`）→ Rust `render.rs:27-57` 每次重算。
 - `add_blank_layer` 插入点：Swift 选中文件夹时插入文件夹内容顶部并展开（`EditorSession.swift:614-628`）；Rust 只做"活动层上方"，`collapsed_group_ids`（`session.rs:132`）是从未读写的死字段。
 - `selectedLayerIDs`：`Set<UUID>` 带有效性交集 → `Vec<Uuid>` 无去重过滤（`session.rs:130`）。
-- EditorSession 的 UI/异步状态（viewport、effectsPreviews、filterEdit、pixelClipboard、colorPicker、renamingLayerID 等，`EditorSession.swift:104-292`）无 core 对应，部分由 app 临时状态替代。
+- EditorSession 的 UI/异步状态（viewport、effectsPreviews、filterEdit、pixelClipboard、colorPicker、transformAutoSelect 等，`EditorSession.swift:104-292`）无 core 对应，部分由 app 临时状态替代（renamingLayerID 已随 35 号票进 core）。
 
 ---
 

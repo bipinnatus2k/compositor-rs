@@ -1656,7 +1656,12 @@ impl AppState {
             self.touch(cx);
             return;
         }
-        if self.rename.take().is_some() {
+        if self
+            .tab()
+            .session
+            .update(cx, |session, _| session.renaming_layer_id.take())
+            .is_some()
+        {
             self.rename_input = None;
             self.touch(cx);
         }

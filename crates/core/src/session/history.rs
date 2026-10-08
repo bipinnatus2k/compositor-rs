@@ -17,14 +17,14 @@ impl EditorSession {
         self.history.end(&self.document, self.active_layer_id);
     }
 
-    /// `canUseHistory` (EditorSession.swift:563-567): no editor may swap the
-    /// document out under a busy gesture. The three busy flags moved
-    /// core-side (stage-D ticket 34) — the `!isProjectBusy && !isImporting
-    /// && brushStroke == nil && warpStroke == nil` clauses are the folded
-    /// `has_brush_stroke`; `showsImporter`/`renamingLayerID`/`importError`/
-    /// `showsConversionSheet` stay app-side (ticket 35). The core
-    /// additionally guards `pixel_move` — lifted pixels must not land in a
-    /// restored document.
+    /// `canUseHistory` (EditorSession.swift:563-567), condition for
+    /// condition: no editor may swap the document out under a busy gesture.
+    /// The busy flags moved core-side (stage-D ticket 34) — the
+    /// `!isProjectBusy && !isImporting && brushStroke == nil &&
+    /// warpStroke == nil` clauses are the folded `has_brush_stroke` — and
+    /// the last four flags with stage-D ticket 35. The core additionally
+    /// guards `pixel_move` — lifted pixels must not land in a restored
+    /// document.
     pub fn can_use_history(&self) -> bool {
         self.selection_amount_operation.is_none()
             && self.text_draft.is_none()
@@ -32,9 +32,13 @@ impl EditorSession {
             && !self.is_importing
             && !self.has_brush_stroke
             && self.levels.is_none()
-            && self.transform_edit.is_none()
-            && self.pixel_move.is_none()
             && !self.shows_new_document
+            && !self.shows_importer
+            && self.renaming_layer_id.is_none()
+            && self.import_error.is_none()
+            && self.transform_edit.is_none()
+            && !self.shows_conversion_sheet
+            && self.pixel_move.is_none()
     }
 
     pub fn can_undo(&self) -> bool {

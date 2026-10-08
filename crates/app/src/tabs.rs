@@ -34,9 +34,6 @@ pub struct ProjectTab {
     pub controller: ProjectController,
     /// `defaultName`; shown while the tab has no `projectURL`.
     pub default_name: String,
-    /// `session.importError` (EditorSession.swift:516): failures of imports
-    /// and layer copies surface here for the UI to present.
-    pub import_error: Option<String>,
 }
 
 impl ProjectTab {
@@ -54,7 +51,6 @@ impl ProjectTab {
             session,
             controller: ProjectController::new(),
             default_name: name.into(),
-            import_error: None,
         }
     }
 
@@ -769,10 +765,15 @@ impl ProjectWorkspace {
                 true
             }
             Err(message) => {
-                // :172/:208 — the failure lands on the target's error channel.
-                if let Some(target) = self.tab_mut(target_id) {
-                    target.import_error = Some(message);
-                }
+                // :172/:208 — the failure surfaces as an alert. Swift lands
+                // it on the target's `importError` (presented by the import
+                // alert, cleared on OK); the port's alert channel is the
+                // workspace error queue, so the failure routes there and
+                // core `import_error` stays writer-less — the guards read
+                // it, and a write with no OK-to-clear would latch the tab
+                // shut (stage-D ticket 35).
+                self.errors
+                    .push(("Import couldn’t finish".to_string(), message));
                 false
             }
         }
@@ -1659,7 +1660,17 @@ mod tests {
             .read_with(cx, |s, _| s.active_layer_id)
             .unwrap();
         assert!(workspace.copy_layer(layer, Some(second), None, cx));
-        assert!(workspace.tab(second).unwrap().import_error.is_none());
+        // A successful copy leaves no error anywhere: not on the target's
+        // session `import_error`, not in the workspace alert queue (:172's
+        // failure channel since ticket 35).
+        assert!(
+            workspace
+                .tab(second)
+                .unwrap()
+                .session
+                .read_with(cx, |s, _| s.import_error.is_none())
+        );
+        assert!(workspace.errors.is_empty());
     }
 
     /// Tab titles follow the project URL, falling back to the default
