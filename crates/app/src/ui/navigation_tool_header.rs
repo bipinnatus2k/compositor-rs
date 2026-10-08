@@ -161,18 +161,19 @@ where
 impl AppState {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
         // `selectTool` (EditorSession.swift:332-352) lives on the session
-        // now. Its refusal guards (:334) stay here: the stroke and warp
-        // drags and the project-busy flag are app-side state, and the
-        // adjustment editor is the port's stand-in for Swift's `levels`
-        // sheet. A refused switch (a failing text apply) leaves the shape
-        // drag up, like every session-side gate.
+        // now, with its guards (:334) — the busy flags are session fields
+        // (stage-D ticket 34). What stays here: the stroke/warp drags are
+        // app-side canvas drag state, and the adjustment editor is the
+        // port's stand-in for Swift's `levels` sheet. A refused switch (a
+        // failing text apply) leaves the shape drag up, like every
+        // session-side gate.
         if matches!(
             self.drag,
             Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
         ) {
             return;
         }
-        if self.current_tab().busy.is_project_busy
+        if self.current_tab().session.read(cx).is_project_busy
             || self
                 .current_tab()
                 .session

@@ -309,8 +309,9 @@ pub fn transform_field_texts(
 
 /// Everything the window shows, owned as a single GPUI entity. The document
 /// lives in the workspace's tabs (`workspace.current().session.read(cx)`):
-/// every tab carries its own session entity, controller and busy snapshot,
-/// exactly like Swift's `ProjectWorkspace` (design doc §1, plan A; ADR 0001).
+/// every tab carries its own session entity and controller, exactly like
+/// Swift's `ProjectWorkspace` (design doc §1, plan A; ADR 0001; the busy
+/// flags moved onto the session in stage-D ticket 34).
 pub struct AppState {
     pub workspace: crate::tabs::ProjectWorkspace,
     pub focus: FocusHandle,
@@ -523,8 +524,8 @@ impl FitDims {
 }
 
 impl AppState {
-    /// The current tab (its session, controller and busy snapshot) — the
-    /// rewrite of every former `self.tab().session` call site (design doc §1).
+    /// The current tab (its session entity and controller) — the rewrite of
+    /// every former `self.tab().session` call site (design doc §1).
     pub fn tab(&mut self) -> &mut crate::tabs::ProjectTab {
         self.workspace.current_mut()
     }

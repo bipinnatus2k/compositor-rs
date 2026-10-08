@@ -6,8 +6,9 @@
 //! - The brush stroke session flow (`beginBrush`/`continueBrush`/`finishBrush`,
 //!   Swift `EditorSession+Brush`) is not ported, so `brushPaintsOnlyInsideTheSelection`
 //!   drives the same selection-clip pipeline through `fill_selection` instead.
-//! - The busy-dimming UI state (`isProjectBusy`/`showsBusy`) is app-level and
-//!   not modeled in the core session.
+//! - The busy-dimming indicator (`showsBusy` after the 250 ms delay) stays
+//!   app-level; the busy flags themselves (`isProjectBusy`/`isImporting`)
+//!   are core session fields since stage-D ticket 34.
 //! - Swift's `canPaint` guard (and therefore `beginGradient`) refuses an empty
 //!   selection; the Rust `begin_gradient` does not, so that sub-assertion is
 //!   dropped from `emptySelectionEditsNothing`.

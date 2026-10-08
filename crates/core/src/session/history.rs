@@ -18,11 +18,19 @@ impl EditorSession {
     }
 
     /// `canUseHistory` (EditorSession.swift:563-567): no editor may swap the
-    /// document out under a busy gesture. The core additionally guards
-    /// `pixel_move` — lifted pixels must not land in a restored document.
+    /// document out under a busy gesture. The three busy flags moved
+    /// core-side (stage-D ticket 34) — the `!isProjectBusy && !isImporting
+    /// && brushStroke == nil && warpStroke == nil` clauses are the folded
+    /// `has_brush_stroke`; `showsImporter`/`renamingLayerID`/`importError`/
+    /// `showsConversionSheet` stay app-side (ticket 35). The core
+    /// additionally guards `pixel_move` — lifted pixels must not land in a
+    /// restored document.
     pub fn can_use_history(&self) -> bool {
         self.selection_amount_operation.is_none()
             && self.text_draft.is_none()
+            && !self.is_project_busy
+            && !self.is_importing
+            && !self.has_brush_stroke
             && self.levels.is_none()
             && self.transform_edit.is_none()
             && self.pixel_move.is_none()

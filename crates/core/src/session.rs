@@ -372,6 +372,31 @@ pub struct EditorSession {
     /// controller on save/open; titles and open dedup read it.
     pub project_url: Option<std::path::PathBuf>,
 
+    // Project-operation busy state (`isProjectBusy` EditorSession.swift:118,
+    // `isImporting` :515, `brushStroke`/`warpStroke`), read by
+    // `can_start_project_operation` and the other Swift guards that nil-test
+    // the same names. They lived app-side (`tabs.rs`'s `ProjectBusy`) until
+    // stage-D ticket 34 moved them in. Only `is_project_busy` has guarded
+    // mutation in Swift (ProjectController.begin / the per-flow `defer`) —
+    // those are `begin_project_access`/`end_project_access` below; the
+    // other two are plain property writes in Swift and stay plain fields
+    // here.
+    /// `isProjectBusy`: a project operation (save/export/open/canvas size)
+    /// is running. `@ObservationIgnored` in Swift (:118) — controls dim via
+    /// `showsBusy` after the indicator delay, which stays app-side here.
+    pub is_project_busy: bool,
+    /// `isImporting`: an image import is in flight. In Swift it brackets the
+    /// `importImages`/`drainImports` decode window (:726-755); the port's
+    /// decode is synchronous, so the app holds it across the file prompt
+    /// instead (the observable window Swift's importer flow has).
+    pub is_importing: bool,
+    /// A paint/warp stroke is in flight (`brushStroke != nil` and
+    /// `warpStroke != nil` — every guard nil-tests the two together, so the
+    /// port folds them into one flag). The strokes themselves stay
+    /// canvas-side: `editor_canvas.rs`'s `set_drag` mirrors its drag kinds
+    /// into this flag.
+    pub has_brush_stroke: bool,
+
     // Appearance preview
     pub blend_preview: Option<(Uuid, LayerBlendMode)>,
     pub opacity_edit_layer_id: Option<Uuid>,
@@ -505,6 +530,9 @@ impl Default for EditorSession {
             guide_drag: None,
             history: DocumentHistory::default(),
             project_url: None,
+            is_project_busy: false,
+            is_importing: false,
+            has_brush_stroke: false,
             blend_preview: None,
             effects_editing: None,
             effects_editing_original: None,
@@ -576,9 +604,14 @@ impl EditorSession {
 
     // MARK: Document
 
-    /// `createDocument` — File > New.
+    /// `createDocument` — File > New. `isProjectBusy`/`isImporting` join
+    /// the size guard (EditorSession.swift:893-895).
     pub fn create_document(&mut self, width: usize, height: usize, empty_layer: bool) {
-        if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) {
+        if self.is_project_busy
+            || self.is_importing
+            || !(1..=30_000).contains(&width)
+            || !(1..=30_000).contains(&height)
+        {
             return;
         }
         self.commit_transform();
@@ -661,6 +694,47 @@ impl EditorSession {
         self.history.reset();
     }
 
+    // MARK: Project-operation guards
+
+    /// `canStartProjectOperation` (EditorSession.swift:150-152), condition
+    /// for condition. The four Swift conditions with no core field yet —
+    /// `showsImporter`, `renamingLayerID`, `importError`,
+    /// `showsConversionSheet` — stay app-side UI state (stage-D ticket 35
+    /// owns their move); nothing evaluates them here, and the app's
+    /// `can_switch` does not yet either.
+    pub fn can_start_project_operation(&self) -> bool {
+        self.selection_amount_operation.is_none() // selectionAmountOperation == nil
+            && self.text_draft.is_none() // textDraft == nil
+            && !self.is_project_busy // !isProjectBusy
+            && !self.is_importing // !isImporting
+            && !self.has_brush_stroke // brushStroke == nil && warpStroke == nil
+            && self.levels.is_none() // levels == nil
+            && !self.shows_new_document // !showsNewDocument
+            && self.adjustment_editing_id.is_none() // adjustmentEditingID == nil
+    }
+
+    /// `ProjectController.begin` (ProjectController.swift:16-22), moved onto
+    /// the session with the busy flag it guards: refuse unless
+    /// `can_start_project_operation`, then cancel a pending crop, commit a
+    /// pending transform, and hold `is_project_busy` until the matching
+    /// [`EditorSession::end_project_access`] (Swift's per-flow `defer` /
+    /// the app's two-phase `finish_*`).
+    pub fn begin_project_access(&mut self) -> bool {
+        if !self.can_start_project_operation() {
+            return false;
+        }
+        self.cancel_crop();
+        self.commit_transform();
+        self.is_project_busy = true;
+        true
+    }
+
+    /// Releases the project-busy hold taken by
+    /// [`EditorSession::begin_project_access`].
+    pub fn end_project_access(&mut self) {
+        self.is_project_busy = false;
+    }
+
     // MARK: Layers
 
     pub fn select_layer(&mut self, id: Option<Uuid>) {
@@ -682,20 +756,24 @@ impl EditorSession {
 
     /// `selectTool` (EditorSession.swift:332-352) — the one gate every tool
     /// switch passes. A failing text apply refuses the switch (:333);
-    /// switching commits the pending transform, applies the pending gradient
-    /// and cancels the crop frame (:335); entering Crop with no frame presets
-    /// the full-document frame and resets the ratio choice (:347-351).
-    /// Returns false when the switch was refused, so the caller can leave its
-    /// app-side companions of the Swift cancels (the shape drag) alone. The
-    /// busy states Swift guards on (`isProjectBusy`, `brushStroke`,
-    /// `warpStroke`, `levels`) are app-side here, as in `select_layer_target`;
-    /// the port keeps the lasso cancel unconditional after the assignment
-    /// (Swift cancels it inside the switching branch), and where Swift parks
-    /// per-family brush tips the port's eraser entry is a `brush_mode` on the
-    /// shared Brush tool, so selecting Brush resets it to Paint.
+    /// the busy guard (:334) refuses while a project operation runs, a
+    /// stroke is in flight, or the Levels sheet is up; switching commits the
+    /// pending transform, applies the pending gradient and cancels the crop
+    /// frame (:335); entering Crop with no frame presets the full-document
+    /// frame and resets the ratio choice (:347-351). Returns false when the
+    /// switch was refused, so the caller can leave its app-side companions
+    /// of the Swift cancels (the shape drag) alone. The port keeps the lasso
+    /// cancel unconditional after the assignment (Swift cancels it inside
+    /// the switching branch), and where Swift parks per-family brush tips
+    /// the port's eraser entry is a `brush_mode` on the shared Brush tool,
+    /// so selecting Brush resets it to Paint.
     pub fn select_tool(&mut self, value: NavigationTool) -> bool {
         let switching = self.tool != value;
         if switching && !self.finish_text() {
+            return false;
+        }
+        // :334 — the busy flags moved core-side (stage-D ticket 34).
+        if self.is_project_busy || self.has_brush_stroke || self.levels.is_some() {
             return false;
         }
         if switching {
@@ -6308,5 +6386,101 @@ mod project_install_tests {
         assert_eq!(target.project_url, None);
         assert!(!target.is_modified());
         assert_eq!(target.history.undo_count(), 0);
+    }
+
+    // MARK: Project-operation busy guards (stage-D ticket 34)
+
+    /// `canStartProjectOperation` (EditorSession.swift:150-152), condition
+    /// for condition where a flag is cheap to raise; plus
+    /// `begin_project_access`/`end_project_access`
+    /// (ProjectController.swift:16-22): guard, then the crop cancel +
+    /// transform commit that open the busy hold.
+    #[test]
+    fn can_start_project_operation_and_busy_access() {
+        let mut s = EditorSession::new();
+        assert!(s.can_start_project_operation());
+
+        s.is_project_busy = true;
+        assert!(!s.can_start_project_operation());
+        s.is_project_busy = false;
+        s.is_importing = true;
+        assert!(!s.can_start_project_operation());
+        s.is_importing = false;
+        s.has_brush_stroke = true;
+        assert!(!s.can_start_project_operation());
+        s.has_brush_stroke = false;
+        s.shows_new_document = true;
+        assert!(!s.can_start_project_operation());
+        s.shows_new_document = false;
+        s.levels = Some(crate::adjust::LevelsSettings::default());
+        assert!(!s.can_start_project_operation());
+        s.levels = None;
+        assert!(s.can_start_project_operation());
+
+        // `begin` (:16-22): the pending crop frame dies as the busy hold
+        // starts, a second begin refuses, and the release restores the
+        // guard.
+        let mut s = EditorSession::new();
+        s.create_document(100, 100, true);
+        s.select_tool(NavigationTool::Crop);
+        assert!(s.crop_rect.is_some());
+        assert!(s.begin_project_access());
+        assert!(s.is_project_busy);
+        assert!(s.crop_rect.is_none());
+        assert!(!s.can_start_project_operation());
+        assert!(!s.begin_project_access());
+        s.end_project_access();
+        assert!(s.can_start_project_operation());
+    }
+
+    /// Port of `HistoryTests.historyBlockedDuringImportsAndDialogs`
+    /// (:83-101). The `showsImporter` pair has no core field (app-side sheet
+    /// state; ticket 35) — its redo half stays unported.
+    #[test]
+    fn history_blocked_during_imports_and_dialogs() {
+        let mut s = EditorSession::new();
+        s.create_document(40, 40, false);
+
+        s.is_importing = true;
+        s.undo();
+        assert!(s.document.is_some());
+        s.is_importing = false;
+
+        s.shows_new_document = true;
+        s.undo();
+        assert!(s.document.is_some());
+        s.shows_new_document = false;
+
+        s.undo();
+        assert!(s.document.is_none());
+        s.redo();
+        assert!(s.document.is_some());
+    }
+
+    /// Port of `ProjectTests.projectOperationsBlockEditsAndQueueImageImports`
+    /// (:181-199), synchronous half: with the busy hold on, New and Undo
+    /// refuse. Swift's `deleteActiveLayer` under busy and the queued-import
+    /// wait (`waitForProjectAccess` :302-317) have no core counterpart —
+    /// the layer-delete guards are a per-callsite batch, and the port's
+    /// imports are synchronous with the app draining its queue when the
+    /// guards clear (workspace deviation #5).
+    #[test]
+    fn project_operations_block_edits_while_busy() {
+        let mut s = EditorSession::new();
+        s.create_document(100, 100, true);
+        s.add_blank_layer();
+
+        s.is_project_busy = true;
+        s.create_document(400, 400, true);
+        assert_eq!(s.document.as_ref().unwrap().width, 100);
+        s.undo();
+        assert_eq!(s.document.as_ref().unwrap().layers.len(), 2);
+
+        s.is_project_busy = false;
+        s.create_document(400, 400, true);
+        assert_eq!(s.document.as_ref().unwrap().width, 400);
+
+        s.clear_project();
+        assert!(s.document.is_none() && s.project_url.is_none());
     }
 }

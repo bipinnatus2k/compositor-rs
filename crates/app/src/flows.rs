@@ -41,26 +41,24 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Runs a closure with the current tab's (controller, session, busy)
-    /// triple — the shape every controller entry point takes. The session
-    /// entity is updated once for the whole closure, so the controller and
-    /// the busy flags stay in one borrow scope.
+    /// Runs a closure with the current tab's (controller, session) pair —
+    /// the shape every controller entry point takes. The session entity is
+    /// updated once for the whole closure, so the controller and the
+    /// session stay in one borrow scope.
     pub(crate) fn with_current_tab<R>(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(
             &mut crate::project::ProjectController,
             &mut compositor_core::session::EditorSession,
-            &mut crate::tabs::ProjectBusy,
         ) -> R,
     ) -> R {
         let ProjectTab {
             session,
-            busy,
             controller,
             ..
         } = self.workspace.current_mut();
-        session.update(cx, |session, _| f(controller, session, busy))
+        session.update(cx, |session, _| f(controller, session))
     }
 
     /// Opens a path-seeded sheet (the save/export/open panels the model
@@ -161,7 +159,7 @@ impl AppState {
 
     /// Surfaces a controller's error instruction, if one was just raised.
     pub(crate) fn drain_controller_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pending = self.with_current_tab(cx, |controller, _, _| controller.take_pending());
+        let pending = self.with_current_tab(cx, |controller, _| controller.take_pending());
         if let Some(Pending::Error { title, message }) = pending {
             self.open_alert(&title, &message, window, cx);
         }
@@ -184,10 +182,9 @@ impl AppState {
         let saved = match self.workspace.tab_mut(tab_id) {
             Some(ProjectTab {
                 session,
-                busy,
                 controller,
                 ..
-            }) => session.update(cx, |session, _| controller.finish_save(session, busy, url)),
+            }) => session.update(cx, |session, _| controller.finish_save(session, url)),
             None => false,
         };
         self.drain_controller_error(window, cx);
@@ -260,9 +257,13 @@ impl AppState {
     ) {
         let ok = {
             let ProjectTab {
-                busy, controller, ..
+                session,
+                controller,
+                ..
             } = self.workspace.current_mut();
-            controller.finish_export_png(busy, url.as_deref())
+            session.update(cx, |session, _| {
+                controller.finish_export_png(session, url.as_deref())
+            })
         };
         self.drain_controller_error(window, cx);
         if ok && let Some(url) = url {
@@ -280,9 +281,13 @@ impl AppState {
     ) {
         let ok = {
             let ProjectTab {
-                busy, controller, ..
+                session,
+                controller,
+                ..
             } = self.workspace.current_mut();
-            controller.finish_export_jpeg(busy, url.as_deref(), data)
+            session.update(cx, |session, _| {
+                controller.finish_export_jpeg(session, url.as_deref(), data)
+            })
         };
         self.drain_controller_error(window, cx);
         if ok && let Some(url) = url {
@@ -347,7 +352,7 @@ impl AppState {
             return;
         };
         self.close_sheet(cx);
-        self.with_current_tab(cx, |_, session, _| {
+        self.with_current_tab(cx, |_, session| {
             session.delete_with_live_mask_choice(&ids, bake);
         });
         self.touch(cx);
@@ -430,11 +435,11 @@ impl AppState {
                 // Only reachable from a controller-driven `open` on a live
                 // session; the workspace path opens into detached, unmodified
                 // tabs, so this never asks.
-                let pending = self.with_current_tab(cx, |controller, session, _| match controller
-                    .resolve_confirm(session, choice)
-                {
-                    Step::Pending(pending) => Some(pending),
-                    _ => None,
+                let pending = self.with_current_tab(cx, |controller, session| {
+                    match controller.resolve_confirm(session, choice) {
+                        Step::Pending(pending) => Some(pending),
+                        _ => None,
+                    }
                 });
                 if let Some(pending) = pending {
                     self.present_pending(pending, window, cx);
@@ -450,8 +455,7 @@ impl AppState {
     fn present_pending_save_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // SaveAs and every other pending present through the same path; a
         // missing pending presents nothing.
-        if let Some(pending) =
-            self.with_current_tab(cx, |controller, _, _| controller.peek_pending())
+        if let Some(pending) = self.with_current_tab(cx, |controller, _| controller.peek_pending())
         {
             self.present_pending(pending, window, cx);
         }
@@ -472,7 +476,7 @@ impl AppState {
                 self.touch(cx);
             }
             ConfirmStep::Open => {
-                self.with_current_tab(cx, |controller, session, _| {
+                self.with_current_tab(cx, |controller, session| {
                     controller.resolve_confirm(session, UnsavedChoice::Cancel);
                 });
                 self.touch(cx);
@@ -493,12 +497,9 @@ impl AppState {
                 let saved = match self.workspace.tab_mut(tab_id) {
                     Some(ProjectTab {
                         session,
-                        busy,
                         controller,
                         ..
-                    }) => {
-                        session.update(cx, |session, _| controller.finish_save(session, busy, None))
-                    }
+                    }) => session.update(cx, |session, _| controller.finish_save(session, None)),
                     None => false,
                 };
                 // A save panel raised by the close/quit flow's Save button
@@ -518,35 +519,28 @@ impl AppState {
                 }
             }
             Some(Sheet::ExportPng) => {
-                self.with_current_tab(cx, |controller, _, busy| {
-                    controller.finish_export_png(busy, None);
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_export_png(session, None);
                 });
             }
             Some(Sheet::ExportJpeg) => {
-                self.with_current_tab(cx, |controller, _, busy| {
-                    controller.finish_export_jpeg(busy, None, &[]);
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_export_jpeg(session, None, &[]);
                 });
             }
             Some(Sheet::ImageSize) => {
-                self.with_current_tab(cx, |controller, session, busy| {
-                    controller.finish_image_size(
-                        session,
-                        busy,
-                        None,
-                        None,
-                        None,
-                        LayerSampling::High,
-                    );
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_image_size(session, None, None, None, LayerSampling::High);
                 });
             }
             Some(Sheet::CanvasSize) => {
-                self.with_current_tab(cx, |controller, session, busy| {
-                    controller.finish_canvas_size(session, busy, None);
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_canvas_size(session, None);
                 });
             }
             Some(Sheet::Trim) => {
-                self.with_current_tab(cx, |controller, session, busy| {
-                    controller.finish_trim(session, busy, None);
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_trim(session, None);
                 });
             }
             // Confirm/Alert resolve through their own flow paths.
@@ -557,7 +551,7 @@ impl AppState {
 
     /// The Alert sheet's OK (a `Pending::Error` was dismissed).
     pub fn dismiss_error_alert(&mut self, cx: &mut Context<Self>) {
-        self.with_current_tab(cx, |controller, _, _| controller.take_pending());
+        self.with_current_tab(cx, |controller, _| controller.take_pending());
         self.close_sheet(cx);
     }
 

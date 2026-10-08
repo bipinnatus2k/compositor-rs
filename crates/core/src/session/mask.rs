@@ -90,7 +90,10 @@ impl EditorSession {
     /// then the pending gradient resolves, the layer selects, and the mask
     /// becomes the target only when the layer has one. The busy states the
     /// Swift guard also checks (`isProjectBusy`, `isImporting`,
-    /// `brushStroke != nil`) are app-side and not modeled here.
+    /// `brushStroke != nil`) are session fields since stage-D ticket 34, but
+    /// nothing checks them on this path — not this method, and not the
+    /// app's `can_switch` today (per-call-site guard parity is the
+    /// ticket-04 batch).
     pub fn select_layer_target(&mut self, id: Uuid, mask: bool) {
         self.effect_selection = None;
         self.resolve_gradient();

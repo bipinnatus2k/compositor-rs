@@ -358,7 +358,7 @@ impl AppState {
             self.tab().session.update(cx, |session, _| {
                 session.begin_guide_creation(axis, guide_axis_position(axis, doc))
             });
-            self.set_drag(Some(CanvasDrag::Guide));
+            self.set_drag(Some(CanvasDrag::Guide), cx);
             self.touch(cx);
             return;
         }
@@ -370,7 +370,7 @@ impl AppState {
                 self.tab()
                     .session
                     .update(cx, |session, _| session.begin_guide_move(guide_id));
-                self.set_drag(Some(CanvasDrag::Guide));
+                self.set_drag(Some(CanvasDrag::Guide), cx);
                 self.touch(cx);
                 return;
             }
@@ -378,10 +378,13 @@ impl AppState {
 
         match self.tab().session.read(cx).tool {
             NavigationTool::Hand => {
-                self.set_drag(Some(CanvasDrag::Pan {
-                    start: event.position,
-                    start_pan: self.pan,
-                }));
+                self.set_drag(
+                    Some(CanvasDrag::Pan {
+                        start: event.position,
+                        start_pan: self.pan,
+                    }),
+                    cx,
+                );
             }
             NavigationTool::Zoom => {
                 if alt {
@@ -420,7 +423,7 @@ impl AppState {
                         .session
                         .update(cx, |session, _| session.begin_pixel_move(alt))
                     {
-                        self.set_drag(Some(CanvasDrag::PixelMove { start: doc }));
+                        self.set_drag(Some(CanvasDrag::PixelMove { start: doc }), cx);
                         self.touch(cx);
                     }
                     return;
@@ -434,7 +437,7 @@ impl AppState {
                         .session
                         .update(cx, |session, _| session.begin_selection_move())
                 {
-                    self.set_drag(Some(CanvasDrag::SelectionMove { start: doc }));
+                    self.set_drag(Some(CanvasDrag::SelectionMove { start: doc }), cx);
                     self.touch(cx);
                     return;
                 }
@@ -442,7 +445,7 @@ impl AppState {
                 self.tab()
                     .session
                     .update(cx, |session, _| session.begin_lasso(doc, mode));
-                self.set_drag(Some(CanvasDrag::MarqueeLasso));
+                self.set_drag(Some(CanvasDrag::MarqueeLasso), cx);
             }
             NavigationTool::Wand => {
                 let mode = self.tab().session.read(cx).selection_mode(shift, alt);
@@ -660,7 +663,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let drag = self.drag.take();
-        self.workspace.current_mut().busy.has_brush_stroke = false;
+        self.workspace
+            .current_mut()
+            .session
+            .update(cx, |session, _| session.has_brush_stroke = false);
         if let Some(drag) = drag {
             match drag {
                 CanvasDrag::Stroke(mut edit, id) => {
@@ -769,19 +775,25 @@ impl AppState {
         }
     }
 
-    /// Starts/ends a canvas drag, keeping the tab's `has_brush_stroke` busy
-    /// flag in step (Swift keeps `brushStroke`/`warpStroke` on the session;
-    /// the port mirrors it app-side so `can_switch` blocks tab changes
-    /// mid-stroke).
-    pub(crate) fn set_drag(&mut self, drag: Option<CanvasDrag>) {
+    /// Starts/ends a canvas drag, keeping the tab's `has_brush_stroke`
+    /// busy flag in step (Swift keeps `brushStroke`/`warpStroke` on the
+    /// session; since stage-D ticket 34 the flag itself is a session
+    /// field, so `can_switch` blocks tab changes mid-stroke through the
+    /// session guard).
+    pub(crate) fn set_drag(&mut self, drag: Option<CanvasDrag>, cx: &mut Context<Self>) {
         self.drag = drag;
-        self.workspace.current_mut().busy.has_brush_stroke = matches!(
-            self.drag,
-            Some(CanvasDrag::Stroke(..))
-                | Some(CanvasDrag::Warp(_))
-                | Some(CanvasDrag::Gradient(..))
-                | Some(CanvasDrag::Shape { .. })
-        );
+        self.workspace
+            .current_mut()
+            .session
+            .update(cx, |session, _| {
+                session.has_brush_stroke = matches!(
+                    self.drag,
+                    Some(CanvasDrag::Stroke(..))
+                        | Some(CanvasDrag::Warp(_))
+                        | Some(CanvasDrag::Gradient(..))
+                        | Some(CanvasDrag::Shape { .. })
+                );
+            });
     }
 
     pub(crate) fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
@@ -906,7 +918,7 @@ impl AppState {
             }
         }
         edit.append_smoothed(doc);
-        self.set_drag(Some(CanvasDrag::Stroke(edit, id)));
+        self.set_drag(Some(CanvasDrag::Stroke(edit, id)), cx);
     }
 
     /// What the Clone Stamp samples: the composite or the active layer.
@@ -991,9 +1003,10 @@ fn paint_target(
 /// stroke), exactly one layer selected, the active layer still
 /// effectively visible, and an explicitly empty selection leaves nothing
 /// paintable. The conjuncts that live app-side here: a brush or warp
-/// stroke IS the drag, the project-busy/import flags ride the tab, and
-/// a pending core gradient never coexists with a fresh press (Swift's
-/// beginGradient bypasses canEditLayers for its re-anchor too).
+/// stroke IS the drag (the busy flags themselves are session fields since
+/// stage-D ticket 34 — `has_brush_stroke` mirrors the drag), and a pending
+/// core gradient never coexists with a fresh press (Swift's beginGradient
+/// bypasses canEditLayers for its re-anchor too).
 fn can_paint(session: &EditorSession, document: &CanvasDocument) -> bool {
     if session.selection_amount_operation.is_some()
         || session.text_draft.is_some()
@@ -1173,7 +1186,7 @@ impl AppState {
         stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
         stroke.layer_transform = layer.transform;
         stroke.append(doc);
-        self.set_drag(Some(CanvasDrag::Warp(stroke)));
+        self.set_drag(Some(CanvasDrag::Warp(stroke)), cx);
     }
 
     /// `finishWarp`: paints the finished result into the layer's own pixels
@@ -1254,7 +1267,7 @@ impl AppState {
     }
 
     fn begin_shape(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        self.set_drag(Some(CanvasDrag::Shape { start: doc }));
+        self.set_drag(Some(CanvasDrag::Shape { start: doc }), cx);
         self.shape_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
         self.shape_shape = Some(self.build_shape_for_drag(CGRect::new(doc.x, doc.y, 0.0, 0.0), cx));
     }
@@ -1368,7 +1381,7 @@ impl AppState {
             clip,
         );
         self.gradient_cursor = Some(doc);
-        self.set_drag(Some(CanvasDrag::Gradient(edit, doc, id)));
+        self.set_drag(Some(CanvasDrag::Gradient(edit, doc, id)), cx);
     }
 
     // MARK: Move
@@ -1409,10 +1422,13 @@ impl AppState {
         else {
             return;
         };
-        self.set_drag(Some(CanvasDrag::MoveLayer {
-            start_origin: draft,
-            start: doc,
-        }));
+        self.set_drag(
+            Some(CanvasDrag::MoveLayer {
+                start_origin: draft,
+                start: doc,
+            }),
+            cx,
+        );
         self.touch(cx);
     }
 
@@ -1431,7 +1447,7 @@ impl AppState {
         self.tab()
             .session
             .update(cx, |session, _| session.begin_crop_drag(doc, mode));
-        self.set_drag(Some(CanvasDrag::Crop));
+        self.set_drag(Some(CanvasDrag::Crop), cx);
         self.touch(cx);
     }
 
@@ -1470,7 +1486,7 @@ impl AppState {
             return;
         }
         self.text_box_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
-        self.set_drag(Some(CanvasDrag::TextBox { start: doc }));
+        self.set_drag(Some(CanvasDrag::TextBox { start: doc }), cx);
     }
 
     /// The Type tool's release (`finishTextGesture`): a click without a drag

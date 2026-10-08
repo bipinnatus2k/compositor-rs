@@ -24,49 +24,6 @@ use uuid::Uuid;
 pub use crate::project::{Pending, Step, TabId, UnsavedChoice};
 use crate::project::{ProjectController, is_project_file};
 
-/// The app-side half of `canStartProjectOperation`
-/// (EditorSession.swift:150-152). Core does not model these flags (see
-/// session.rs's "app-side" note); the rest of the guard reads the session
-/// directly — see [`ProjectBusy::ready`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ProjectBusy {
-    /// `isProjectBusy`: a project operation (save/export/open…) is running.
-    pub is_project_busy: bool,
-    /// `isImporting`: an image import is in flight.
-    pub is_importing: bool,
-    /// `brushStroke` (and `warpStroke`): a paint stroke is in flight.
-    pub has_brush_stroke: bool,
-}
-
-impl ProjectBusy {
-    pub fn new() -> Self {
-        ProjectBusy::default()
-    }
-
-    /// The session half of `canStartProjectOperation`: every condition core
-    /// models. The flags Swift also checks that core has no field for —
-    /// `isProjectBusy`, `isImporting`, `brushStroke`, `warpStroke`,
-    /// `showsImporter`, `renamingLayerID`, `importError`,
-    /// `showsConversionSheet` — live app-side (`ProjectBusy` plus the
-    /// workspace/UI state wired in Wave 3).
-    pub fn session_ready(session: &EditorSession) -> bool {
-        session.selection_amount_operation.is_none()
-            && session.text_draft.is_none()
-            && session.levels.is_none()
-            && !session.shows_new_document
-            && session.adjustment_editing_id.is_none()
-    }
-
-    /// `canStartProjectOperation` for the session whose app-side busy flags
-    /// this snapshot carries.
-    pub fn ready(&self, session: &EditorSession) -> bool {
-        ProjectBusy::session_ready(session)
-            && !self.is_project_busy
-            && !self.is_importing
-            && !self.has_brush_stroke
-    }
-}
-
 /// One tab: its own session, file controller and default name
 /// (`ProjectTab`, ProjectWorkspace.swift:6-17). The session is a GPUI
 /// entity (ADR 0001) — a handle the window observes and invalidates per
@@ -75,9 +32,6 @@ pub struct ProjectTab {
     pub id: TabId,
     pub session: Entity<EditorSession>,
     pub controller: ProjectController,
-    /// The app-side busy snapshot for this tab's session (Swift keeps these
-    /// on `EditorSession`; core does not model them).
-    pub busy: ProjectBusy,
     /// `defaultName`; shown while the tab has no `projectURL`.
     pub default_name: String,
     /// `session.importError` (EditorSession.swift:516): failures of imports
@@ -99,7 +53,6 @@ impl ProjectTab {
             id: Uuid::new_v4(),
             session,
             controller: ProjectController::new(),
-            busy: ProjectBusy::new(),
             default_name: name.into(),
             import_error: None,
         }
@@ -214,15 +167,15 @@ impl ProjectWorkspace {
     }
 
     /// `canSwitch` (:27-31): not mid-flow, the current session can start a
-    /// project operation, and none of the five floating edit sessions is
-    /// open.
+    /// project operation (the guard now carries the busy flags — stage-D
+    /// ticket 34), and none of the five floating edit sessions is open.
     pub fn can_switch(&self, cx: &impl AppContext) -> bool {
         if self.is_managing || self.ui_panels_open {
             return false;
         }
         let tab = self.current();
         tab.session.read_with(cx, |session, _| {
-            tab.busy.ready(session)
+            session.can_start_project_operation()
                 && session.hue_saturation.is_none()
                 && session.filter_edit.is_none()
                 && session.gradient_edit.is_none()
@@ -345,10 +298,9 @@ impl ProjectWorkspace {
             let ProjectTab {
                 session,
                 controller,
-                busy,
                 ..
             } = &mut tab;
-            session.update(cx, |session, _| controller.open(session, busy, url))
+            session.update(cx, |session, _| controller.open(session, url))
         };
         match opened {
             Step::Done(true) => {}
@@ -394,10 +346,9 @@ impl ProjectWorkspace {
             let ProjectTab {
                 session,
                 controller,
-                busy,
                 ..
             } = tab;
-            session.update(cx, |session, _| controller.confirm_close(session, busy))
+            session.update(cx, |session, _| controller.confirm_close(session))
         };
         match answer {
             Step::Done(true) => {
@@ -577,10 +528,9 @@ impl ProjectWorkspace {
                         let ProjectTab {
                             session,
                             controller,
-                            busy,
                             ..
                         } = &mut self.tabs[index];
-                        session.update(cx, |session, _| controller.confirm_quit(session, busy))
+                        session.update(cx, |session, _| controller.confirm_quit(session))
                     };
                     match answer {
                         Step::Done(true) => {
@@ -783,7 +733,7 @@ impl ProjectWorkspace {
                 let target = &self.tabs[index];
                 if !target
                     .session
-                    .read_with(cx, |session, _| target.busy.ready(session))
+                    .read_with(cx, |session, _| session.can_start_project_operation())
                 {
                     return false;
                 }
@@ -1275,15 +1225,12 @@ mod tests {
             let tab = workspace.tab_mut(first).unwrap();
             let ProjectTab {
                 session,
-                busy,
                 controller,
                 ..
             } = tab;
-            assert!(session.update(cx, |session, _| controller.finish_save(
-                session,
-                busy,
-                Some(path.clone())
-            )));
+            assert!(session.update(cx, |session, _| {
+                controller.finish_save(session, Some(path.clone()))
+            }));
         }
         assert!(matches!(
             workspace.quit_after_save(true, cx),
@@ -1400,11 +1347,10 @@ mod tests {
             let tab = workspace.tab_mut(first).unwrap();
             let ProjectTab {
                 session,
-                busy,
                 controller,
                 ..
             } = tab;
-            assert!(!session.update(cx, |session, _| controller.finish_save(session, busy, None)));
+            assert!(!session.update(cx, |session, _| controller.finish_save(session, None)));
         }
         assert!(matches!(
             workspace.close_after_save(false, cx),

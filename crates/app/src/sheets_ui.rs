@@ -420,10 +420,9 @@ impl AppState {
                     width = ((w * width as f64) / 100.0).round() as usize;
                     height = ((h * height as f64) / 100.0).round() as usize;
                 }
-                self.with_current_tab(cx, |controller, session, busy| {
+                self.with_current_tab(cx, |controller, session| {
                     controller.finish_image_size(
                         session,
-                        busy,
                         Some(width),
                         Some(height),
                         Some(resolution),
@@ -450,8 +449,8 @@ impl AppState {
                 }
                 let mut options = CanvasSizeOptions::new(width.max(1), height.max(1));
                 options.anchor = anchor.min(8);
-                self.with_current_tab(cx, |controller, session, busy| {
-                    controller.finish_canvas_size(session, busy, Some(&options));
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_canvas_size(session, Some(&options));
                 });
                 self.request_refit();
             }
@@ -557,8 +556,8 @@ impl AppState {
                     right: sides[3],
                     tolerance,
                 };
-                self.with_current_tab(cx, |controller, session, busy| {
-                    controller.finish_trim(session, busy, Some(&options));
+                self.with_current_tab(cx, |controller, session| {
+                    controller.finish_trim(session, Some(&options));
                 });
                 self.request_refit();
             }

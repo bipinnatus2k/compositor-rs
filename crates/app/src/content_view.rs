@@ -475,9 +475,8 @@ impl AppState {
     /// `save(asNew:)` (:25-29): a known destination writes straight to disk;
     /// otherwise the save panel's pending surfaces and the sheet finishes it.
     fn start_save(&mut self, as_new: bool, w: &mut Window, cx: &mut Context<Self>) {
-        let result = self.with_current_tab(cx, |controller, session, busy| {
-            controller.save(session, busy, as_new)
-        });
+        let result =
+            self.with_current_tab(cx, |controller, session| controller.save(session, as_new));
         match result {
             Step::Pending(Pending::SaveAs { default_name, .. }) => {
                 self.pending_save = Some((self.workspace.selected_id(), SaveAfter::Nothing));
@@ -501,17 +500,13 @@ impl AppState {
         }
     }
     fn on_export(&mut self, _: &keys::ExportPng, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(cx, |controller, session, busy| {
-            controller.export_png(session, busy)
-        }) {
+        match self.with_current_tab(cx, |controller, session| controller.export_png(session)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
     fn on_export_jpeg(&mut self, _: &keys::ExportJpeg, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(cx, |controller, session, busy| {
-            controller.export_jpeg(session, busy)
-        }) {
+        match self.with_current_tab(cx, |controller, session| controller.export_jpeg(session)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
@@ -644,25 +639,19 @@ impl AppState {
 
     fn on_image_size(&mut self, _: &keys::ImageSize, w: &mut Window, cx: &mut Context<Self>) {
         // `imageSize()` (:76-87): guard + begin, then the Image Size sheet.
-        match self.with_current_tab(cx, |controller, session, busy| {
-            controller.image_size(session, busy)
-        }) {
+        match self.with_current_tab(cx, |controller, session| controller.image_size(session)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
     fn on_canvas_size(&mut self, _: &keys::CanvasSize, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(cx, |controller, session, busy| {
-            controller.canvas_size(session, busy)
-        }) {
+        match self.with_current_tab(cx, |controller, session| controller.canvas_size(session)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
     }
     fn on_trim(&mut self, _: &keys::TrimSheet, w: &mut Window, cx: &mut Context<Self>) {
-        match self.with_current_tab(cx, |controller, session, busy| {
-            controller.trim(session, busy)
-        }) {
+        match self.with_current_tab(cx, |controller, session| controller.trim(session)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {}
         }
@@ -1568,11 +1557,14 @@ impl AppState {
     /// (Swift's `showsImporter` flow, NewCanvasSheet.swift:32).
     pub(crate) fn prompt_import_images(&mut self, cx: &mut Context<Self>) {
         // While an import is in flight the welcome form disables; a second
-        // trigger must not stack a second picker (`isImporting`).
-        if self.tab().busy.is_importing {
+        // trigger must not stack a second picker (`isImporting`, now a
+        // session field — stage-D ticket 34).
+        if self.tab().session.read(cx).is_importing {
             return;
         }
-        self.tab().busy.is_importing = true;
+        self.tab()
+            .session
+            .update(cx, |session, _| session.is_importing = true);
         // The native multi-select panel (Swift's showsImporter flow).
         let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
@@ -1590,7 +1582,9 @@ impl AppState {
             this.update(cx, |this, cx| {
                 // The flag clears on every path — cancel included — so the
                 // form re-enables as soon as the panel closes.
-                this.tab().busy.is_importing = false;
+                this.tab()
+                    .session
+                    .update(cx, |session, _| session.is_importing = false);
                 if picked.is_empty() {
                     this.touch(cx);
                     return;

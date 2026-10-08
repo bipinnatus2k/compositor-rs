@@ -11,8 +11,11 @@
 //! import queue and every state transition stay here and are unit tested.
 //!
 //! The controller never holds its `EditorSession` (Swift keeps a strong
-//! reference); session and busy flags are passed in per call so a
-//! `ProjectTab` can own both halves without aliasing.
+//! reference); the session is passed in per call so a `ProjectTab` can own
+//! both halves without aliasing. The project-busy flags live on the
+//! session itself (`EditorSession::begin_project_access`, stage-D ticket
+//! 34), so the controller drives them through the session's own guarded
+//! methods.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +27,6 @@ use compositor_core::raster::Bitmap;
 use compositor_core::session::EditorSession;
 
 use crate::state::{AppState, FitDims};
-use crate::tabs::ProjectBusy;
 
 /// A tab's identity (`ProjectTab.id`, a `UUID` in Swift). Declared here so
 /// `Pending::Confirm` can name the tab being asked about.
@@ -253,29 +255,12 @@ impl ProjectController {
         self.pending.clone()
     }
 
-    /// `canStart` (:11-13): the session half lives in
-    /// [`ProjectBusy::ready`]; `is_managing` is the workspace's flag, passed
-    /// in because the controller does not hold a workspace reference.
-    pub fn can_start(
-        &self,
-        session: &EditorSession,
-        busy: &ProjectBusy,
-        is_managing: bool,
-    ) -> bool {
-        busy.ready(session) && !is_managing
-    }
-
-    /// `begin()` (:16-22): guard, cancel a pending crop, commit a pending
-    /// transform, and mark the session project-busy. The caller (or the
-    /// matching `finish_*`) clears `is_project_busy` when its flow ends.
-    pub fn begin(&self, session: &mut EditorSession, busy: &mut ProjectBusy) -> bool {
-        if !busy.ready(session) {
-            return false;
-        }
-        session.cancel_crop();
-        session.commit_transform();
-        busy.is_project_busy = true;
-        true
+    /// `canStart` (:11-13): the session guard now carries the busy flags
+    /// (`EditorSession::can_start_project_operation`); `is_managing` is the
+    /// workspace's flag, passed in because the controller does not hold a
+    /// workspace reference.
+    pub fn can_start(&self, session: &EditorSession, is_managing: bool) -> bool {
+        session.can_start_project_operation() && !is_managing
     }
 
     // MARK: Save (`save(asNew:)` :25-29 + `saveCurrent` :152-182)
@@ -283,27 +268,17 @@ impl ProjectController {
     /// `save(asNew:)`. A known destination (existing project URL, not
     /// save-as-new) writes straight to disk without a panel (:154); anything
     /// else surfaces the save panel.
-    pub fn save(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-        as_new: bool,
-    ) -> Step<bool> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn save(&mut self, session: &mut EditorSession, as_new: bool) -> Step<bool> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(false);
         }
-        busy.is_project_busy = false;
+        session.end_project_access();
         self.save_current(session, as_new)
     }
 
     /// Second half of the save panel. `None` is the panel's Cancel.
-    pub fn finish_save(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-        url: Option<PathBuf>,
-    ) -> bool {
-        busy.is_project_busy = false;
+    pub fn finish_save(&mut self, session: &mut EditorSession, url: Option<PathBuf>) -> bool {
+        session.end_project_access();
         match self.pending.take() {
             Some(Pending::SaveAs { .. }) => {}
             _ => return false,
@@ -372,8 +347,8 @@ impl ProjectController {
     /// `exportPNG`: capture the snapshot, then surface the `.png` save panel.
     /// The session stays project-busy until `finish_export_png` (Swift's
     /// `defer` runs after the panel completes).
-    pub fn export_png(&mut self, session: &mut EditorSession, busy: &mut ProjectBusy) -> Step<()> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn export_png(&mut self, session: &mut EditorSession) -> Step<()> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(());
         }
         let snapshot = session
@@ -390,8 +365,8 @@ impl ProjectController {
 
     /// Second half of the PNG panel. `None` is Cancel. The snapshot captured
     /// at `export_png` time is rendered and written (:47).
-    pub fn finish_export_png(&mut self, busy: &mut ProjectBusy, url: Option<&Path>) -> bool {
-        busy.is_project_busy = false;
+    pub fn finish_export_png(&mut self, session: &mut EditorSession, url: Option<&Path>) -> bool {
+        session.end_project_access();
         let Some(Pending::ExportPng { snapshot, .. }) = self.pending.take() else {
             return false;
         };
@@ -422,8 +397,8 @@ impl ProjectController {
     /// `exportJPEG` (:119-138): the app's JPEG sheet renders, offers the
     /// quality/matte controls, and produces the encoded bytes; the model
     /// supplies the save panel step.
-    pub fn export_jpeg(&mut self, session: &mut EditorSession, busy: &mut ProjectBusy) -> Step<()> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn export_jpeg(&mut self, session: &mut EditorSession) -> Step<()> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(());
         }
         let pending = Pending::ExportJpeg {
@@ -437,11 +412,11 @@ impl ProjectController {
     /// `None` is Cancel.
     pub fn finish_export_jpeg(
         &mut self,
-        busy: &mut ProjectBusy,
+        session: &mut EditorSession,
         url: Option<&Path>,
         data: &[u8],
     ) -> bool {
-        busy.is_project_busy = false;
+        session.end_project_access();
         let Some(Pending::ExportJpeg { .. }) = self.pending.take() else {
             return false;
         };
@@ -462,8 +437,8 @@ impl ProjectController {
 
     /// `canvasSize()`: guard + begin, then surface the Canvas Size sheet. The
     /// session stays project-busy until `finish_canvas_size`.
-    pub fn canvas_size(&mut self, session: &mut EditorSession, busy: &mut ProjectBusy) -> Step<()> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn canvas_size(&mut self, session: &mut EditorSession) -> Step<()> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(());
         }
         let pending = Pending::Options {
@@ -477,10 +452,9 @@ impl ProjectController {
     pub fn finish_canvas_size(
         &mut self,
         session: &mut EditorSession,
-        busy: &mut ProjectBusy,
         options: Option<&CanvasSizeOptions>,
     ) {
-        busy.is_project_busy = false;
+        session.end_project_access();
         if !matches!(self.pending.take(), Some(Pending::Options { .. })) {
             return;
         }
@@ -494,8 +468,8 @@ impl ProjectController {
     }
 
     /// `imageSize()`: guard + begin, then surface the Image Size sheet.
-    pub fn image_size(&mut self, session: &mut EditorSession, busy: &mut ProjectBusy) -> Step<()> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn image_size(&mut self, session: &mut EditorSession) -> Step<()> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(());
         }
         let pending = Pending::Options {
@@ -509,13 +483,12 @@ impl ProjectController {
     pub fn finish_image_size(
         &mut self,
         session: &mut EditorSession,
-        busy: &mut ProjectBusy,
         width: Option<usize>,
         height: Option<usize>,
         resolution: Option<f64>,
         sampling: compositor_core::transform::LayerSampling,
     ) {
-        busy.is_project_busy = false;
+        session.end_project_access();
         if !matches!(self.pending.take(), Some(Pending::Options { .. })) {
             return;
         }
@@ -531,8 +504,8 @@ impl ProjectController {
     }
 
     /// `trim()`: guard + begin, then surface the Trim sheet.
-    pub fn trim(&mut self, session: &mut EditorSession, busy: &mut ProjectBusy) -> Step<()> {
-        if session.document.is_none() || !self.begin(session, busy) {
+    pub fn trim(&mut self, session: &mut EditorSession) -> Step<()> {
+        if session.document.is_none() || !session.begin_project_access() {
             return Step::Done(());
         }
         let pending = Pending::Options {
@@ -544,13 +517,8 @@ impl ProjectController {
 
     /// Second half of the Trim sheet. `None` is Cancel (:110); trimming
     /// nothing stays silent (:112-114).
-    pub fn finish_trim(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-        options: Option<&TrimOptions>,
-    ) {
-        busy.is_project_busy = false;
+    pub fn finish_trim(&mut self, session: &mut EditorSession, options: Option<&TrimOptions>) {
+        session.end_project_access();
         if !matches!(self.pending.take(), Some(Pending::Options { .. })) {
             return;
         }
@@ -564,16 +532,11 @@ impl ProjectController {
     /// drives for a fresh tab. Validation happens first (:207-208): a corrupt
     /// project never discards the live document. The replacement
     /// confirmation may need an alert — see `resolve_confirm`.
-    pub fn open(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-        source: &Path,
-    ) -> Step<bool> {
-        if !self.begin(session, busy) {
+    pub fn open(&mut self, session: &mut EditorSession, source: &Path) -> Step<bool> {
+        if !session.begin_project_access() {
             return Step::Done(false);
         }
-        busy.is_project_busy = false;
+        session.end_project_access();
         let snapshot = match compositor_core::project::load(source) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -643,35 +606,22 @@ impl ProjectController {
     // MARK: Quit / close / replacement confirmation (:246-272)
 
     /// `confirmQuit()` (:246-250): begin, then the unsaved-changes question.
-    pub fn confirm_quit(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-    ) -> Step<bool> {
-        self.confirm_step(session, busy, ConfirmStep::Quit)
+    pub fn confirm_quit(&mut self, session: &mut EditorSession) -> Step<bool> {
+        self.confirm_step(session, ConfirmStep::Quit)
     }
 
     /// The close-tab flow's half of `confirmQuit` — the same question, but
     /// the alert carries `ConfirmStep::Close` so the app routes the answer
     /// back into the close flow (`close(_:)` :233-244 forwards here per tab).
-    pub fn confirm_close(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-    ) -> Step<bool> {
-        self.confirm_step(session, busy, ConfirmStep::Close)
+    pub fn confirm_close(&mut self, session: &mut EditorSession) -> Step<bool> {
+        self.confirm_step(session, ConfirmStep::Close)
     }
 
-    fn confirm_step(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &mut ProjectBusy,
-        step: ConfirmStep,
-    ) -> Step<bool> {
-        if !self.begin(session, busy) {
+    fn confirm_step(&mut self, session: &mut EditorSession, step: ConfirmStep) -> Step<bool> {
+        if !session.begin_project_access() {
             return Step::Done(false);
         }
-        busy.is_project_busy = false;
+        session.end_project_access();
         match Self::request_unsaved_choice(session) {
             None => Step::Done(true),
             Some(message) => {
@@ -819,14 +769,14 @@ impl ProjectController {
     /// caller performs the open (the workspace routes it to
     /// `load_project`) and calls `advance`. More than one `.comp` in a batch
     /// is an error (:307-309).
-    pub fn drain(&mut self, session: &mut EditorSession, busy: &ProjectBusy) -> Drain {
+    pub fn drain(&mut self, session: &mut EditorSession) -> Drain {
         if self.incoming.is_empty() {
             self.processing = false;
             return Drain::Idle;
         }
         // `waitForFileRequest` (:305): nothing proceeds while the session is
         // mid-operation.
-        if !busy.ready(session) {
+        if !session.can_start_project_operation() {
             return Drain::Wait;
         }
         let request = self.incoming.remove(0);
@@ -864,12 +814,7 @@ impl ProjectController {
     /// Continues after a `Drain::OpenProject`: when the open proceeded, the
     /// batch's image files import with no drop point (:313-315 — a project is
     /// present, so `at` is dropped). Then draining continues.
-    pub fn advance(
-        &mut self,
-        session: &mut EditorSession,
-        busy: &ProjectBusy,
-        proceed: bool,
-    ) -> Drain {
+    pub fn advance(&mut self, session: &mut EditorSession, proceed: bool) -> Drain {
         if let Some(request) = self.opening.take()
             && proceed
         {
@@ -881,7 +826,7 @@ impl ProjectController {
             // continues with the rest of the queue.
             return Drain::Imported { failures };
         }
-        self.drain(session, busy)
+        self.drain(session)
     }
 }
 
@@ -1063,10 +1008,9 @@ mod tests {
         let path = dir.join("Foo.comp");
         let mut session = EditorSession::new();
         make_document(&mut session);
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
-        match controller.save(&mut session, &mut busy, false) {
+        match controller.save(&mut session, false) {
             Step::Pending(Pending::SaveAs {
                 title,
                 default_name,
@@ -1078,21 +1022,21 @@ mod tests {
             other => panic!("expected a save panel, got {other:?}"),
         }
 
-        assert!(controller.finish_save(&mut session, &mut busy, Some(path.clone())));
+        assert!(controller.finish_save(&mut session, Some(path.clone())));
         assert_eq!(controller.save_generation(), 1);
         assert_eq!(session.project_url.as_deref(), Some(path.as_path()));
         assert!(!session.is_modified());
 
         // Saving again goes straight to disk (:154): no panel, generation +1.
         assert!(matches!(
-            controller.save(&mut session, &mut busy, false),
+            controller.save(&mut session, false),
             Step::Done(true)
         ));
         assert_eq!(controller.save_generation(), 2);
 
         // Save As raises the panel again, seeded with the current file name
         // (:160-161), and Cancel writes nothing.
-        match controller.save(&mut session, &mut busy, true) {
+        match controller.save(&mut session, true) {
             Step::Pending(Pending::SaveAs {
                 title,
                 default_name,
@@ -1103,38 +1047,38 @@ mod tests {
             }
             other => panic!("expected a save panel, got {other:?}"),
         }
-        assert!(!controller.finish_save(&mut session, &mut busy, None));
+        assert!(!controller.finish_save(&mut session, None));
         assert_eq!(controller.save_generation(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `begin` refuses while the app-side busy flags block the session
-    /// (`canStartProjectOperation`).
+    /// `begin` refuses while the session's busy flags block the project
+    /// operation (`canStartProjectOperation`); the flags now live on the
+    /// session (stage-D ticket 34), so the guard runs there.
     #[test]
     fn begin_refuses_while_busy() {
         let mut session = EditorSession::new();
         make_document(&mut session);
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
-        busy.has_brush_stroke = true;
+        session.has_brush_stroke = true;
         assert!(matches!(
-            controller.save(&mut session, &mut busy, false),
+            controller.save(&mut session, false),
             Step::Done(false)
         ));
-        busy.has_brush_stroke = false;
+        session.has_brush_stroke = false;
 
-        busy.is_importing = true;
-        assert!(!controller.begin(&mut session, &mut busy));
-        busy.is_importing = false;
+        session.is_importing = true;
+        assert!(!session.begin_project_access());
+        session.is_importing = false;
 
         session.shows_new_document = true;
-        assert!(!controller.begin(&mut session, &mut busy));
+        assert!(!session.begin_project_access());
         session.shows_new_document = false;
 
-        assert!(controller.begin(&mut session, &mut busy));
-        assert!(busy.is_project_busy);
+        assert!(session.begin_project_access());
+        assert!(session.is_project_busy);
     }
 
     /// `confirmReplacement` (:252-263): unmodified proceeds; modified asks
@@ -1144,12 +1088,11 @@ mod tests {
         let dir = temp_dir("quit");
         let path = dir.join("Bar.comp");
         let mut session = EditorSession::new();
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
         // No document: no question (:253).
         assert!(matches!(
-            controller.confirm_quit(&mut session, &mut busy),
+            controller.confirm_quit(&mut session),
             Step::Done(true)
         ));
 
@@ -1158,7 +1101,7 @@ mod tests {
         assert!(session.is_modified());
         session.project_url = Some(path.clone());
 
-        match controller.confirm_quit(&mut session, &mut busy) {
+        match controller.confirm_quit(&mut session) {
             Step::Pending(Pending::Confirm { message, .. }) => {
                 assert_eq!(message, "Save changes to Bar.comp?");
             }
@@ -1171,7 +1114,7 @@ mod tests {
         assert!(session.is_modified());
 
         assert!(matches!(
-            controller.confirm_quit(&mut session, &mut busy),
+            controller.confirm_quit(&mut session),
             Step::Pending(_)
         ));
         assert!(matches!(
@@ -1183,7 +1126,7 @@ mod tests {
         // URL is known (:261).
         session.add_blank_layer();
         assert!(matches!(
-            controller.confirm_quit(&mut session, &mut busy),
+            controller.confirm_quit(&mut session),
             Step::Pending(_)
         ));
         assert!(matches!(
@@ -1205,20 +1148,19 @@ mod tests {
         let path = dir.join("Baz.comp");
         let mut session = EditorSession::new();
         make_document(&mut session);
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
         // Establish the on-disk project with one layer.
         assert!(matches!(
-            controller.save(&mut session, &mut busy, false),
+            controller.save(&mut session, false),
             Step::Pending(_)
         ));
-        assert!(controller.finish_save(&mut session, &mut busy, Some(path.clone())));
+        assert!(controller.finish_save(&mut session, Some(path.clone())));
 
         // A corrupt project fails without touching the live document.
         session.add_blank_layer();
         assert!(matches!(
-            controller.open(&mut session, &mut busy, &dir.join("Nope.comp")),
+            controller.open(&mut session, &dir.join("Nope.comp")),
             Step::Done(false)
         ));
         assert!(matches!(
@@ -1231,11 +1173,11 @@ mod tests {
         // one layer; Save overwrites the file (generation bumps), so the
         // reload branch installs the two-layer document.
         let previous = controller.save_generation();
-        match controller.open(&mut session, &mut busy, &path) {
+        match controller.open(&mut session, &path) {
             Step::Pending(Pending::Confirm { message, .. }) => {
                 assert_eq!(message, "Save changes to Baz.comp?");
             }
-            other => panic!("expected a confirmation, got {other:?}"),
+            other => panic!("expected the open to ask, got {other:?}"),
         }
         match controller.resolve_confirm(&mut session, UnsavedChoice::Save) {
             Step::Done(true) => {}
@@ -1250,7 +1192,7 @@ mod tests {
         // layers as of the Save above).
         session.add_blank_layer();
         assert!(matches!(
-            controller.open(&mut session, &mut busy, &path),
+            controller.open(&mut session, &path),
             Step::Pending(_)
         ));
         assert!(matches!(
@@ -1269,7 +1211,6 @@ mod tests {
     fn incoming_queue_drains() {
         let dir = temp_dir("drain");
         let mut session = EditorSession::new();
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
         // Write two tiny PNGs.
@@ -1286,17 +1227,17 @@ mod tests {
 
         controller.receive(vec![a.clone(), b.clone()], None);
         assert!(controller.is_processing());
-        match controller.drain(&mut session, &busy) {
+        match controller.drain(&mut session) {
             Drain::Imported { failures } => assert!(failures.is_empty()),
             other => panic!("expected an import, got {other:?}"),
         }
         assert!(!controller.is_processing());
-        assert!(matches!(controller.drain(&mut session, &busy), Drain::Idle));
+        assert!(matches!(controller.drain(&mut session), Drain::Idle));
 
         // Two projects in one batch: the "one at a time" alert (:308-309).
         let project = dir.join("One.comp");
         controller.receive(vec![project.clone(), dir.join("Two.comp")], None);
-        match controller.drain(&mut session, &busy) {
+        match controller.drain(&mut session) {
             Drain::Error { title, .. } => assert_eq!(title, "Open one project at a time"),
             other => panic!("expected an error, got {other:?}"),
         }
@@ -1309,34 +1250,34 @@ mod tests {
             vec![a.clone(), project.clone(), b.clone()],
             Some(CGPoint::new(1.0, 2.0)),
         );
-        match controller.drain(&mut session, &busy) {
+        match controller.drain(&mut session) {
             Drain::OpenProject { url } => assert_eq!(url, project),
             other => panic!("expected an open step, got {other:?}"),
         }
-        match controller.advance(&mut session, &busy, true) {
+        match controller.advance(&mut session, true) {
             Drain::Imported { failures } => assert!(failures.is_empty()),
             other => panic!("expected the trailing import, got {other:?}"),
         }
-        assert!(matches!(controller.drain(&mut session, &busy), Drain::Idle));
+        assert!(matches!(controller.drain(&mut session), Drain::Idle));
 
         // A declined open skips the trailing images.
         controller.receive(vec![project.clone(), a.clone()], None);
         assert!(matches!(
-            controller.drain(&mut session, &busy),
+            controller.drain(&mut session),
             Drain::OpenProject { .. }
         ));
         assert!(matches!(
-            controller.advance(&mut session, &busy, false),
+            controller.advance(&mut session, false),
             Drain::Idle
         ));
 
         // A busy session parks the queue (:305).
-        busy.is_importing = true;
+        session.is_importing = true;
         controller.receive(vec![a.clone()], None);
-        assert!(matches!(controller.drain(&mut session, &busy), Drain::Wait));
-        busy.is_importing = false;
+        assert!(matches!(controller.drain(&mut session), Drain::Wait));
+        session.is_importing = false;
         assert!(matches!(
-            controller.drain(&mut session, &busy),
+            controller.drain(&mut session),
             Drain::Imported { .. }
         ));
 
@@ -1349,24 +1290,23 @@ mod tests {
         let dir = temp_dir("png");
         let mut session = EditorSession::new();
         make_document(&mut session);
-        let mut busy = ProjectBusy::new();
         let mut controller = ProjectController::new();
 
-        match controller.export_png(&mut session, &mut busy) {
+        match controller.export_png(&mut session) {
             Step::Pending(Pending::ExportPng { default_name, .. }) => {
                 assert_eq!(default_name, "Untitled.png");
             }
             other => panic!("expected a png panel, got {other:?}"),
         }
         let url = dir.join("Untitled.png");
-        assert!(controller.finish_export_png(&mut busy, Some(&url)));
+        assert!(controller.finish_export_png(&mut session, Some(&url)));
         assert!(std::fs::metadata(&url).unwrap().len() > 0);
         // Cancel leaves nothing written.
         assert!(matches!(
-            controller.export_png(&mut session, &mut busy),
+            controller.export_png(&mut session),
             Step::Pending(_)
         ));
-        assert!(!controller.finish_export_png(&mut busy, None));
+        assert!(!controller.finish_export_png(&mut session, None));
 
         std::fs::remove_dir_all(&dir).ok();
     }

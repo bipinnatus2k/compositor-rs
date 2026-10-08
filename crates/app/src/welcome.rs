@@ -4,6 +4,7 @@
 //! form whose Create canvas button builds the tab's document, with the
 //! File > Open and File > Import Images flows beside it.
 
+use compositor_core::session::EditorSession;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Sizable};
@@ -53,9 +54,10 @@ pub(crate) fn welcome_can_create(width: &str, height: &str) -> Option<(usize, us
 
 /// The form-level disable (NewCanvasSheet.swift:45, `.disabled(session.
 /// isImporting || session.showsBusy)`): an import in flight or any project
-/// operation (the port's `is_project_busy`) freezes the whole sheet.
-pub(crate) fn welcome_disabled(busy: &crate::tabs::ProjectBusy) -> bool {
-    busy.is_importing || busy.is_project_busy
+/// operation freezes the whole sheet. Both flags are session fields now
+/// (stage-D ticket 34).
+pub(crate) fn welcome_disabled(session: &EditorSession) -> bool {
+    session.is_importing || session.is_project_busy
 }
 
 impl AppState {
@@ -73,7 +75,7 @@ impl AppState {
     /// Both gates live here: the fields must parse and the sheet must not be
     /// busy, so a Return can never slip past a disabled button.
     fn welcome_submit(&mut self, cx: &mut Context<Self>) {
-        if welcome_disabled(&self.tab().busy) {
+        if welcome_disabled(self.tab().session.read(cx)) {
             return;
         }
         let Some((width, height)) = self.welcome_size(cx) else {
@@ -93,7 +95,7 @@ impl AppState {
         let valid = self.welcome_size(cx).is_some();
         // The sheet-level disable (NewCanvasSheet.swift:45): an import in
         // flight or a project operation freezes the whole form.
-        let disabled = welcome_disabled(&self.tab().busy);
+        let disabled = welcome_disabled(self.tab().session.read(cx));
 
         // The sheet's title bar (sheet_title/text sizes follow the other
         // sheets; the subtitle is NewCanvasSheet's secondary line).
@@ -255,7 +257,7 @@ impl AppState {
 mod tests {
     use super::{valid_dimension, welcome_dimension};
     use super::{welcome_can_create, welcome_disabled};
-    use crate::tabs::ProjectBusy;
+    use compositor_core::session::EditorSession;
 
     #[test]
     fn welcome_dimension_takes_whole_sizes_from_one_to_thirty_thousand() {
@@ -295,21 +297,22 @@ mod tests {
 
     /// The form-level disable (NewCanvasSheet.swift:45): an import in flight
     /// or a project operation freezes the sheet; a brush stroke (not in
-    /// Swift's guard) does not.
+    /// Swift's guard) does not. Both flags are session fields (stage-D
+    /// ticket 34).
     #[test]
     fn welcome_disabled_follows_the_swift_busy_flags() {
-        assert!(!welcome_disabled(&ProjectBusy::default()));
-        assert!(welcome_disabled(&ProjectBusy {
-            is_importing: true,
-            ..ProjectBusy::default()
-        }));
-        assert!(welcome_disabled(&ProjectBusy {
-            is_project_busy: true,
-            ..ProjectBusy::default()
-        }));
-        assert!(!welcome_disabled(&ProjectBusy {
-            has_brush_stroke: true,
-            ..ProjectBusy::default()
-        }));
+        let mut session = EditorSession::new();
+        assert!(!welcome_disabled(&session));
+
+        session.is_importing = true;
+        assert!(welcome_disabled(&session));
+        session.is_importing = false;
+
+        session.is_project_busy = true;
+        assert!(welcome_disabled(&session));
+        session.is_project_busy = false;
+
+        session.has_brush_stroke = true;
+        assert!(!welcome_disabled(&session));
     }
 }

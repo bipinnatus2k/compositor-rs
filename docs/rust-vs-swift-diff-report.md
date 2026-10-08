@@ -24,6 +24,31 @@ session 实体挂 `cx.observe`（tab 切换后重挂，非活动 tab 不观察�
 `ColorPickerState`，Swift 均为独立 `@Observable` 类）拆独立实体，通知作
 用域细化到按 tab/按关注点。
 
+## 架构裁定（2026-10-08 D 步一：busy 三标志进 core session）
+
+34 号票落地。Swift 住在 `EditorSession` 上的三个 project-busy 状态——
+`isProjectBusy`（:118）、`isImporting`（:515）、`brushStroke`/`warpStroke`
+——原先是 app 侧 `ProjectBusy` 快照（tabs.rs），其中 `session_ready` 手工
+镜像 core 守卫（漂移风险）；现全部搬进 `core::session::EditorSession`：
+字段 `is_project_busy`/`is_importing`/`has_brush_stroke`（后者为
+brushStroke+warpStroke 的合并布尔，Swift 守卫逐处成对 nil 判空），守卫
+`can_start_project_operation()`（对齐 Swift `canStartProjectOperation`
+:150-152 逐条；`showsImporter`/`renamingLayerID`/`importError`/
+`showsConversionSheet` 四条仍为 app 侧 UI 状态，35 号票跟进），突变
+`begin_project_access()`/`end_project_access()`（ProjectController.begin
+:16-22 的守卫+取消裁剪+提交变换+置位随忙标志上移）。app 侧删除
+`ProjectBusy`，`ProjectController` 改走 session 突变方法，`can_switch`/
+`copyLayer` 目标守卫改读 `can_start_project_operation()`。
+
+守卫随之收敛的三处（此前因字段缺位而注释"app 侧"）：
+`can_use_history`（Swift :563-567 的 busy 三子句）、`createDocument`
+（:893-895）、`selectTool`（:334）。core 测试移植
+`HistoryTests.historyBlockedDuringImportsAndDialogs`（showsImporter 半段
+除外）与 `ProjectTests.projectOperationsBlockEditsAndQueueImageImports`
+的同步半段；画布笔画经 `set_drag` 镜像 `has_brush_stroke`。测试 895 项
+全绿（core lib 614 + app lib 171 + 集成 110；33 号票基线 892 + 本票
+新增 3）。
+
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
 三个方向并行（标尺参考线+PixelMove / ToolDefaults+快捷键设置 UI / 会话测试套件），主线完成接线与收尾。测试 659 → **748** 全绿（core lib 575 + 集成 104 + app lib 69）。

@@ -946,13 +946,16 @@ impl AppState {
                 .update(cx, |session, _| session.text_draft = Some(draft.clone()));
         }
         let source = draft.style.box_size.unwrap_or(measured);
-        self.set_drag(Some(CanvasDrag::TextResize {
-            handle,
-            start: doc,
-            old: transform,
-            source,
-            draft,
-        }));
+        self.set_drag(
+            Some(CanvasDrag::TextResize {
+                handle,
+                start: doc,
+                old: transform,
+                source,
+                draft,
+            }),
+            cx,
+        );
         self.touch(cx);
     }
 }
