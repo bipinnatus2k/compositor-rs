@@ -6,7 +6,7 @@ use gpui_kit::{Context, IntoElement, ParentElement, Styled, px};
 
 use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::{LabeledCheckbox, app_on_change, text_label};
+use crate::ui::{LabeledCheckbox, app_on, text_label};
 
 impl AppState {
     /// The Image Size sheet's body: width/height fields, the Percent unit
@@ -33,7 +33,7 @@ impl AppState {
                 SheetRow::new("Unit").with_control(
                     LabeledCheckbox::new("size-percent", "Percent")
                         .checked(percent)
-                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                        .with_on_change(app_on(&app, |state, checked, _, cx| {
                             if let Some(sheet) = state.sheet.as_mut() {
                                 sheet.percent = checked;
                             }
@@ -60,7 +60,7 @@ impl AppState {
                 SheetRow::new("Constrain").with_control(
                     LabeledCheckbox::new("size-link", "Link width and height (keep aspect)")
                         .checked(link)
-                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                        .with_on_change(app_on(&app, |state, checked, _, cx| {
                             if let Some(sheet) = state.sheet.as_mut() {
                                 sheet.link = checked;
                             }

@@ -6,7 +6,7 @@ use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, px};
 
 use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on};
 
 impl AppState {
     /// The Trim sheet's body: the Based On dropdown, the four side
@@ -64,22 +64,22 @@ impl AppState {
                         .child(
                             LabeledCheckbox::new("trim-top", "Top")
                                 .checked(sides[0])
-                                .with_on_change(app_on_change(&app, make_side_handler(0))),
+                                .with_on_change(app_on(&app, make_side_handler(0))),
                         )
                         .child(
                             LabeledCheckbox::new("trim-bottom", "Bottom")
                                 .checked(sides[1])
-                                .with_on_change(app_on_change(&app, make_side_handler(1))),
+                                .with_on_change(app_on(&app, make_side_handler(1))),
                         )
                         .child(
                             LabeledCheckbox::new("trim-left", "Left")
                                 .checked(sides[2])
-                                .with_on_change(app_on_change(&app, make_side_handler(2))),
+                                .with_on_change(app_on(&app, make_side_handler(2))),
                         )
                         .child(
                             LabeledCheckbox::new("trim-right", "Right")
                                 .checked(sides[3])
-                                .with_on_change(app_on_change(&app, make_side_handler(3))),
+                                .with_on_change(app_on(&app, make_side_handler(3))),
                         ),
                 ),
             )

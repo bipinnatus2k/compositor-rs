@@ -636,39 +636,53 @@ impl AppState {
 // MARK: Helpers
 
 /// The Levels histogram, painted as thin bars.
-pub(crate) fn histogram_view(histogram: [f64; 1024]) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
-            window.paint_quad(gpui_kit::fill(bounds, gpui_kit::rgb(0x1b1b1b)));
-            let peak = histogram.iter().cloned().fold(0.0f64, f64::max);
-            if peak <= 0.0 {
-                return;
-            }
-            let width = f32::from(bounds.size.width);
-            let height = f32::from(bounds.size.height);
-            let buckets = width.max(1.0) as usize;
-            for x in 0..buckets {
-                let index = ((x as f64 / buckets as f64) * 1023.0) as usize;
-                let value = (histogram[index] / peak).clamp(0.0, 1.0);
-                let bar = (value * f64::from(height)).round() as f32;
-                if bar < 1.0 {
-                    continue;
+#[derive(IntoElement)]
+pub struct HistogramView {
+    histogram: [f64; 1024],
+}
+
+impl HistogramView {
+    pub fn new(histogram: [f64; 1024]) -> Self {
+        HistogramView { histogram }
+    }
+}
+
+impl RenderOnce for HistogramView {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let histogram = self.histogram;
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                window.paint_quad(gpui_kit::fill(bounds, gpui_kit::rgb(0x1b1b1b)));
+                let peak = histogram.iter().cloned().fold(0.0f64, f64::max);
+                if peak <= 0.0 {
+                    return;
                 }
-                window.paint_quad(gpui_kit::fill(
-                    gpui_kit::Bounds::<gpui_kit::Pixels>::new(
-                        point(
-                            px(f32::from(bounds.origin.x) + x as f32),
-                            px(f32::from(bounds.origin.y) + height - bar),
+                let width = f32::from(bounds.size.width);
+                let height = f32::from(bounds.size.height);
+                let buckets = width.max(1.0) as usize;
+                for x in 0..buckets {
+                    let index = ((x as f64 / buckets as f64) * 1023.0) as usize;
+                    let value = (histogram[index] / peak).clamp(0.0, 1.0);
+                    let bar = (value * f64::from(height)).round() as f32;
+                    if bar < 1.0 {
+                        continue;
+                    }
+                    window.paint_quad(gpui_kit::fill(
+                        gpui_kit::Bounds::<gpui_kit::Pixels>::new(
+                            point(
+                                px(f32::from(bounds.origin.x) + x as f32),
+                                px(f32::from(bounds.origin.y) + height - bar),
+                            ),
+                            size(px(1.0), px(bar)),
                         ),
-                        size(px(1.0), px(bar)),
-                    ),
-                    rgba(0xccccccdd),
-                ));
-            }
-        },
-    )
-    .size_full()
+                        rgba(0xccccccdd),
+                    ));
+                }
+            },
+        )
+        .size_full()
+    }
 }
 
 /// A sheet path field's value as an optional save target (empty = Cancel).

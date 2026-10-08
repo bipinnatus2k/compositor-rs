@@ -15,9 +15,7 @@ use crate::state::AppState;
 use crate::ui::floating_panel::AmountPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::navigation_tool_header::menu_entries;
-use crate::ui::{
-    Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on_change, text_label,
-};
+use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, text_label};
 
 impl AppState {
     /// `session.selectionAmountOperation` → selectionAmountPanel, title
@@ -293,7 +291,7 @@ impl AppState {
             .into_any_element(),
             LabeledCheckbox::new("wand-contiguous", "Contiguous")
                 .checked(settings.contiguous)
-                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session
@@ -303,7 +301,7 @@ impl AppState {
                 .into_any_element(),
             LabeledCheckbox::new("wand-all-layers", "Sample All Layers")
                 .checked(settings.sample_all_layers)
-                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
                     state.tab().session.update(cx, |session, _| {
                         session.wand_settings.sample_all_layers = checked
                     });

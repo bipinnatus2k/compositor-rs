@@ -10,9 +10,7 @@ use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 
 use crate::state::AppState;
 use crate::ui::navigation_tool_header::menu_entries;
-use crate::ui::{
-    Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on_change, text_label,
-};
+use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, text_label};
 
 impl AppState {
     /// `BrushControls.swift`'s bar controls, in its order: Size, Hardness,
@@ -127,7 +125,7 @@ impl AppState {
             controls.push(
                 LabeledCheckbox::new("clone-aligned", "Aligned")
                     .checked(aligned)
-                    .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                    .with_on_change(app_on(&app, |state, checked, _, cx| {
                         state
                             .tab()
                             .session
@@ -139,7 +137,7 @@ impl AppState {
             controls.push(
                 LabeledCheckbox::new("clone-all-layers", "Sample All Layers")
                     .checked(all_layers)
-                    .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                    .with_on_change(app_on(&app, |state, checked, _, cx| {
                         state.tab().session.update(cx, |session, _| {
                             session.clone_settings.sample_all_layers = checked
                         });

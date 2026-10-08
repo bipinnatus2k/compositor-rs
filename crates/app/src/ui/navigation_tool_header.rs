@@ -22,7 +22,7 @@ use compositor_core::tools::brush::GradientShape;
 
 use crate::state::{AppState, CanvasDrag};
 use crate::ui::{
-    Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch, app_on_change, text_label,
+    Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch, app_on, text_label,
 };
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
@@ -355,7 +355,7 @@ impl AppState {
                     .child(
                         LabeledCheckbox::new("gradient-fg-bg", "Foreground to Background")
                             .checked(settings.foreground_to_background)
-                            .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            .with_on_change(app_on(&app, |state, checked, _, cx| {
                                 state.tab().session.update(cx, |session, _| {
                                     session.gradient_settings.foreground_to_background = checked
                                 });
@@ -365,7 +365,7 @@ impl AppState {
                     .child(
                         LabeledCheckbox::new("gradient-reverse", "Reverse")
                             .checked(settings.reversed)
-                            .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                            .with_on_change(app_on(&app, |state, checked, _, cx| {
                                 state.tab().session.update(cx, |session, _| {
                                     session.gradient_settings.reversed = checked
                                 });

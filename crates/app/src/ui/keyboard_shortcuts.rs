@@ -26,20 +26,21 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
+use std::rc::Rc;
+
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Context, InteractiveElement, IntoElement, Keystroke, KeystrokeEvent, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, px,
+    AnyElement, App, Context, InteractiveElement, IntoElement, Keystroke, KeystrokeEvent,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    WeakEntity, Window, px,
 };
 use serde::{Deserialize, Serialize};
 
-use gpui_kit::AnyElement;
-
 use crate::state::AppState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::text_label;
+use crate::ui::{ClickHandler, app_on_click, text_label};
 
 /// Shortcut groups, mirroring `ShortcutDefinition`'s groups in
 /// KeyboardShortcuts.swift ("Menus", "Canvas & Layers", "Text Editing").
@@ -2017,6 +2018,7 @@ impl AppState {
             .max_h(px(380.0))
             .overflow_y_scroll();
         let mut current_group: Option<crate::ui::keyboard_shortcuts::Group> = None;
+        let app = cx.entity().downgrade();
         for (entry, chord, customized, is_recording) in rows {
             if current_group != Some(entry.group) {
                 current_group = Some(entry.group);
@@ -2026,7 +2028,17 @@ impl AppState {
                         .mt_2(),
                 );
             }
-            list = list.child(shortcut_row(entry, &chord, customized, is_recording, cx));
+            let id = entry.id;
+            list = list.child(
+                ShortcutRow::new(entry, chord, customized, is_recording)
+                    .with_on_record(app_on_click(&app, move |state, _, _, cx| {
+                        state.shortcuts_start_recording(id, cx);
+                    }))
+                    .with_on_reset(app_on_click(&app, move |state, _, _, cx| {
+                        state.shortcuts().reset(id);
+                        state.notify_only(cx);
+                    })),
+            );
         }
         list = list.child(
             text_label(
@@ -2055,55 +2067,85 @@ impl AppState {
     }
 }
 
-/// One catalog row: the action's title, its chord button (click to record)
-/// and a per-row Reset (`ShortcutRecorder` framed at 150x26 in Swift).
-fn shortcut_row(
-    entry: &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
-    chord: &str,
+/// One catalog row (`KeyboardShortcutsSheet`'s list row): the action's
+/// title, its chord button (click to record) and a per-row Reset —
+/// `ShortcutRecorder` framed at 150x26 in Swift.
+#[derive(IntoElement)]
+pub struct ShortcutRow {
+    entry: &'static ShortcutSpec,
+    chord: SharedString,
     customized: bool,
     is_recording: bool,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::Div {
-    let id = entry.id;
-    gpui_kit::div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .py_0p5()
-        .child(
-            text_label(entry.title.to_string(), false)
-                .flex_1()
-                .min_w_0()
-                .text_ellipsis(),
-        )
-        .child(
-            Button::new(SharedString::from(format!("sc-chord-{id}")))
-                .label(if is_recording {
-                    "Press keys…".to_string()
-                } else {
-                    chord.to_string()
-                })
-                .small()
-                .outline()
-                .when(is_recording, |button| {
-                    button.text_color(gpui_kit::rgb(crate::ui::ACCENT))
-                })
-                .on_click(cx.listener(move |state, _, _, cx| {
-                    state.shortcuts_start_recording(id, cx);
-                })),
-        )
-        .child(
-            Button::new(SharedString::from(format!("sc-reset-{id}")))
-                .label("Reset")
-                .small()
-                .outline()
-                .disabled(!customized)
-                .on_click(cx.listener(move |state, _, _, cx| {
-                    state.shortcuts().reset(id);
-                    state.notify_only(cx);
-                })),
-        )
+    on_record: ClickHandler,
+    on_reset: ClickHandler,
+}
+
+impl ShortcutRow {
+    pub fn new(
+        entry: &'static ShortcutSpec,
+        chord: impl Into<SharedString>,
+        customized: bool,
+        is_recording: bool,
+    ) -> Self {
+        ShortcutRow {
+            entry,
+            chord: chord.into(),
+            customized,
+            is_recording,
+            on_record: Rc::new(|_, _, _| {}),
+            on_reset: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_record(mut self, on_record: ClickHandler) -> Self {
+        self.on_record = on_record;
+        self
+    }
+
+    pub fn with_on_reset(mut self, on_reset: ClickHandler) -> Self {
+        self.on_reset = on_reset;
+        self
+    }
+}
+
+impl RenderOnce for ShortcutRow {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let id = self.entry.id;
+        gpui_kit::div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .py_0p5()
+            .child(
+                text_label(self.entry.title.to_string(), false)
+                    .flex_1()
+                    .min_w_0()
+                    .text_ellipsis(),
+            )
+            .child(
+                Button::new(SharedString::from(format!("sc-chord-{id}")))
+                    .label(if self.is_recording {
+                        SharedString::from("Press keys…")
+                    } else {
+                        self.chord
+                    })
+                    .small()
+                    .outline()
+                    .when(self.is_recording, |button| {
+                        button.text_color(gpui_kit::rgb(crate::ui::ACCENT))
+                    })
+                    .on_click(move |event, window, cx| (self.on_record)(event, window, cx)),
+            )
+            .child(
+                Button::new(SharedString::from(format!("sc-reset-{id}")))
+                    .label("Reset")
+                    .small()
+                    .outline()
+                    .disabled(!self.customized)
+                    .on_click(move |event, window, cx| (self.on_reset)(event, window, cx)),
+            )
+    }
 }
 
 /// The recorder's keystroke hook (KeyboardShortcuts.swift:306-317's

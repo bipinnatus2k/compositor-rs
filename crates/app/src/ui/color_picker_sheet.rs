@@ -12,15 +12,16 @@
 //! entities. The hue/saturation/brightness sliders that predated the drawn
 //! field are gone — the field and the hue strip feed the same state.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::{
-    AnyElement, AppContext, Bounds, Context, Corners, Entity, Focusable, Global,
+    AnyElement, App, AppContext, Bounds, Context, Corners, Entity, Focusable, Global,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, PathBuilder, Pixels, Point, RenderImage, Styled, WeakEntity, Window, canvas,
+    ParentElement, PathBuilder, Pixels, Point, RenderImage, RenderOnce, Styled, Window, canvas,
     point, px, rgba, size,
 };
 use image::Frame;
@@ -29,7 +30,10 @@ use compositor_core::document::{PaletteColor, PickerHSB};
 use compositor_core::session::ColorPickerTarget;
 
 use crate::state::AppState;
-use crate::ui::text_label;
+use crate::ui::{
+    ClickHandler, DragMoveHandler, PressHandler, app_on_click, app_on_drag_move, app_on_press,
+    text_label,
+};
 
 /// `fieldSize` (ColorPickerSheet.swift): the SV field's edge and the hue
 /// strip's length, in points.
@@ -266,124 +270,223 @@ pub(crate) fn color_picker_panel_body(
     let hsb = picker.hsb;
     let ui = state.picker_ui.as_ref()?;
     let hex = ui.hex.clone();
+    let app = cx.entity().downgrade();
 
     // The gradient bitmaps: one per working hue for the field, one strip
     // shared by every open (both at 2× backing).
     let sv_image = prepare_sv_image(cx, hsb.hue);
     let strip_image = prepare_strip_image(cx);
 
-    let value = ((color.red * 255.0).round() as u32) << 16
-        | ((color.green * 255.0).round() as u32) << 8
-        | (color.blue * 255.0).round() as u32;
-
-    // The right column (`VStack(width: 180, height: fieldSize)`): preview
-    // and OK/Cancel on top, hex entry below.
-    let side = gpui_kit::div()
-        .w(px(180.0))
-        .h(px(FIELD_SIZE))
-        .flex()
-        .flex_col()
-        .items_start()
-        .child(
-            gpui_kit::div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap_4()
-                .child(
-                    gpui_kit::div()
-                        .w(px(64.0))
-                        .h(px(64.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(rgba(0x00000099))
-                        .bg(gpui_kit::rgb(value)),
-                )
-                .child(
-                    gpui_kit::div()
-                        .w(px(90.0))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            Button::new("picker-ok")
-                                .label("OK")
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_color_picker_ui(true, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("picker-cancel")
-                                .label("Cancel")
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_color_picker_ui(false, cx);
-                                })),
-                        ),
-                ),
+    Some(
+        ColorPickerSheet::new(
+            color,
+            hex,
+            SvField::new(hsb, sv_image)
+                .with_on_press(app_on_press(&app, |state, event, window, cx| {
+                    state.picker_sv_drag_begin(event, window, cx);
+                }))
+                .with_on_drag(app_on_drag_move(&app, |state, event, window, cx| {
+                    state.picker_sv_drag(event.position, window, cx);
+                })),
+            HueStrip::new(hsb, strip_image)
+                .with_on_press(app_on_press(&app, |state, event, window, cx| {
+                    state.picker_hue_drag_begin(event, window, cx);
+                }))
+                .with_on_drag(app_on_drag_move(&app, |state, event, window, cx| {
+                    state.picker_hue_drag(event.position, window, cx);
+                })),
         )
-        .child(gpui_kit::div().h(px(12.0)))
-        .child(
-            gpui_kit::div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    gpui_kit::div()
-                        .w(px(14.0))
-                        .flex_shrink_0()
-                        .child(text_label("#", true)),
-                )
-                .child(hex),
-        );
-
-    // Swift's `HStack(alignment: .top, spacing: 14)` with 20pt padding.
-    let body = gpui_kit::div()
-        .flex()
-        .flex_row()
-        .gap_3p5()
-        .p_5()
-        .child(sv_field_view(hsb, sv_image, cx))
-        .child(hue_strip_view(hsb, strip_image, cx))
-        .child(side);
-
-    Some(body.into_any_element())
+        .with_on_ok(app_on_click(&app, |state, _, _, cx| {
+            state.close_color_picker_ui(true, cx);
+        }))
+        .with_on_cancel(app_on_click(&app, |state, _, _, cx| {
+            state.close_color_picker_ui(false, cx);
+        })),
+    )
+    .map(|sheet| sheet.into_any_element())
 }
 
-/// The saturation/brightness field: the gradient canvas sized `fieldSize`²,
+/// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
+/// hue strip and the right column with preview, OK/Cancel and hex entry.
+/// Rendered inside `ui/floating_panel.rs`'s `render_panel` shell; the
+/// OK/Cancel route through the caller's commit flag.
+#[derive(IntoElement)]
+pub struct ColorPickerSheet {
+    color: PaletteColor,
+    hex: Entity<InputState>,
+    sv_field: SvField,
+    hue_strip: HueStrip,
+    on_ok: ClickHandler,
+    on_cancel: ClickHandler,
+}
+
+impl ColorPickerSheet {
+    pub fn new(
+        color: PaletteColor,
+        hex: Entity<InputState>,
+        sv_field: SvField,
+        hue_strip: HueStrip,
+    ) -> Self {
+        ColorPickerSheet {
+            color,
+            hex,
+            sv_field,
+            hue_strip,
+            on_ok: Rc::new(|_, _, _| {}),
+            on_cancel: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_ok(mut self, on_ok: ClickHandler) -> Self {
+        self.on_ok = on_ok;
+        self
+    }
+
+    pub fn with_on_cancel(mut self, on_cancel: ClickHandler) -> Self {
+        self.on_cancel = on_cancel;
+        self
+    }
+}
+
+impl RenderOnce for ColorPickerSheet {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_ok = self.on_ok;
+        let on_cancel = self.on_cancel;
+        let value = ((self.color.red * 255.0).round() as u32) << 16
+            | ((self.color.green * 255.0).round() as u32) << 8
+            | (self.color.blue * 255.0).round() as u32;
+
+        // The right column (`VStack(width: 180, height: fieldSize)`): preview
+        // and OK/Cancel on top, hex entry below.
+        let side = gpui_kit::div()
+            .w(px(180.0))
+            .h(px(FIELD_SIZE))
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(
+                gpui_kit::div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_4()
+                    .child(
+                        gpui_kit::div()
+                            .w(px(64.0))
+                            .h(px(64.0))
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(rgba(0x00000099))
+                            .bg(gpui_kit::rgb(value)),
+                    )
+                    .child(
+                        gpui_kit::div()
+                            .w(px(90.0))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                Button::new("picker-ok")
+                                    .label("OK")
+                                    .small()
+                                    .primary()
+                                    .on_click(move |event, window, cx| on_ok(event, window, cx)),
+                            )
+                            .child(
+                                Button::new("picker-cancel")
+                                    .label("Cancel")
+                                    .small()
+                                    .on_click(move |event, window, cx| {
+                                        on_cancel(event, window, cx)
+                                    }),
+                            ),
+                    ),
+            )
+            .child(gpui_kit::div().h(px(12.0)))
+            .child(
+                gpui_kit::div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        gpui_kit::div()
+                            .w(px(14.0))
+                            .flex_shrink_0()
+                            .child(text_label("#", true)),
+                    )
+                    .child(self.hex),
+            );
+
+        // Swift's `HStack(alignment: .top, spacing: 14)` with 20pt padding.
+        gpui_kit::div()
+            .flex()
+            .flex_row()
+            .gap_3p5()
+            .p_5()
+            .child(self.sv_field)
+            .child(self.hue_strip)
+            .child(side)
+    }
+}
+
+/// The saturation/brightness field (`ColorPickerSheet`'s
+/// `saturationBrightnessField`): the gradient canvas sized `fieldSize`²,
 /// a press-capture drag, and the double-ringed marker at the working s/v.
-fn sv_field_view(
+#[derive(IntoElement)]
+pub struct SvField {
     hsb: PickerHSB,
     image: Arc<RenderImage>,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let app = cx.entity().downgrade();
-    gpui_kit::div()
-        .id("picker-sv-field")
-        .w(px(FIELD_SIZE))
-        .h(px(FIELD_SIZE))
-        .flex_shrink_0()
-        .border_1()
-        .border_color(rgba(0x00000099))
-        .overflow_hidden()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                this.picker_sv_drag_begin(event, window, cx);
-            }),
-        )
-        .child(sv_field_canvas(image, hsb, app))
+    on_press: PressHandler,
+    on_drag: DragMoveHandler,
+}
+
+impl SvField {
+    pub fn new(hsb: PickerHSB, image: Arc<RenderImage>) -> Self {
+        SvField {
+            hsb,
+            image,
+            on_press: Rc::new(|_, _, _| {}),
+            on_drag: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_press(mut self, on_press: PressHandler) -> Self {
+        self.on_press = on_press;
+        self
+    }
+
+    pub fn with_on_drag(mut self, on_drag: DragMoveHandler) -> Self {
+        self.on_drag = on_drag;
+        self
+    }
+}
+
+impl RenderOnce for SvField {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_press = self.on_press;
+        let on_drag = self.on_drag;
+        gpui_kit::div()
+            .id("picker-sv-field")
+            .w(px(FIELD_SIZE))
+            .h(px(FIELD_SIZE))
+            .flex_shrink_0()
+            .border_1()
+            .border_color(rgba(0x00000099))
+            .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                move |event: &MouseDownEvent, window, cx| on_press(event, window, cx),
+            )
+            .child(sv_field_canvas(self.image, self.hsb, on_drag))
+    }
 }
 
 fn sv_field_canvas(
     image: Arc<RenderImage>,
     hsb: PickerHSB,
-    app: WeakEntity<AppState>,
+    on_drag: DragMoveHandler,
 ) -> gpui_kit::AnyElement {
-    let app_drag = app.clone();
     canvas(
         // Layout: record the field's window bounds for hit testing.
         move |bounds, _window, cx| {
@@ -394,42 +497,68 @@ fn sv_field_canvas(
             // bounds scales it down sharply.
             let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
             paint_sv_marker(window, bounds, hsb);
-            install_sv_drag_events(&app_drag, window);
+            install_sv_drag_events(&on_drag, window);
         },
     )
     .size_full()
     .into_any_element()
 }
 
-/// The hue strip: the 34pt-wide frame around the 20pt bar (7pt padding each
-/// side for the arrow markers), a press-capture drag, the 360→0 downward
-/// gradient and the arrow pair at the working hue.
-fn hue_strip_view(
+/// The hue strip (`ColorPickerSheet`'s `hueStrip`): the 34pt-wide frame
+/// around the 20pt bar (7pt padding each side for the arrow markers), a
+/// press-capture drag, the 360→0 downward gradient and the arrow pair at
+/// the working hue.
+#[derive(IntoElement)]
+pub struct HueStrip {
     hsb: PickerHSB,
     image: Arc<RenderImage>,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let app = cx.entity().downgrade();
-    gpui_kit::div()
-        .id("picker-hue-strip")
-        .w(px(STRIP_WIDTH + STRIP_PAD * 2.0))
-        .h(px(FIELD_SIZE))
-        .flex_shrink_0()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                this.picker_hue_drag_begin(event, window, cx);
-            }),
-        )
-        .child(hue_strip_canvas(image, hsb, app))
+    on_press: PressHandler,
+    on_drag: DragMoveHandler,
+}
+
+impl HueStrip {
+    pub fn new(hsb: PickerHSB, image: Arc<RenderImage>) -> Self {
+        HueStrip {
+            hsb,
+            image,
+            on_press: Rc::new(|_, _, _| {}),
+            on_drag: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_press(mut self, on_press: PressHandler) -> Self {
+        self.on_press = on_press;
+        self
+    }
+
+    pub fn with_on_drag(mut self, on_drag: DragMoveHandler) -> Self {
+        self.on_drag = on_drag;
+        self
+    }
+}
+
+impl RenderOnce for HueStrip {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_press = self.on_press;
+        let on_drag = self.on_drag;
+        gpui_kit::div()
+            .id("picker-hue-strip")
+            .w(px(STRIP_WIDTH + STRIP_PAD * 2.0))
+            .h(px(FIELD_SIZE))
+            .flex_shrink_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                move |event: &MouseDownEvent, window, cx| on_press(event, window, cx),
+            )
+            .child(hue_strip_canvas(self.image, self.hsb, on_drag))
+    }
 }
 
 fn hue_strip_canvas(
     image: Arc<RenderImage>,
     hsb: PickerHSB,
-    app: WeakEntity<AppState>,
+    on_drag: DragMoveHandler,
 ) -> gpui_kit::AnyElement {
-    let app_drag = app.clone();
     canvas(
         move |bounds, _window, cx| {
             cx.default_global::<PickerFieldState>().hue_bounds = Some(bounds);
@@ -450,7 +579,7 @@ fn hue_strip_canvas(
             let _ = window.paint_image(bar, bar, Corners::default(), image, 0, false);
             paint_outline(window, bar, rgba(0x00000099));
             paint_hue_arrows(window, bounds, hsb.hue);
-            install_hue_drag_events(&app_drag, window);
+            install_hue_drag_events(&on_drag, window);
         },
     )
     .size_full()
@@ -463,17 +592,14 @@ fn hue_strip_canvas(
 /// pointer outside its control, as a SwiftUI DragGesture does. Each control
 /// installs a handler that acts only while its own drag is live, so the two
 /// never double-apply.
-fn install_sv_drag_events(app: &WeakEntity<AppState>, window: &mut Window) {
-    let app = app.clone();
+fn install_sv_drag_events(on_drag: &DragMoveHandler, window: &mut Window) {
+    let on_drag = on_drag.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
         let dragging = cx
             .try_global::<PickerFieldState>()
             .is_some_and(|state| state.drag == Some(PickerDrag::Sv));
         if dragging {
-            app.update(cx, |state, cx| {
-                state.picker_sv_drag(event.position, window, cx)
-            })
-            .ok();
+            on_drag(event, window, cx);
         }
     });
     window.on_mouse_event(move |_event: &MouseUpEvent, _phase, _window, cx| {
@@ -484,17 +610,14 @@ fn install_sv_drag_events(app: &WeakEntity<AppState>, window: &mut Window) {
     });
 }
 
-fn install_hue_drag_events(app: &WeakEntity<AppState>, window: &mut Window) {
-    let app = app.clone();
+fn install_hue_drag_events(on_drag: &DragMoveHandler, window: &mut Window) {
+    let on_drag = on_drag.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
         let dragging = cx
             .try_global::<PickerFieldState>()
             .is_some_and(|state| state.drag == Some(PickerDrag::Hue));
         if dragging {
-            app.update(cx, |state, cx| {
-                state.picker_hue_drag(event.position, window, cx)
-            })
-            .ok();
+            on_drag(event, window, cx);
         }
     });
     window.on_mouse_event(move |_event: &MouseUpEvent, _phase, _window, cx| {

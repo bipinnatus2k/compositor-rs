@@ -10,9 +10,7 @@ use gpui_kit::{Context, Entity, FontWeight, IntoElement, ParentElement, Styled, 
 use compositor_core::transform::LayerSampling;
 
 use crate::state::AppState;
-use crate::ui::{
-    Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change, div_row, text_label,
-};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, div_row, text_label};
 
 impl AppState {
     /// `TransformInspector.swift`'s bar controls: toggles, the numeric
@@ -61,7 +59,7 @@ impl AppState {
                 .into_any_element(),
             LabeledCheckbox::new("transform-auto-select", "Auto-select")
                 .checked(self.tab().session.read(cx).transform_auto_select)
-                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
                     // transformAutoSelect (EditorSession.swift:198). The
                     // canvas press reads it when the next Move press lands.
                     state
@@ -74,7 +72,7 @@ impl AppState {
                 .into_any_element(),
             LabeledCheckbox::new("transform-show-controls", "Show Controls")
                 .checked(self.tab().session.read(cx).shows_transform_controls)
-                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session
@@ -88,7 +86,7 @@ impl AppState {
             number_field("transform-h", "H", &self.transform_h_input, px(52.0)).into_any_element(),
             LabeledCheckbox::new("transform-lock-ratio", "Lock")
                 .checked(self.tab().session.read(cx).locks_transform_ratio)
-                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
                     state
                         .tab()
                         .session

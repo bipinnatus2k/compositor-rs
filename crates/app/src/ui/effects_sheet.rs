@@ -2,11 +2,14 @@
 //! panel: open/OK/Cancel actions, the panel body and the stroke
 //! segment / effect swatch helpers.
 
+use std::rc::Rc;
+
 use gpui_kit::component::button::Button;
 use gpui_kit::component::slider::Slider;
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px,
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, px,
 };
 
 use compositor_core::effects::LayerEffectKind;
@@ -16,7 +19,7 @@ use crate::state::AppState;
 use crate::ui::floating_panel::EffectsPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::sheets::SliderRole;
-use crate::ui::text_label;
+use crate::ui::{AppCallback, ClickHandler, app_on, app_on_click, text_label};
 
 impl AppState {
     /// `session.effectsEditing` → effectsPanel, title = the effect's name
@@ -206,6 +209,7 @@ impl AppState {
     /// is the segmented Outside/Inside picker (`EffectsSheet.swift:37-42`),
     /// rendered in the title row like Swift's headline row.
     pub(crate) fn effects_panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
         let Some(panel) = self.panel_widgets.effects.as_ref() else {
             return gpui_kit::div().into_any_element();
         };
@@ -216,7 +220,7 @@ impl AppState {
         let inside = panel.inside;
         let sliders = panel.sliders.clone();
         let color = self.tab().session.read(cx).editing_effects().color(kind);
-        let title_row = |cx: &mut Context<Self>| {
+        let title_row = |_cx: &mut Context<Self>| {
             let mut row = gpui_kit::div()
                 .flex()
                 .flex_row()
@@ -225,9 +229,12 @@ impl AppState {
                 .child(text_label(kind.label(), false).text_size(px(13.0)))
                 .child(gpui_kit::div().flex_1());
             if kind == LayerEffectKind::Stroke {
-                row = row
-                    .child(stroke_segment_button(0, inside, cx))
-                    .child(stroke_segment_button(1, inside, cx));
+                row = row.child(
+                    StrokePositionPicker::new(inside)
+                        .with_on_pick(app_on(&app, |state, inside, _, cx| {
+                            set_stroke_inside(state, inside, cx)
+                        })),
+                );
             }
             row
         };
@@ -239,7 +246,14 @@ impl AppState {
         match kind {
             LayerEffectKind::Stroke => {
                 body = body
-                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(
+                        SheetRow::new("Color").with_control(
+                            EffectSwatch::new(kind, color)
+                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
+                                    state.open_effect_color_picker(kind, cx)
+                                })),
+                        ),
+                    )
                     .child(SheetRow::new("Size (px)").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ))
@@ -249,7 +263,14 @@ impl AppState {
             }
             LayerEffectKind::Shadow => {
                 body = body
-                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(
+                        SheetRow::new("Color").with_control(
+                            EffectSwatch::new(kind, color)
+                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
+                                    state.open_effect_color_picker(kind, cx)
+                                })),
+                        ),
+                    )
                     .child(SheetRow::new("Opacity (%)").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ))
@@ -265,14 +286,28 @@ impl AppState {
             }
             LayerEffectKind::ColorOverlay => {
                 body = body
-                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(
+                        SheetRow::new("Color").with_control(
+                            EffectSwatch::new(kind, color)
+                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
+                                    state.open_effect_color_picker(kind, cx)
+                                })),
+                        ),
+                    )
                     .child(SheetRow::new("Opacity (%)").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ));
             }
             LayerEffectKind::InnerShadow => {
                 body = body
-                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(
+                        SheetRow::new("Color").with_control(
+                            EffectSwatch::new(kind, color)
+                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
+                                    state.open_effect_color_picker(kind, cx)
+                                })),
+                        ),
+                    )
                     .child(SheetRow::new("Opacity (%)").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ))
@@ -288,7 +323,14 @@ impl AppState {
             }
             LayerEffectKind::OuterGlow | LayerEffectKind::InnerGlow => {
                 body = body
-                    .child(SheetRow::new("Color").with_control(effect_swatch(color, kind, cx)))
+                    .child(
+                        SheetRow::new("Color").with_control(
+                            EffectSwatch::new(kind, color)
+                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
+                                    state.open_effect_color_picker(kind, cx)
+                                })),
+                        ),
+                    )
                     .child(SheetRow::new("Size (px)").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
                     ))
@@ -317,23 +359,49 @@ fn stroke_segment_target(segment: usize) -> bool {
     segment == 1
 }
 
-/// One segment of the Stroke position picker: two side-by-side toggle
-/// buttons, the selected one on the accent (gpui-component's `selected`
-/// button style), standing in for Swift's `NSSegmentedControl`-style
-/// `.pickerStyle(.segmented)`.
-fn stroke_segment_button(
-    segment: usize,
+/// The Stroke position picker (`EffectsSheet.swift`'s segmented Picker,
+/// `get: { effect.inside }` with Outside/Inside tags): two side-by-side
+/// toggle buttons, the selected one on the accent (gpui-component's
+/// `selected` button style); a click reports the picked `inside` value.
+#[derive(IntoElement)]
+pub struct StrokePositionPicker {
     inside: bool,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::AnyElement {
-    Button::new(SharedString::from(format!("stroke-position-{segment}")))
-        .label(STROKE_POSITION_SEGMENTS[segment])
-        .small()
-        .selected(stroke_segment_selected(inside, segment))
-        .on_click(cx.listener(move |state, _, _window, cx| {
-            set_stroke_inside(state, stroke_segment_target(segment), cx);
-        }))
-        .into_any_element()
+    on_pick: AppCallback<bool>,
+}
+
+impl StrokePositionPicker {
+    pub fn new(inside: bool) -> Self {
+        StrokePositionPicker {
+            inside,
+            on_pick: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_pick(mut self, on_pick: AppCallback<bool>) -> Self {
+        self.on_pick = on_pick;
+        self
+    }
+}
+
+impl RenderOnce for StrokePositionPicker {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_pick = self.on_pick;
+        gpui_kit::div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .children((0..STROKE_POSITION_SEGMENTS.len()).map(move |segment| {
+                let on_pick = on_pick.clone();
+                Button::new(SharedString::from(format!("stroke-position-{segment}")))
+                    .label(STROKE_POSITION_SEGMENTS[segment])
+                    .small()
+                    .selected(stroke_segment_selected(self.inside, segment))
+                    .on_click(move |_, window, cx| {
+                        on_pick(stroke_segment_target(segment), window, cx)
+                    })
+            }))
+    }
 }
 
 /// Stroke's Outside/Inside change goes through the session like every slider,
@@ -352,32 +420,53 @@ fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppSta
     state.touch(cx);
 }
 
-/// The effect's color swatch, opening the color picker panel on click
-/// (EffectsSheet's color rows). Unset components show the effect's default.
-fn effect_swatch(
-    color: Option<compositor_core::document::PaletteColor>,
+/// The effect's color swatch (`EffectsSheet`'s color rows): the effect's
+/// color, or its default when unset; clicking opens the color picker.
+#[derive(IntoElement)]
+pub struct EffectSwatch {
     kind: LayerEffectKind,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::AnyElement {
-    use gpui_kit::{StatefulInteractiveElement as _, Styled as _};
-    let color = color.unwrap_or_default();
-    let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-    let rgb = (channel(color.red) << 16) | (channel(color.green) << 8) | channel(color.blue);
-    gpui_kit::div()
-        .id(SharedString::from(format!(
-            "effect-swatch-{}",
-            kind.label()
-        )))
-        .w(px(36.0))
-        .h(px(18.0))
-        .rounded_xs()
-        .border_1()
-        .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
-        .bg(gpui_kit::rgb(rgb))
-        .on_click(cx.listener(move |state, _, _, cx| {
-            state.open_effect_color_picker(kind, cx);
-        }))
-        .into_any_element()
+    color: compositor_core::document::PaletteColor,
+    on_click: ClickHandler,
+}
+
+impl EffectSwatch {
+    pub fn new(
+        kind: LayerEffectKind,
+        color: Option<compositor_core::document::PaletteColor>,
+    ) -> Self {
+        EffectSwatch {
+            kind,
+            color: color.unwrap_or_default(),
+            on_click: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_click(mut self, on_click: ClickHandler) -> Self {
+        self.on_click = on_click;
+        self
+    }
+}
+
+impl RenderOnce for EffectSwatch {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_click = self.on_click;
+        let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let rgb = (channel(self.color.red) << 16)
+            | (channel(self.color.green) << 8)
+            | channel(self.color.blue);
+        gpui_kit::div()
+            .id(SharedString::from(format!(
+                "effect-swatch-{}",
+                self.kind.label()
+            )))
+            .w(px(36.0))
+            .h(px(18.0))
+            .rounded_xs()
+            .border_1()
+            .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
+            .bg(gpui_kit::rgb(rgb))
+            .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
 }
 
 #[cfg(test)]

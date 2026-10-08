@@ -16,7 +16,7 @@ use crate::ui::floating_panel::FilterPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::levels_sheet::levels_channel_label;
 use crate::ui::sheets::SliderRole;
-use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change, text_label};
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, text_label};
 
 impl AppState {
     /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
@@ -292,7 +292,7 @@ impl AppState {
                         SheetRow::new("Distribution").with_control(
                             LabeledCheckbox::new("noise-gaussian", "Gaussian")
                                 .checked(gaussian)
-                                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                .with_on_change(app_on(&app, |state, checked, _, cx| {
                                     if let Some(panel) = state.panel_widgets.filter.as_mut() {
                                         panel.gaussian = checked;
                                     }
@@ -304,7 +304,7 @@ impl AppState {
                         SheetRow::new("").with_control(
                             LabeledCheckbox::new("noise-mono", "Monochromatic")
                                 .checked(monochromatic)
-                                .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                                .with_on_change(app_on(&app, |state, checked, _, cx| {
                                     if let Some(panel) = state.panel_widgets.filter.as_mut() {
                                         panel.monochromatic = checked;
                                     }

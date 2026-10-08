@@ -36,8 +36,8 @@ use gpui_kit::component::{
     slider::{Slider, SliderState},
 };
 use gpui_kit::{
-    App, Context, ElementId, Entity, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
-    Styled, WeakEntity, Window, px,
+    App, ClickEvent, Context, ElementId, Entity, IntoElement, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, RenderOnce, SharedString, Styled, WeakEntity, Window, px,
 };
 
 use crate::state::AppState;
@@ -109,20 +109,75 @@ pub fn app_dispatch(app: &WeakEntity<AppState>) -> MenuDispatch {
     })
 }
 
-/// A checkbox's new value, reported at `App` level.
-pub type CheckedChange = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+/// A component's value callback at `App` level: the value a component
+/// chose (a checkbox's new state, a picked anchor cell) with the window
+/// and app contexts.
+pub type AppCallback<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
-/// The app-shell change adapter: run an AppState-flavored handler inside
-/// the app entity when a checkbox flips.
-pub fn app_on_change(
+/// The app-shell adapter for value callbacks: run an AppState-flavored
+/// handler inside the app entity.
+pub fn app_on<T: 'static>(
     app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static,
-) -> CheckedChange {
+    handler: impl Fn(&mut AppState, T, &mut Window, &mut Context<AppState>) + 'static,
+) -> AppCallback<T> {
     let app = app.clone();
     let handler = Rc::new(handler);
-    Rc::new(move |checked, window, cx| {
+    Rc::new(move |value, window, cx| {
         let handler = handler.clone();
-        app.update(cx, move |state, cx| handler(state, checked, window, cx))
+        app.update(cx, move |state, cx| handler(state, value, window, cx))
+            .ok();
+    })
+}
+
+/// A component's click callback at `App` level.
+pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// The app-shell adapter for click callbacks.
+pub fn app_on_click(
+    app: &WeakEntity<AppState>,
+    handler: impl Fn(&mut AppState, &ClickEvent, &mut Window, &mut Context<AppState>) + 'static,
+) -> ClickHandler {
+    let app = app.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, move |state, cx| handler(state, event, window, cx))
+            .ok();
+    })
+}
+
+/// A component's press callback at `App` level (press-capture drags start
+/// here, so the event's position is the drag's origin).
+pub type PressHandler = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
+/// The app-shell adapter for press callbacks.
+pub fn app_on_press(
+    app: &WeakEntity<AppState>,
+    handler: impl Fn(&mut AppState, &MouseDownEvent, &mut Window, &mut Context<AppState>) + 'static,
+) -> PressHandler {
+    let app = app.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, move |state, cx| handler(state, event, window, cx))
+            .ok();
+    })
+}
+
+/// A component's drag-move callback at `App` level (window-level move
+/// events forwarded while the component's drag is live).
+pub type DragMoveHandler = Rc<dyn Fn(&MouseMoveEvent, &mut Window, &mut App)>;
+
+/// The app-shell adapter for drag-move callbacks.
+pub fn app_on_drag_move(
+    app: &WeakEntity<AppState>,
+    handler: impl Fn(&mut AppState, &MouseMoveEvent, &mut Window, &mut Context<AppState>) + 'static,
+) -> DragMoveHandler {
+    let app = app.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, move |state, cx| handler(state, event, window, cx))
             .ok();
     })
 }
@@ -291,7 +346,7 @@ pub struct LabeledCheckbox {
     id: ElementId,
     label: SharedString,
     checked: bool,
-    on_change: CheckedChange,
+    on_change: AppCallback<bool>,
 }
 
 impl LabeledCheckbox {
@@ -309,7 +364,7 @@ impl LabeledCheckbox {
         self
     }
 
-    pub fn with_on_change(mut self, on_change: CheckedChange) -> Self {
+    pub fn with_on_change(mut self, on_change: AppCallback<bool>) -> Self {
         self.on_change = on_change;
         self
     }

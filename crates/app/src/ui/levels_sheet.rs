@@ -2,19 +2,24 @@
 //! here as it is carved out of sheets_ui.rs; today this holds the shared
 //! Levels UI helpers.
 
+use std::rc::Rc;
+
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::slider::Slider;
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled, px};
+use gpui_kit::{
+    AnyElement, App, Context, ElementId, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, px,
+};
 
 use compositor_core::adjust::LevelsChannel;
 use compositor_core::adjust::levels_auto::LevelsAuto;
 
-use crate::sheets_ui::{SheetRow, histogram_view};
+use crate::sheets_ui::{HistogramView, SheetRow};
 use crate::state::AppState;
 use crate::ui::floating_panel::{LevelsPanelState, PanelPlacement, panel_names};
 use crate::ui::sheets::SliderRole;
-use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on_change};
+use crate::ui::{AppCallback, Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on};
 
 /// The Levels/Curves channel picker's labels (LevelsSheet.swift's Picker).
 pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
@@ -128,7 +133,7 @@ impl AppState {
                 SheetRow::new("Preview").with_control(
                     LabeledCheckbox::new("levels-preview", "Preview")
                         .checked(preview)
-                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                        .with_on_change(app_on(&app, |state, checked, _, cx| {
                             if let Some(panel) = state.panel_widgets.levels.as_mut() {
                                 panel.preview = checked;
                             }
@@ -163,7 +168,7 @@ impl AppState {
                     .h(px(96.0))
                     .rounded_sm()
                     .overflow_hidden()
-                    .child(histogram_view(histogram)),
+                    .child(HistogramView::new(histogram)),
             )
             .child(
                 SheetRow::new("Input Black").with_optional_control(
@@ -196,24 +201,31 @@ impl AppState {
                         .flex()
                         .flex_row()
                         .gap_1()
-                        .child(auto_button(
-                            "levels-auto-contrast",
-                            "Contrast",
-                            LevelsAuto::Contrast,
-                            cx,
-                        ))
-                        .child(auto_button(
-                            "levels-auto-color",
-                            "Color",
-                            LevelsAuto::Color,
-                            cx,
-                        ))
-                        .child(auto_button(
-                            "levels-auto-neutral",
-                            "Neutral",
-                            LevelsAuto::Neutral,
-                            cx,
-                        )),
+                        .child(
+                            AutoButton::new(
+                                "levels-auto-contrast",
+                                "Contrast",
+                                LevelsAuto::Contrast,
+                            )
+                            .with_on_auto(app_on(
+                                &app,
+                                |state, mode, window, cx| {
+                                    state.levels_auto_mode(mode, window, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            AutoButton::new("levels-auto-color", "Color", LevelsAuto::Color)
+                                .with_on_auto(app_on(&app, |state, mode, window, cx| {
+                                    state.levels_auto_mode(mode, window, cx);
+                                })),
+                        )
+                        .child(
+                            AutoButton::new("levels-auto-neutral", "Neutral", LevelsAuto::Neutral)
+                                .with_on_auto(app_on(&app, |state, mode, window, cx| {
+                                    state.levels_auto_mode(mode, window, cx);
+                                })),
+                        ),
                 ),
             )
             .into_any_element()
@@ -229,22 +241,42 @@ fn set_levels_channel(state: &mut AppState, channel: usize, cx: &mut Context<App
     state.notify_only(cx);
 }
 
-/// One Auto button (`LevelsSheet.swift:64`): the mode's settings replace the
-/// edit's wholesale, then the sliders and the preview follow.
-fn auto_button(
-    id: &'static str,
-    label: &'static str,
+/// One Auto button (`LevelsSheet.swift:64`): the mode's settings replace
+/// the edit's wholesale, then the sliders and the preview follow; a click
+/// reports the mode.
+#[derive(IntoElement)]
+pub struct AutoButton {
+    id: ElementId,
+    label: SharedString,
     mode: LevelsAuto,
-    cx: &mut Context<AppState>,
-) -> AnyElement {
-    Button::new(id)
-        .label(label)
-        .small()
-        .outline()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.levels_auto_mode(mode, window, cx);
-        }))
-        .into_any_element()
+    on_auto: AppCallback<LevelsAuto>,
+}
+
+impl AutoButton {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>, mode: LevelsAuto) -> Self {
+        AutoButton {
+            id: id.into(),
+            label: label.into(),
+            mode,
+            on_auto: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_auto(mut self, on_auto: AppCallback<LevelsAuto>) -> Self {
+        self.on_auto = on_auto;
+        self
+    }
+}
+
+impl RenderOnce for AutoButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_auto = self.on_auto;
+        Button::new(self.id)
+            .label(self.label)
+            .small()
+            .outline()
+            .on_click(move |_, window, cx| on_auto(self.mode, window, cx))
+    }
 }
 
 #[cfg(test)]

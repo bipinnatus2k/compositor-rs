@@ -9,7 +9,7 @@ use crate::state::AppState;
 use crate::ui::floating_panel::HueSaturationPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::sheets::SliderRole;
-use crate::ui::{LabeledCheckbox, app_on_change};
+use crate::ui::{LabeledCheckbox, app_on};
 
 impl AppState {
     /// `session.hueSaturation != nil` → adjustmentPanel, title
@@ -95,7 +95,7 @@ impl AppState {
                 SheetRow::new("Colorize").with_control(
                     LabeledCheckbox::new("hue-colorize", "Colorize")
                         .checked(colorize)
-                        .with_on_change(app_on_change(&app, |state, checked, _, cx| {
+                        .with_on_change(app_on(&app, |state, checked, _, cx| {
                             if let Some(panel) = state.panel_widgets.hue_saturation.as_mut() {
                                 panel.colorize = checked;
                             }
