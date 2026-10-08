@@ -618,7 +618,10 @@ impl AppState {
                 value.origin.y += delta.y;
                 // Moving snaps to the canvas and the other layers; resizing
                 // and rotating are left alone (EditorCanvas.dragTransform),
-                // and Control drags freely (EditorCanvas.swift:1602).
+                // and Control drags freely (EditorCanvas.swift:1602). The
+                // tolerance is TransformSnap.distance (10) as document
+                // pixels; Swift divides by pointsPerPixel, so it is exact
+                // only at zoom 1 (deviation recorded in the diff report).
                 let moving: Vec<uuid::Uuid> = {
                     let session = self.workspace.current().session.read(cx);
                     session

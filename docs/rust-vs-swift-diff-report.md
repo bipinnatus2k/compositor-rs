@@ -86,6 +86,40 @@ port 整体缺失的 session 字段（`cropError` :175、`showsSampleRing` :106�
 `skipsInitialClipboardCanvasSize` :103 deviation #7）——为未移植流程预留
 空字段属投机，各流程落地时随迁。
 
+## 架构裁定（2026-10-08 票 24 阶段二：变换按下忠实度 + 变换框命中区）
+
+24 号票收尾（403a90f + 177d17f）。`transform_press_layer` 补齐 Swift
+`transformPressLayer`（EditorCanvas.swift:1320-1322）active 半边的三个
+守卫（asset 非空、非组、有效可见）；`TransformPressTests` 两个
+outside-drag 用例移植绿，随票补上 move 拖动缺的两个修饰键行为：
+Option 首个拖动帧经 `begin_duplicate_transform` 转复制拖动
+（`duplicatesTransformOnDrag`，:1589，`CanvasDrag::MoveLayer.duplicate`
+承载）、Control 拖动帧跳过 `snapped_move`（:1602）。变换框命中区
+`TransformOverlayGeometry`（handles、rotation handle、`hit`）落
+`crates/app/src/canvas/transform_overlay.rs`，
+`hoverRegionsMatchRotatedEdgesCornersAndRotationHandle` 移植绿。
+
+**有意偏离 / 残余（按 §1 记录）**：
+
+- **命中区未接线**：`hit` 的两个消费方（`beginTransformDrag` 的柄按下、
+  `updateTransformCursor` 的悬停光标）随变换柄渲染与 resize/rotate 拖动
+  状态一起属于后续票；按下现仍只走 `transform_press_layer`。几何体按
+  移植形状保留（逐项 `#[allow(dead_code)]` 豁免，票 15 式），corners
+  （distort）变体与 `resizeCursor`（NSCursor 侧）同样未移植。
+- **吸附容差**：Swift 以 `TransformSnap.distance / max(pointsPerPixel,
+  0.0001)` 把 10 屏幕点换算成文档像素（LayerTransform.swift:218、
+  EditorCanvas.swift:1605-1608）；app 拖动帧硬编码 10.0 文档像素，仅
+  zoom 1 精确（早于本票的存量，接线 zoom 相关修正时一并处理）。
+- **成组分支**：`transformPressLayer` 的 `transformsAsGroup` 半边（按下
+  在组框内外都拖整组）未移植——app 尚无多选变换语义，随多选变换票。
+- **测试 seam**：两个 outside-drag 用例走 `move_drag` helper（镜像
+  `begin_move` 拍逻辑，`move_click` 同款先例）；`canvas_mouse_move`
+  拖动臂的两个新分支本身无测试触达（app 测试惯例：handler 需窗口不可
+  直驱，见 `editor_canvas.rs` 测试模块注）。
+- **接线时待验**：`TransformOverlayGeometry::new(transform, zoom, pan)`
+  把 Swift `viewPoint` 里 `documentRect` 的居中偏移折进 `pan`；接线票
+  落地时需以含信箱（letterbox）偏移的真实 viewport 验证。
+
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
 三个方向并行（标尺参考线+PixelMove / ToolDefaults+快捷键设置 UI / 会话测试套件），主线完成接线与收尾。测试 659 → **748** 全绿（core lib 575 + 集成 104 + app lib 69）。
