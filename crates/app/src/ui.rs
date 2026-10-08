@@ -469,7 +469,7 @@ fn slider_row(label: SharedString, label_width: Option<Pixels>) -> gpui_kit::Div
 }
 
 /// A plain text label in header/panel style.
-pub fn text_label(label: impl Into<String>, dim: bool) -> gpui_kit::Div {
+pub fn text_label(label: impl Into<SharedString>, dim: bool) -> gpui_kit::Div {
     gpui_kit::div()
         // ToolHeaderStyle.swift:7: the control font is 12.
         .text_size(px(12.0))

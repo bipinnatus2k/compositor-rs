@@ -78,12 +78,20 @@ caller 供 props 与回调，值被消费即弃；`Entity<T>` 只留给有独立
   已显式命名为布局→事件桥与共享位图服务。
 - **面板拖拽 cookie 改为开板期分配**（`FloatingPanels::show`）而非
   per-render：活动拖拽由此在其自身触发的重渲染间存活，面板关闭按钮的
-  element id 也随域稳定。
+  element id 也随域稳定。残留语义：`CurvesCanvasLayout` 的 bounds 关板
+  后不清理，重开首帧布局落地前的按下会按上一轮 bounds 映射——布局先于
+  输入，实际影响趋零（原实现 bounds 随 editor 归零）。
+- **`ToolButton` 保留不参与渲染的 `tool`/`eraser` 字段**（逐项
+  `#[allow(dead_code)]` 注明原因）：行为由装配闭包按这两个 props 分派，
+  保留它们使 `TOOLS` 表的调用形状与原表逐一对应；字段级豁免按"逐项豁免
+  并注明原因"惯例。
 
 ## 后果
 
-- 调用点全面改形（约 25 个文件），但零测试改动——helper-seam 惯例
-  兑现；行为逐位保持（渲染输出、id、尺寸不变）。
+- 调用点全面改形（约 25 个文件），既有测试零改动——helper-seam 惯例
+  兑现（副作用治理批另按 seam 惯例新增 2 个测试）；渲染输出逐位保持，
+  唯一的结构差是 `StrokePositionPicker` 的两段按钮多一层 flex 行包裹
+  （组件即单元素），几何与 id 等价。
 - 剩余的自由函数返回元素只剩画布侧 render 树（`AppState::render` 及其
   私有片段），它们是装配点，随 AppState 移除一并处置。
 - 36 个组件中 3 个保留为函数、1 个消解为私有 helper、其余全部 struct 化；

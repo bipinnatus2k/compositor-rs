@@ -259,7 +259,7 @@ impl AppState {
 
 /// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
 /// hue strip and the right column with preview, OK/Cancel and hex entry.
-/// Rendered inside `ui/floating_panel.rs`'s `render_panel` shell; the OK/Cancel and the
+/// Rendered inside `ui/floating_panel.rs`'s `FloatingPanel` shell; the OK/Cancel and the
 /// title-bar ✕ route through `close_color_picker_ui`'s commit flag.
 pub(crate) fn color_picker_panel_body(
     state: &mut AppState,
@@ -308,7 +308,7 @@ pub(crate) fn color_picker_panel_body(
 
 /// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
 /// hue strip and the right column with preview, OK/Cancel and hex entry.
-/// Rendered inside `ui/floating_panel.rs`'s `render_panel` shell; the
+/// Rendered inside `ui/floating_panel.rs`'s `FloatingPanel` shell; the
 /// OK/Cancel route through the caller's commit flag.
 #[derive(IntoElement)]
 pub struct ColorPickerSheet {

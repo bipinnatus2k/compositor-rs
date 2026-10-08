@@ -9,7 +9,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
     AnyElement, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    Styled, Window, canvas, point, px, rgba, size,
+    SharedString, Styled, Window, canvas, point, px, rgba, size,
 };
 
 use compositor_core::canvas::{CanvasSizeOptions, TrimBasedOn, TrimOptions};
@@ -50,12 +50,12 @@ fn parse_input_f64(input: &Entity<InputState>, cx: &gpui_kit::App) -> Option<f64
 /// the row's control (`CanvasSizeSheet` and friends' `sheet` rows).
 #[derive(IntoElement)]
 pub struct SheetRow {
-    label: String,
+    label: SharedString,
     control: Option<AnyElement>,
 }
 
 impl SheetRow {
-    pub fn new(label: impl Into<String>) -> Self {
+    pub fn new(label: impl Into<SharedString>) -> Self {
         SheetRow {
             label: label.into(),
             control: None,
