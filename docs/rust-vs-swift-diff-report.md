@@ -119,6 +119,12 @@ Option 首个拖动帧经 `begin_duplicate_transform` 转复制拖动
 - **接线时待验**：`TransformOverlayGeometry::new(transform, zoom, pan)`
   把 Swift `viewPoint` 里 `documentRect` 的居中偏移折进 `pan`；接线票
   落地时需以含信箱（letterbox）偏移的真实 viewport 验证。
+- **move 拖动帧缺整像素取整（2026-10-09 核验新发现，存量）**：Swift 的
+  每个 dragTransform 帧先 `.rounded()` 再吸附（EditorCanvas.swift:1598，
+  拖动预览即整像素）；app 的 `MoveLayer` 臂以 `start_origin + delta`
+  直接 preview，全程无取整——两个 outside-drag 用例的整数增量把它掩盖
+  了。`LayerTransform::rounded` 本身已移植（transform.rs），补一行即可；
+  随变换柄接线票一并处理。
 
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
