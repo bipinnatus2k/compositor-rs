@@ -4,6 +4,22 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-09：UI 组件一律为 struct 组件）
+
+app 侧 36 个返回 `impl IntoElement` 的自由函数组件全部 struct 化
+（无状态 = `RenderOnce`；无状态不做 entity），组件不命名 AppState，
+状态突变经 `AppCallback`/`ClickHandler` 等回调上报，`ui.rs` 收敛出
+`app_*` 过渡适配器家族作为 AppState 薄装配层——为既定的 AppState 移除
+铺路（原版 Swift 无 AppState，view 的常规 prop 就是 session 句柄）。
+行为逐位不变，零测试改动；被测试钉住的 helper 形状未动。裁定全文、
+否决项与执行偏差见 `docs/adr/0002-ui-components-are-structs.md`。
+
+渲染期副作用治理随迁：curves 画布布局期不再重入 app 实体（bounds 走
+模块私有 `CurvesCanvasLayout` 桥，与取色器 `PickerFieldState` 同款并
+已注档）；面板拖拽 cookie 改为开板期分配，活动拖拽在其触发的重渲染间
+存活，面板关闭按钮 element id 随域稳定。`GradientCache` 保留为有注档
+的共享位图服务。
+
 ## 架构裁定（2026-10-08 C 步：每 tab 一个 `Entity<EditorSession>`）
 
 33 号票落地（裁定全文见 `docs/adr/0001-editor-session-entity-model.md`）：
