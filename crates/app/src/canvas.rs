@@ -5,3 +5,4 @@
 
 pub mod editor_canvas;
 pub mod inline_text_editor;
+pub mod transform_overlay;
