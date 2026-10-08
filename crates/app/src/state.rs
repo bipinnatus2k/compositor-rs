@@ -162,9 +162,8 @@ pub struct SheetState {
 
 /// The Curves filter sheet's editor state (`CurvesControls.swift`'s
 /// `settings`/`selected`/`dragging`). It lives outside `SheetState` because
-/// the curve canvas needs element bounds, and because the sheet's sliders
-/// have nothing to do with it; it is created when the Curves sheet body
-/// first renders and dropped with the sheet.
+/// the curve canvas needs element bounds; it is created when the Curves
+/// sheet body first renders and dropped with the sheet.
 pub struct CurvesEditor {
     /// The curve being edited: four channels of control points plus the
     /// visible channel.
@@ -174,9 +173,6 @@ pub struct CurvesEditor {
     pub selected: Option<usize>,
     /// The point under an active drag, if any.
     pub dragging: Option<usize>,
-    /// The curve canvas's last layout bounds (window pixels); pointer events
-    /// convert through this into curve units.
-    pub canvas_bounds: Bounds<Pixels>,
 }
 
 impl CurvesEditor {
@@ -185,7 +181,6 @@ impl CurvesEditor {
             settings: compositor_core::adjust::CurvesSettings::default(),
             selected: None,
             dragging: None,
-            canvas_bounds: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
         }
     }
 }

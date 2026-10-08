@@ -636,9 +636,13 @@ enum PickerDrag {
     Hue,
 }
 
-/// Per-open-picker canvas bounds and the live drag, plus the gradient bitmap
-/// cache. Kept in a gpui global because `AppState`/`PickerUi`'s shapes are
-/// fixed by `state.rs`, which this module cannot edit.
+/// The picker's layout→event bridge and live-drag channel: the canvas
+/// bounds are written during layout and read by the pointer handlers (the
+/// same bridge `CurvesCanvasLayout` provides the curves canvas), and `drag`
+/// marks which control owns the pointer until mouse-up. A module-private
+/// gpui global is the explicit owner — window-level handlers cannot reach
+/// element state, and the owning entity's state shape (`PickerUi`) is the
+/// session's, not this view's.
 #[derive(Default)]
 struct PickerFieldState {
     sv_bounds: Option<Bounds<Pixels>>,
@@ -648,6 +652,9 @@ struct PickerFieldState {
 
 impl Global for PickerFieldState {}
 
+/// The gradient bitmaps' cache, shared by every open picker (a sanctioned
+/// shared service: regenerating the strip per frame would redraw identical
+/// gradients every render).
 #[derive(Default)]
 struct GradientCache {
     /// Integer hue the cached SV bitmap was generated for.

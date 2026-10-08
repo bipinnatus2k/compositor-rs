@@ -16,7 +16,10 @@ use crate::ui::floating_panel::FilterPanelState;
 use crate::ui::floating_panel::{PanelPlacement, panel_names};
 use crate::ui::levels_sheet::levels_channel_label;
 use crate::ui::sheets::SliderRole;
-use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, text_label};
+use crate::ui::{
+    Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, app_on_drag_move, app_on_drag_up,
+    text_label,
+};
 
 impl AppState {
     /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
@@ -233,9 +236,23 @@ impl AppState {
                                     this.curves_mouse_down(event, cx);
                                 }),
                             )
-                            .child(crate::ui::curves_controls::curves_canvas_view(
-                                &curves, &points, selected, cx,
-                            )),
+                            .child(
+                                crate::ui::curves_controls::CurvesCanvas::new(
+                                    curves, points, selected,
+                                )
+                                .with_on_drag_move(app_on_drag_move(
+                                    &app,
+                                    |state, event, _window, cx| {
+                                        state.curves_mouse_move(event, cx);
+                                    },
+                                ))
+                                .with_on_drag_up(app_on_drag_up(
+                                    &app,
+                                    |state, event, _window, cx| {
+                                        state.curves_mouse_up(event, cx);
+                                    },
+                                )),
+                            ),
                     )
                     .child(text_label("Click to add a point. Drag to adjust.", true))
                     .child(

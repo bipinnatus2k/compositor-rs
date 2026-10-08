@@ -68,6 +68,11 @@ pub struct PanelState {
     pub name: &'static str,
     pub title: SharedString,
     pub placement: PanelPlacement,
+    /// The panel's stable drag identity, assigned once at open: the title
+    /// row's press writes it into [`PanelDragState`], and the matching
+    /// window-level move/up handlers check it. Unlike the per-render cookie
+    /// it replaced, it survives the re-renders a live drag triggers.
+    pub cookie: u64,
 }
 
 /// The state side of `FloatingPanelController`. Positions are the remembered
@@ -107,6 +112,7 @@ impl FloatingPanels {
             name,
             title,
             placement,
+            cookie: NEXT_COOKIE.fetch_add(1, Ordering::Relaxed),
         });
     }
 
@@ -277,6 +283,7 @@ static NEXT_COOKIE: AtomicU64 = AtomicU64::new(1);
 #[derive(IntoElement)]
 pub struct FloatingPanel<E: 'static> {
     app: WeakEntity<E>,
+    cookie: u64,
     top_left: Point<Pixels>,
     title: SharedString,
     fixed_size: Option<(Pixels, Pixels)>,
@@ -298,6 +305,7 @@ impl<E: 'static> FloatingPanel<E> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: WeakEntity<E>,
+        cookie: u64,
         top_left: Point<Pixels>,
         title: SharedString,
         fixed_size: Option<(Pixels, Pixels)>,
@@ -305,6 +313,7 @@ impl<E: 'static> FloatingPanel<E> {
     ) -> Self {
         FloatingPanel {
             app,
+            cookie,
             top_left,
             title,
             fixed_size,
@@ -333,7 +342,7 @@ impl<E: 'static> FloatingPanel<E> {
 
 impl<E: 'static> RenderOnce for FloatingPanel<E> {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let cookie = NEXT_COOKIE.fetch_add(1, Ordering::Relaxed);
+        let cookie = self.cookie;
 
         // The title row is the drag region (`NSPanel`'s titled style). The press
         // starts the drag; window-level move/up handlers (installed by the
@@ -877,6 +886,7 @@ impl AppState {
         let entry = self.panels.open_panels().iter().find(|p| p.name == name)?;
         let title = entry.title.clone();
         let placement = entry.placement;
+        let cookie = entry.cookie;
         let viewport = window.viewport_size();
         let top_left = match placement {
             PanelPlacement::DockedToMainWindowRight => {
@@ -915,7 +925,7 @@ impl AppState {
             state.notify_only(cx);
         };
         Some(
-            FloatingPanel::new(app, top_left, title, fixed_size, content)
+            FloatingPanel::new(app, cookie, top_left, title, fixed_size, content)
                 .with_on_close(on_close)
                 .with_on_moved(on_moved)
                 .into_any_element(),
@@ -1066,6 +1076,50 @@ pub fn panel_estimated_size(name: &str) -> (f32, f32) {
 #[cfg(test)]
 mod panel_tests {
     use super::*;
+
+    /// The drag cookie is assigned once per open: re-showing a visible
+    /// panel keeps its cookie (a live drag must survive the re-renders its
+    /// own moves trigger), and two open panels never share one.
+    #[test]
+    fn panel_cookies_are_stable_across_reshow_and_unique() {
+        let mut panels = FloatingPanels::new();
+        panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
+        panels.show(
+            panel_names::FILTER_PANEL,
+            "Filter",
+            PanelPlacement::Automatic,
+        );
+        let levels = panels
+            .open_panels()
+            .iter()
+            .find(|p| p.name == panel_names::LEVELS_PANEL)
+            .unwrap()
+            .cookie;
+        let filter = panels
+            .open_panels()
+            .iter()
+            .find(|p| p.name == panel_names::FILTER_PANEL)
+            .unwrap()
+            .cookie;
+        assert_ne!(levels, filter);
+
+        panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
+        let levels_again = panels
+            .open_panels()
+            .iter()
+            .find(|p| p.name == panel_names::LEVELS_PANEL)
+            .unwrap()
+            .cookie;
+        assert_eq!(levels, levels_again);
+    }
 
     #[test]
     fn panel_size_estimates_are_positive() {

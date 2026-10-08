@@ -2,14 +2,17 @@
 //! canvas — hit-testing, drag begin/move, point insert and remove — plus
 //! the gpui canvas view that paints and drags the points.
 
+use std::rc::Rc;
+
 use gpui_kit::{
-    Bounds, Context, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Styled, Window, canvas, point, px, rgba, size,
+    App, Bounds, Context, Global, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathBuilder, Pixels, Point, RenderOnce, Styled, Window, canvas, point, px, rgba, size,
 };
 
 use compositor_core::adjust::{CurvePoint, CurvesSettings, LevelsChannel};
 
-use crate::state::AppState;
+use crate::state::{AppState, CurvesEditor};
+use crate::ui::{DragMoveHandler, DragUpHandler};
 
 /// Starting a drag on the curve canvas (`CurvesControls.swift`'s
 /// `dragging == nil` branch).
@@ -44,37 +47,30 @@ impl AppState {
     /// Pointer down on the curve canvas: grab the nearest point, or add a
     /// new one on empty canvas, then start dragging it.
     pub fn curves_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(bounds) = curve_layout_bounds(cx) else {
+            return;
+        };
         let Some(editor) = self.curves_editor.as_mut() else {
             return;
         };
-        let (x, y) = curve_point_from_event(event.position, editor.canvas_bounds);
-        let channel = editor.settings.channel.index();
-        let points = editor.settings.channels[channel].clone();
-        match curve_drag_begin(&points, x, y) {
-            CurveDragBegin::None => editor.dragging = None,
-            CurveDragBegin::Grab(index) => {
-                editor.dragging = Some(index);
-                editor.selected = Some(index);
-            }
-            CurveDragBegin::Added { points, index } => {
-                editor.settings.channels[channel] = points;
-                editor.dragging = Some(index);
-                editor.selected = Some(index);
-            }
-        }
+        curves_press(editor, event.position, bounds);
+        let (x, y) = curve_point_from_event(event.position, bounds);
         self.curves_drag_to(x, y, cx);
     }
 
     /// Pointer move while a drag is live: the point follows, the preview
     /// re-renders.
     pub fn curves_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(bounds) = curve_layout_bounds(cx) else {
+            return;
+        };
         let Some(editor) = self.curves_editor.as_ref() else {
             return;
         };
         if editor.dragging.is_none() {
             return;
         }
-        let (x, y) = curve_point_from_event(event.position, editor.canvas_bounds);
+        let (x, y) = curve_point_from_event(event.position, bounds);
         self.curves_drag_to(x, y, cx);
     }
 
@@ -219,47 +215,118 @@ pub fn curve_drag_move(points: &[CurvePoint], index: usize, x: f64, y: f64) -> V
     points
 }
 
-/// The curve canvas: a layout pass that records the bounds for hit testing,
-/// and a paint pass drawing grid, spline and control points, which also
-/// installs the window-level drag events (the drag keeps tracking when the
-/// pointer leaves the canvas, as a SwiftUI DragGesture does).
-pub(crate) fn curves_canvas_view(
-    curves: &CurvesSettings,
-    points: &[CurvePoint],
+/// The curve canvas (`CurvesControls.swift`'s Canvas + DragGesture): a
+/// layout pass that measures the canvas into [`CurvesCanvasLayout`] for the
+/// pointer handlers, and a paint pass drawing grid, spline and control
+/// points, which also installs the window-level drag events (the drag keeps
+/// tracking when the pointer leaves the canvas, as a SwiftUI DragGesture
+/// does).
+#[derive(IntoElement)]
+pub struct CurvesCanvas {
+    curves: CurvesSettings,
+    points: Vec<CurvePoint>,
     selected: Option<usize>,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::AnyElement {
-    let app_bounds = cx.entity().downgrade();
-    let app_move = cx.entity().downgrade();
-    let app_up = cx.entity().downgrade();
+    on_drag_move: DragMoveHandler,
+    on_drag_up: DragUpHandler,
+}
 
-    // Sample the spline once per frame, in curve units.
-    let channel = curves.channel.index();
-    let polyline: Vec<CurvePoint> = (0..=255)
-        .map(|step| CurvePoint {
-            x: step as f64,
-            y: curves.value(step as f64, channel),
-        })
-        .collect();
-    let points = points.to_vec();
+impl CurvesCanvas {
+    pub fn new(curves: CurvesSettings, points: Vec<CurvePoint>, selected: Option<usize>) -> Self {
+        CurvesCanvas {
+            curves,
+            points,
+            selected,
+            on_drag_move: Rc::new(|_, _, _| {}),
+            on_drag_up: Rc::new(|_, _, _| {}),
+        }
+    }
 
-    canvas(
-        move |bounds, _window, cx| {
-            app_bounds
-                .update(cx, |state, _| {
-                    if let Some(editor) = state.curves_editor.as_mut() {
-                        editor.canvas_bounds = bounds;
-                    }
-                })
-                .ok();
-        },
-        move |bounds, _prepaint, window, _cx| {
-            paint_curve_canvas(bounds, &polyline, &points, selected, window);
-            install_curve_drag_events(&app_move, &app_up, window);
-        },
-    )
-    .size_full()
-    .into_any_element()
+    pub fn with_on_drag_move(mut self, on_drag_move: DragMoveHandler) -> Self {
+        self.on_drag_move = on_drag_move;
+        self
+    }
+
+    pub fn with_on_drag_up(mut self, on_drag_up: DragUpHandler) -> Self {
+        self.on_drag_up = on_drag_up;
+        self
+    }
+}
+
+impl RenderOnce for CurvesCanvas {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        // Sample the spline once per frame, in curve units.
+        let channel = self.curves.channel.index();
+        let polyline: Vec<CurvePoint> = (0..=255)
+            .map(|step| CurvePoint {
+                x: step as f64,
+                y: self.curves.value(step as f64, channel),
+            })
+            .collect();
+        canvas(
+            move |bounds, _window, cx| {
+                cx.default_global::<CurvesCanvasLayout>().bounds = Some(bounds);
+            },
+            {
+                let on_drag_move = self.on_drag_move;
+                let on_drag_up = self.on_drag_up;
+                let points = self.points;
+                let selected = self.selected;
+                move |bounds, _prepaint, window, _cx| {
+                    paint_curve_canvas(bounds, &polyline, &points, selected, window);
+                    install_curve_drag_events(&on_drag_move, &on_drag_up, window);
+                }
+            },
+        )
+        .size_full()
+    }
+}
+
+/// The curve canvas's measured bounds, written during layout and read by
+/// the app's pointer handlers. The same layout→event bridge the color
+/// picker's `PickerFieldState` uses: window-level handlers cannot reach
+/// element state, and a re-entrant entity update from the layout pass is
+/// what this replaces.
+#[derive(Default)]
+struct CurvesCanvasLayout {
+    bounds: Option<Bounds<Pixels>>,
+}
+
+impl Global for CurvesCanvasLayout {}
+
+/// The canvas bounds to map pointer positions through; `None` before the
+/// canvas's first layout.
+fn curve_layout_bounds(cx: &Context<AppState>) -> Option<Bounds<Pixels>> {
+    cx.try_global::<CurvesCanvasLayout>().and_then(|l| l.bounds)
+}
+
+/// The press half of `AppState::curves_mouse_down`, on the editor alone:
+/// grab the nearest point or insert one, and start dragging it. Returns
+/// whether a drag is live (the handler then folds the press position in).
+fn curves_press(
+    editor: &mut CurvesEditor,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+) -> bool {
+    let (x, y) = curve_point_from_event(position, bounds);
+    let channel = editor.settings.channel.index();
+    let points = editor.settings.channels[channel].clone();
+    match curve_drag_begin(&points, x, y) {
+        CurveDragBegin::None => {
+            editor.dragging = None;
+            false
+        }
+        CurveDragBegin::Grab(index) => {
+            editor.dragging = Some(index);
+            editor.selected = Some(index);
+            true
+        }
+        CurveDragBegin::Added { points, index } => {
+            editor.settings.channels[channel] = points;
+            editor.dragging = Some(index);
+            editor.selected = Some(index);
+            true
+        }
+    }
 }
 
 /// The grid (5×5, white 12%), the spline (2px white) and the control points
@@ -324,21 +391,17 @@ fn paint_curve_canvas(
 /// Window-level move/up handlers so an in-progress drag keeps following the
 /// pointer outside the canvas (`canvas.rs`'s install_drag_events pattern).
 fn install_curve_drag_events(
-    app_move: &gpui_kit::WeakEntity<AppState>,
-    app_up: &gpui_kit::WeakEntity<AppState>,
+    on_drag_move: &DragMoveHandler,
+    on_drag_up: &DragUpHandler,
     window: &mut Window,
 ) {
-    let app_move = app_move.clone();
-    let app_up = app_up.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, _phase, _window, cx| {
-        app_move
-            .update(cx, |state, cx| state.curves_mouse_move(event, cx))
-            .ok();
+    let on_drag_move = on_drag_move.clone();
+    let on_drag_up = on_drag_up.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
+        on_drag_move(event, window, cx);
     });
-    window.on_mouse_event(move |event: &MouseUpEvent, _phase, _window, cx| {
-        app_up
-            .update(cx, |state, cx| state.curves_mouse_up(event, cx))
-            .ok();
+    window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
+        on_drag_up(event, window, cx);
     });
 }
 
@@ -346,8 +409,9 @@ fn install_curve_drag_events(
 mod tests {
     use super::{
         CurveDragBegin, curve_drag_begin, curve_drag_move, curve_hit_point, curve_point_from_event,
-        curve_value_to_screen,
+        curve_value_to_screen, curves_press,
     };
+    use crate::state::CurvesEditor;
     use compositor_core::adjust::CurvePoint;
     use gpui_kit::{Bounds, Pixels, point, px, size};
 
@@ -360,6 +424,48 @@ mod tests {
 
     fn canvas_bounds() -> Bounds<Pixels> {
         Bounds::new(point(px(10.0), px(20.0)), size(px(255.0), px(255.0)))
+    }
+
+    /// The press handler's editor mutation: a grab selects and drags the hit
+    /// point, an insert adds the point and drags it, and a refused press
+    /// clears the drag — with the same position→curve mapping the handler
+    /// reads from the canvas's layout bounds.
+    #[test]
+    fn press_grabs_adds_and_refuses_on_the_editor() {
+        let bounds = canvas_bounds();
+        // A press on the diagonal's (0, 0) corner grabs and drags it.
+        let mut editor = CurvesEditor::new();
+        editor.settings.channels[0] = diagonal();
+        assert!(curves_press(
+            &mut editor,
+            point(px(10.0), px(275.0)),
+            bounds
+        ));
+        assert_eq!(editor.selected, Some(0));
+        assert_eq!(editor.dragging, Some(0));
+
+        // A press on empty canvas inserts a point there and drags it.
+        let mut editor = CurvesEditor::new();
+        editor.settings.channels[0] = diagonal();
+        assert!(curves_press(
+            &mut editor,
+            point(px(137.0), px(147.0)),
+            bounds
+        ));
+        assert_eq!(editor.settings.channels[0].len(), 3);
+        assert_eq!(editor.dragging, Some(1));
+
+        // A refused press (x at the canvas edge, far from every point)
+        // clears the drag.
+        let mut editor = CurvesEditor::new();
+        editor.settings.channels[0] = diagonal();
+        editor.dragging = Some(1);
+        assert!(!curves_press(
+            &mut editor,
+            point(px(10.5), px(147.0)),
+            bounds
+        ));
+        assert_eq!(editor.dragging, None, "the x guard refuses the press");
     }
 
     #[test]

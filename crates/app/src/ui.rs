@@ -37,7 +37,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, ClickEvent, Context, ElementId, Entity, IntoElement, MouseDownEvent, MouseMoveEvent,
-    ParentElement, Pixels, RenderOnce, SharedString, Styled, WeakEntity, Window, px,
+    MouseUpEvent, ParentElement, Pixels, RenderOnce, SharedString, Styled, WeakEntity, Window, px,
 };
 
 use crate::state::AppState;
@@ -173,6 +173,23 @@ pub fn app_on_drag_move(
     app: &WeakEntity<AppState>,
     handler: impl Fn(&mut AppState, &MouseMoveEvent, &mut Window, &mut Context<AppState>) + 'static,
 ) -> DragMoveHandler {
+    let app = app.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        app.update(cx, move |state, cx| handler(state, event, window, cx))
+            .ok();
+    })
+}
+
+/// A component's drag-release callback at `App` level.
+pub type DragUpHandler = Rc<dyn Fn(&MouseUpEvent, &mut Window, &mut App)>;
+
+/// The app-shell adapter for drag-release callbacks.
+pub fn app_on_drag_up(
+    app: &WeakEntity<AppState>,
+    handler: impl Fn(&mut AppState, &MouseUpEvent, &mut Window, &mut Context<AppState>) + 'static,
+) -> DragUpHandler {
     let app = app.clone();
     let handler = Rc::new(handler);
     Rc::new(move |event, window, cx| {
