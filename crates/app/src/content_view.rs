@@ -348,11 +348,11 @@ impl AppState {
     /// `didSet { ToolDefaults.set(...) }`; the port snapshots the whole table
     /// at the change point and stores it atomically. Every handler below that
     /// flips one of the persisted switches calls this right after mutating
-    /// `self.tab().session` / `self.transform_auto_select`, which is also why no
+    /// `self.tab().session`, which is also why no
     /// explicit exit save is wired: the table on disk is always current.
     pub fn persist_tool_defaults(&mut self, cx: &App) {
         let session = self.current_tab().session.read(cx);
-        crate::settings::persist_session(session, self.transform_auto_select);
+        crate::settings::persist_session(session);
     }
 
     // MARK: Tools

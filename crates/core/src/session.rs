@@ -509,6 +509,10 @@ pub struct EditorSession {
     pub filter_edit: Option<crate::filters::FilterSettings>,
 
     // Guides
+    /// The Move tool picks the layer under the pointer instead of dragging
+    /// the active layer (`transformAutoSelect`); Cmd picks either way. The
+    /// canvas press reads it; ToolDefaults persists it.
+    pub transform_auto_select: bool,
     pub shows_transform_controls: bool,
     pub shows_guides: bool,
     pub shows_rulers: bool,
@@ -603,6 +607,7 @@ impl Default for EditorSession {
             adjustment_editing_id: None,
             adjustment_original: None,
             filter_edit: None,
+            transform_auto_select: false,
             shows_transform_controls: true,
             shows_guides: true,
             shows_rulers: false,

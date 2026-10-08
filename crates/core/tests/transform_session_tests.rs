@@ -3,13 +3,13 @@
 //! rendering a transformed layer.
 //!
 //! Per-case notes record what the Rust core cannot express yet:
-//! - Auto Select (`transformAutoSelect`), the overlay geometry
-//!   (`TransformOverlayGeometry.hit`, hover regions, handle hit-testing) and
-//!   the CanvasViewport mapping live in the app crate, so
-//!   `autoSelectCanBeDisabledAndCommandClickOverridesIt`,
-//!   `autoSelectPicksForegroundLayerStackedOnSelectedBackground`,
-//!   `hoverRegionsMatchRotatedEdgesCornersAndRotationHandle` and the
-//!   viewport half of `documentMappingAndRotatedHitTesting` are not ported.
+//! - The overlay geometry (`TransformOverlayGeometry.hit`, hover regions,
+//!   handle hit-testing) and the CanvasViewport mapping live in the app
+//!   crate, so `hoverRegionsMatchRotatedEdgesCornersAndRotationHandle` and
+//!   the viewport half of `documentMappingAndRotatedHitTesting` are not
+//!   ported. The two Auto Select cases press through the app canvas's
+//!   `begin_move` seam — they are ported there
+//!   (`crates/app/src/canvas/editor_canvas.rs` tests).
 //! - `layerListToolKeysAndTransformNudge` drives app key routing; the
 //!   nudge/escape session behavior it exercises is covered by
 //!   `preview_commit_cancel_and_undo_preserve_sources` and
@@ -264,7 +264,7 @@ fn preview_commit_cancel_and_undo_preserve_sources() {
 /// the active layer's asset pixel size; read from the document here.
 #[test]
 fn scale_percent_sets_both_sides_about_the_center() {
-    let (mut session, id) = painted_session(400, 200);
+    let (session, id) = painted_session(400, 200);
     let asset = session
         .document
         .as_ref()

@@ -32,8 +32,7 @@ use compositor_core::session::EditorSession;
 
 // MARK: Keys (EditorSession.swift:198-279, `ToolDefaults.bool("…", …)`)
 
-/// Move tool: select layers by clicking the canvas (`transformAutoSelect`;
-/// carried on `AppState`, not the core session).
+/// Move tool: select layers by clicking the canvas (`transformAutoSelect`).
 pub const AUTO_SELECT: &str = "autoSelect";
 /// Transform boxes are drawn over placed layers (`showsTransformControls`).
 pub const TRANSFORM_CONTROLS: &str = "transformControls";
@@ -221,14 +220,11 @@ impl ToolDefaults {
 
 // MARK: Session mapping (the didSet call sites in EditorSession.swift)
 
-/// Snapshots every persisted toggle off a session and the app-level Auto
-/// Select flag into a table (the values Swift's `didSet`s write through).
-pub fn capture_session(
-    session: &EditorSession,
-    transform_auto_select: bool,
-) -> BTreeMap<String, bool> {
+/// Snapshots every persisted toggle off a session into a table (the values
+/// Swift's `didSet`s write through).
+pub fn capture_session(session: &EditorSession) -> BTreeMap<String, bool> {
     BTreeMap::from([
-        (AUTO_SELECT.to_string(), transform_auto_select),
+        (AUTO_SELECT.to_string(), session.transform_auto_select),
         (
             TRANSFORM_CONTROLS.to_string(),
             session.shows_transform_controls,
@@ -246,15 +242,11 @@ pub fn capture_session(
     ])
 }
 
-/// Applies a table onto a session and the app-level Auto Select flag (the
-/// startup load; each field reads `defaults.bool(key, compiled_default)` like
-/// Swift's initializers read `ToolDefaults.bool`).
-pub fn apply_to_session(
-    defaults: &ToolDefaults,
-    session: &mut EditorSession,
-    transform_auto_select: &mut bool,
-) {
-    *transform_auto_select = defaults.bool(AUTO_SELECT, false);
+/// Applies a table onto a session (the startup load; each field reads
+/// `defaults.bool(key, compiled_default)` like Swift's initializers read
+/// `ToolDefaults.bool`).
+pub fn apply_to_session(defaults: &ToolDefaults, session: &mut EditorSession) {
+    session.transform_auto_select = defaults.bool(AUTO_SELECT, false);
     session.shows_transform_controls = defaults.bool(TRANSFORM_CONTROLS, true);
     session.shows_pixel_grid = defaults.bool(PIXEL_GRID, true);
     session.shows_grid = defaults.bool(GRID, false);
@@ -297,22 +289,15 @@ pub fn lock_global() -> MutexGuard<'static, ToolDefaults> {
 /// EditorSession.swift:198-279), applied to every session as it is built.
 pub fn apply_stored_session_defaults(session: &mut EditorSession) {
     let defaults = lock_global();
-    let mut ignored = false;
-    apply_to_session(&defaults, session, &mut ignored);
-}
-
-/// The stored auto-select toggle. App-global in this port (Swift keeps it
-/// per-session — recorded in docs/rust-vs-swift-diff-report.md).
-pub fn stored_auto_select() -> bool {
-    lock_global().bool(AUTO_SELECT, false)
+    apply_to_session(&defaults, session);
 }
 
 /// Snapshots the session's toggles into the process-wide table and saves it
 /// to disk (`didSet { ToolDefaults.set(...) }` batched into one atomic
 /// write). Write errors are swallowed, as Swift's `UserDefaults.set` is
 /// fire-and-forget.
-pub fn persist_session(session: &EditorSession, transform_auto_select: bool) {
-    let values = capture_session(session, transform_auto_select);
+pub fn persist_session(session: &EditorSession) {
+    let values = capture_session(session);
     let mut defaults = lock_global();
     defaults.values = values;
     let _ = defaults.save();
@@ -516,8 +501,8 @@ mod tests {
     #[test]
     fn session_round_trips_through_the_table() {
         let mut session = EditorSession::new();
-        // Flip every toggle off its compiled default; Auto Select travels
-        // alongside as the app-level flag.
+        // Flip every toggle off its compiled default, Auto Select included.
+        session.transform_auto_select = true;
         session.shows_transform_controls = false;
         session.shows_pixel_grid = false;
         session.shows_grid = true;
@@ -530,7 +515,7 @@ mod tests {
         session.snap_to_document_bounds = false;
         session.locks_guides = true;
 
-        let values = capture_session(&session, true);
+        let values = capture_session(&session);
         assert_eq!(values.len(), KEYS.len(), "every toggle is captured");
         assert_eq!(values.get(AUTO_SELECT), Some(&true));
         assert_eq!(values.get(TRANSFORM_CONTROLS), Some(&false));
@@ -538,14 +523,13 @@ mod tests {
 
         // A fresh session picks the table up wholesale.
         let mut restored = EditorSession::new();
-        let mut auto_select = false;
         let defaults = ToolDefaults {
             path: None,
             values: values.clone(),
             numbers: BTreeMap::new(),
         };
-        apply_to_session(&defaults, &mut restored, &mut auto_select);
-        assert!(auto_select);
+        apply_to_session(&defaults, &mut restored);
+        assert!(restored.transform_auto_select);
         assert!(!restored.shows_transform_controls);
         assert!(!restored.shows_pixel_grid);
         assert!(restored.shows_grid);
@@ -566,9 +550,12 @@ mod tests {
         let mut defaults = ToolDefaults::new();
         defaults.set(true, GRID);
         let mut session = EditorSession::new();
-        let mut auto_select = true;
-        apply_to_session(&defaults, &mut session, &mut auto_select);
-        assert!(!auto_select, "unset autoSelect falls back to false");
+        session.transform_auto_select = true;
+        apply_to_session(&defaults, &mut session);
+        assert!(
+            !session.transform_auto_select,
+            "unset autoSelect falls back to false"
+        );
         assert!(session.shows_grid);
         assert!(session.shows_transform_controls, "unset falls back to true");
         assert!(session.snap_to_document_bounds, "unset falls back to true");
@@ -582,7 +569,8 @@ mod tests {
         session.shows_rulers = true;
         session.snap_to_grid = true;
         session.snapping_enabled = false;
-        persist_session(&session, true);
+        session.transform_auto_select = true;
+        persist_session(&session);
 
         let global = lock_global();
         assert_eq!(global.values().len(), KEYS.len());
@@ -591,10 +579,9 @@ mod tests {
         assert!(!global.bool(SNAP, true));
 
         let mut restored = EditorSession::new();
-        let mut auto_select = false;
-        apply_to_session(&global, &mut restored, &mut auto_select);
+        apply_to_session(&global, &mut restored);
         drop(global);
-        assert!(auto_select);
+        assert!(restored.transform_auto_select);
         assert!(restored.shows_rulers);
         assert!(restored.snap_to_grid);
         assert!(!restored.snapping_enabled);

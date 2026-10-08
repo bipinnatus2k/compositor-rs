@@ -48,11 +48,14 @@ impl AppState {
                 &app,
                 "transform-auto-select",
                 "Auto-select",
-                self.transform_auto_select,
+                self.tab().session.read(cx).transform_auto_select,
                 |state, checked, _, cx| {
                     // transformAutoSelect (EditorSession.swift:198). The
-                    // canvas click-through itself is canvas-side wiring.
-                    state.transform_auto_select = checked;
+                    // canvas press reads it when the next Move press lands.
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.transform_auto_select = checked);
                     state.persist_tool_defaults(cx);
                     state.touch(cx);
                 },

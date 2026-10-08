@@ -1390,7 +1390,7 @@ impl AppState {
         // A picked layer becomes the transform target before the drag starts.
         if self.tab().session.read(cx).transform_edit.is_none() {
             let active_id = self.tab().session.read(cx).active_layer_id;
-            let auto_select = self.transform_auto_select;
+            let auto_select = self.tab().session.read(cx).transform_auto_select;
             if let Some(document) = self.tab().session.read(cx).document.as_ref()
                 && let Some((id, picked)) =
                     transform_press_layer(document, active_id, auto_select, command, true, doc)
@@ -2634,6 +2634,110 @@ mod tests {
             transform_press_layer(&doc, Some(fg), false, false, true, CGPoint::new(5.0, 5.0)),
             Some((fg, false))
         );
+    }
+
+    /// `insertPaintedLayer` (TransformTests.swift:131-143): a document-sized
+    /// fully red layer, inserted as the new active layer.
+    fn insert_painted_layer(session: &mut EditorSession) -> Uuid {
+        let (width, height) = {
+            let document = session.document.as_ref().unwrap();
+            (document.width, document.height)
+        };
+        let mut image = Bitmap::new(width, height);
+        for px in image.data.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        session.insert_image(ImportedImage::new(image, "Painted layer"), None);
+        session.active_layer_id.unwrap()
+    }
+
+    /// A Move-tool click: the pick half of `begin_move` (the press), then
+    /// the release commit (the Swift cases' `mouseDown`/`mouseUp` +
+    /// `commitTransform()`).
+    fn move_click(session: &mut EditorSession, at: CGPoint, command: bool) {
+        if session.transform_edit.is_none() {
+            let active_id = session.active_layer_id;
+            let document = session.document.clone().unwrap();
+            if let Some((id, picked)) = transform_press_layer(
+                &document,
+                active_id,
+                session.transform_auto_select,
+                command,
+                true,
+                at,
+            ) && picked
+            {
+                session.select_layer(Some(id));
+            }
+        }
+        session.commit_transform();
+    }
+
+    /// `autoSelectCanBeDisabledAndCommandClickOverridesIt`
+    /// (TransformTests.swift:56-71): Auto Select starts off and a press
+    /// drags the active layer; on, a press picks the layer under the
+    /// pointer; Cmd picks either way without flipping the toggle.
+    #[test]
+    fn auto_select_can_be_disabled_and_command_click_overrides_it() {
+        let mut session = EditorSession::new();
+        session.create_document(400, 200, false);
+        let first = insert_painted_layer(&mut session);
+        session.document.as_mut().unwrap().layers[0].transform =
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(100.0, 100.0));
+        let second = insert_painted_layer(&mut session);
+        session.document.as_mut().unwrap().layers[1].transform =
+            LayerTransform::new(CGPoint::new(250.0, 0.0), CGSize::new(100.0, 100.0));
+        session.select_layer(Some(first));
+
+        assert!(
+            !session.transform_auto_select,
+            "Auto Select starts off; a press drags the active layer"
+        );
+        session.transform_auto_select = true;
+        move_click(&mut session, CGPoint::new(300.0, 50.0), false);
+        assert_eq!(session.active_layer_id, Some(second));
+
+        session.select_layer(Some(first));
+        session.transform_auto_select = false;
+        move_click(&mut session, CGPoint::new(300.0, 50.0), false);
+        assert_eq!(session.active_layer_id, Some(first));
+
+        move_click(&mut session, CGPoint::new(300.0, 50.0), true);
+        assert_eq!(session.active_layer_id, Some(second));
+        assert!(!session.transform_auto_select);
+    }
+
+    /// `autoSelectPicksForegroundLayerStackedOnSelectedBackground`
+    /// (TransformTests.swift:96-111): with Auto Select on, a press inside
+    /// both the selected full-canvas background and a foreground layer
+    /// above it prefers the foreground; off, the background keeps the
+    /// press.
+    #[test]
+    fn auto_select_picks_foreground_layer_stacked_on_selected_background() {
+        let mut session = EditorSession::new();
+        session.create_document(400, 200, false);
+        let background = insert_painted_layer(&mut session);
+        session.document.as_mut().unwrap().layers[0].transform =
+            LayerTransform::new(CGPoint::ZERO, CGSize::new(400.0, 200.0));
+        let foreground = insert_painted_layer(&mut session);
+        session.document.as_mut().unwrap().layers[1].transform =
+            LayerTransform::new(CGPoint::new(150.0, 50.0), CGSize::new(80.0, 60.0));
+        session.select_layer(Some(background));
+
+        session.transform_auto_select = true;
+        move_click(&mut session, CGPoint::new(180.0, 70.0), false);
+        assert_eq!(session.active_layer_id, Some(foreground));
+
+        move_click(&mut session, CGPoint::new(20.0, 20.0), false);
+        assert_eq!(session.active_layer_id, Some(background));
+
+        move_click(&mut session, CGPoint::new(180.0, 70.0), false);
+        assert_eq!(session.active_layer_id, Some(foreground));
+
+        session.select_layer(Some(background));
+        session.transform_auto_select = false;
+        move_click(&mut session, CGPoint::new(180.0, 70.0), false);
+        assert_eq!(session.active_layer_id, Some(background));
     }
 
     #[test]

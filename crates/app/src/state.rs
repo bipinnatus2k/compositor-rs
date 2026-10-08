@@ -376,11 +376,6 @@ pub struct AppState {
     /// The Curves filter sheet's editor; `None` while no Curves sheet is
     /// open (see `CurvesEditor`).
     pub curves_editor: Option<CurvesEditor>,
-    /// Move tool: select layers by clicking the canvas
-    /// (`transformAutoSelect` in EditorSession.swift, persisted through
-    /// ToolDefaults there; the core session has no such field, so the app
-    /// carries it until it is wired into canvas picking).
-    pub transform_auto_select: bool,
     /// The Type header's numeric fields (size, tracking, leading).
     pub type_size_input: Entity<InputState>,
     pub type_tracking_input: Entity<InputState>,
@@ -545,11 +540,9 @@ impl AppState {
             .current()
             .session
             .update(cx, |session, _| session.create_document(1280, 800, true));
-        // The persisted auto-select toggle is app-global in this port (Swift
-        // keeps it per-session — docs/rust-vs-swift-diff-report.md); the
-        // session-side defaults are applied per tab in ProjectTab::new, so
-        // the panel sliders seed from already-persisted settings.
-        let transform_auto_select = crate::settings::stored_auto_select();
+        // Session-side ToolDefaults (Auto Select included) are applied per
+        // tab in ProjectTab::new, so the panel sliders seed from
+        // already-persisted settings.
         let (brush, wand_tolerance, gradient_opacity, style) = {
             let session = workspace.current().session.read(cx);
             (
@@ -625,7 +618,6 @@ impl AppState {
             space_saved_tool: None,
             picker_ui: None,
             curves_editor: None,
-            transform_auto_select,
             type_size_input,
             type_tracking_input,
             type_leading_input,
