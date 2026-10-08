@@ -1,17 +1,19 @@
 //! Port of the Type tool's option bar (`TypeControls.swift`): the bar's
 //! render body plus its font-catalog and alignment helpers.
 
+use std::rc::Rc;
+
 use gpui_kit::component::Selectable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
-    Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, px,
+    App, Context, InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window, px,
 };
 
 use crate::state::AppState;
-use crate::ui::{Dropdown, MenuEntry, app_dispatch, div_row, text_label};
+use crate::ui::{AppCallback, Dropdown, MenuEntry, app_dispatch, app_on, div_row, text_label};
 
 pub(crate) const FONT_MENU_CAP: usize = 250;
 
@@ -72,40 +74,52 @@ pub(crate) fn available_font_names() -> &'static Vec<String> {
 
 /// The Type bar's alignment segment (`TextAlignment.allCases`): ghost
 /// buttons with the selected one lit. The widget set here has no SF Symbol
-/// glyphs, so the labels carry the meaning.
-pub(crate) fn alignment_buttons(
-    app: &gpui_kit::WeakEntity<AppState>,
+/// glyphs, so the labels carry the meaning; a click reports the picked
+/// alignment.
+#[derive(IntoElement)]
+pub struct AlignmentButtons {
     selected: compositor_core::document::TextAlignment,
-) -> gpui_kit::Div {
-    let mut row = gpui_kit::div().flex().flex_row().gap_0p5().flex_shrink_0();
-    for (alignment, label) in [
-        (compositor_core::document::TextAlignment::Left, "Left"),
-        (compositor_core::document::TextAlignment::Center, "Center"),
-        (compositor_core::document::TextAlignment::Right, "Right"),
-    ] {
-        row = row.child(
-            Button::new(SharedString::from(format!("type-align-{}", label)))
-                .label(label)
-                .ghost()
-                .compact()
-                .selected(selected == alignment)
-                .on_click({
-                    let app = app.clone();
-                    move |_, _, cx| {
-                        app.update(cx, |state, cx| {
-                            state.tab().session.update(cx, |session, _| {
-                                session.change_text_style(move |style| {
-                                    style.alignment = alignment;
-                                })
-                            });
-                            state.touch(cx);
-                        })
-                        .ok();
-                    }
-                }),
-        );
+    on_select: AppCallback<compositor_core::document::TextAlignment>,
+}
+
+impl AlignmentButtons {
+    pub fn new(selected: compositor_core::document::TextAlignment) -> Self {
+        AlignmentButtons {
+            selected,
+            on_select: Rc::new(|_, _, _| {}),
+        }
     }
-    row
+
+    pub fn with_on_select(
+        mut self,
+        on_select: AppCallback<compositor_core::document::TextAlignment>,
+    ) -> Self {
+        self.on_select = on_select;
+        self
+    }
+}
+
+impl RenderOnce for AlignmentButtons {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_select = self.on_select;
+        let mut row = gpui_kit::div().flex().flex_row().gap_0p5().flex_shrink_0();
+        for (alignment, label) in [
+            (compositor_core::document::TextAlignment::Left, "Left"),
+            (compositor_core::document::TextAlignment::Center, "Center"),
+            (compositor_core::document::TextAlignment::Right, "Right"),
+        ] {
+            let on_select = on_select.clone();
+            row = row.child(
+                Button::new(SharedString::from(format!("type-align-{}", label)))
+                    .label(label)
+                    .ghost()
+                    .compact()
+                    .selected(self.selected == alignment)
+                    .on_click(move |_, window, cx| on_select(alignment, window, cx)),
+            );
+        }
+        row
+    }
 }
 
 impl AppState {
@@ -179,7 +193,16 @@ impl AppState {
                     this.open_text_color_picker_ui(window, cx);
                 }))
                 .into_any_element(),
-            alignment_buttons(&app, style.alignment).into_any_element(),
+            AlignmentButtons::new(style.alignment)
+                .with_on_select(app_on(&app, |state, alignment, _, cx| {
+                    state.tab().session.update(cx, |session, _| {
+                        session.change_text_style(move |style| {
+                            style.alignment = alignment;
+                        })
+                    });
+                    state.touch(cx);
+                }))
+                .into_any_element(),
             div_row()
                 .child(text_label("Tracking", true))
                 .child(

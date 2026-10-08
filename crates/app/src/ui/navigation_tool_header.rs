@@ -7,13 +7,15 @@
 //! NavigationToolHeader.swift's own subject and stay here, with the
 //! Gradient branch beside them pending its own carve.
 
+use std::rc::Rc;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, px,
+    App, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, px,
 };
 
 use compositor_core::document::NavigationTool;
@@ -22,7 +24,8 @@ use compositor_core::tools::brush::GradientShape;
 
 use crate::state::{AppState, CanvasDrag};
 use crate::ui::{
-    Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch, app_on, text_label,
+    AppCallback, ClickHandler, Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch,
+    app_on, app_on_click, text_label,
 };
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
@@ -209,6 +212,7 @@ impl AppState {
     // MARK: Tool rail
 
     pub fn render_tool_rail(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let app = cx.entity().downgrade();
         let (active, eraser_active) = {
             let session = self.tab().session.read(cx);
             (
@@ -234,15 +238,17 @@ impl AppState {
             } else {
                 active == tool
             };
-            rail = rail.child(tool_button(
-                tool,
-                letter,
-                icon,
-                name,
-                eraser_entry,
-                selected,
-                cx,
-            ));
+            rail = rail.child(
+                ToolButton::new(tool, letter, icon, name, eraser_entry, selected).with_on_click(
+                    app_on_click(&app, move |state, _, _, cx| {
+                        if eraser_entry {
+                            state.set_tool_eraser(cx);
+                        } else {
+                            state.set_tool(tool, cx);
+                        }
+                    }),
+                ),
+            );
         }
 
         // Foreground / background swatches: clicking either opens the color
@@ -257,18 +263,18 @@ impl AppState {
                 .h(px(28.0))
                 .relative()
                 .child(
-                    swatch(6.0, 6.0, background)
-                        .id("swatch-background")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_color_picker_ui(true, window, cx);
-                        })),
+                    Swatch::new("swatch-background", 6.0, 6.0, background).with_on_click(
+                        app_on_click(&app, |state, _, window, cx| {
+                            state.open_color_picker_ui(true, window, cx);
+                        }),
+                    ),
                 )
                 .child(
-                    swatch(0.0, 0.0, foreground)
-                        .id("swatch-foreground")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_color_picker_ui(false, window, cx);
-                        })),
+                    Swatch::new("swatch-foreground", 0.0, 0.0, foreground).with_on_click(
+                        app_on_click(&app, |state, _, window, cx| {
+                            state.open_color_picker_ui(false, window, cx);
+                        }),
+                    ),
                 ),
         );
 
@@ -380,11 +386,38 @@ impl AppState {
                     ));
             }
             NavigationTool::Zoom => {
+                let on_zoom = app_on(&app, |state, command, _, cx| match command {
+                    ZoomCommand::Fit => {
+                        let viewport = state.viewport_size();
+                        state.zoom_fit(viewport, cx);
+                        state.touch(cx);
+                    }
+                    ZoomCommand::ActualSize => {
+                        state.zoom = 1.0;
+                        state.revision += 1;
+                        state.touch(cx);
+                    }
+                    ZoomCommand::In => {
+                        state.zoom_at_viewport(2.0);
+                        state.touch(cx);
+                    }
+                    ZoomCommand::Out => {
+                        state.zoom_at_viewport(0.5);
+                        state.touch(cx);
+                    }
+                });
                 header = header
-                    .child(zoom_button(&app, "zoom-fit", ZoomCommand::Fit))
-                    .child(zoom_button(&app, "zoom-100", ZoomCommand::ActualSize))
-                    .child(zoom_button(&app, "zoom-in", ZoomCommand::In))
-                    .child(zoom_button(&app, "zoom-out", ZoomCommand::Out));
+                    .child(
+                        ZoomButton::new("zoom-fit", ZoomCommand::Fit).with_on_zoom(on_zoom.clone()),
+                    )
+                    .child(
+                        ZoomButton::new("zoom-100", ZoomCommand::ActualSize)
+                            .with_on_zoom(on_zoom.clone()),
+                    )
+                    .child(
+                        ZoomButton::new("zoom-in", ZoomCommand::In).with_on_zoom(on_zoom.clone()),
+                    )
+                    .child(ZoomButton::new("zoom-out", ZoomCommand::Out).with_on_zoom(on_zoom));
             }
             NavigationTool::Crop => {
                 header = header.children(self.crop_controls(cx));
@@ -409,57 +442,119 @@ impl AppState {
     }
 }
 
-fn tool_button(
-    tool: NavigationTool,
+#[derive(IntoElement)]
+pub struct ToolButton {
     letter: &'static str,
     icon: IconName,
     name: &'static str,
-    eraser: bool,
     selected: bool,
-    cx: &mut Context<AppState>,
-) -> Button {
-    Button::new(SharedString::from(format!("tool-{}", letter)))
-        .icon(Icon::new(icon))
-        // Icon-only buttons have no label to read aloud; the tooltip name
-        // doubles as the announced one.
-        .accessibility_label(name)
-        .ghost()
-        .compact()
-        .selected(selected)
-        .tooltip(name)
-        .on_click(cx.listener(move |state, _, _, cx| {
-            if eraser {
-                state.set_tool_eraser(cx);
-            } else {
-                state.set_tool(tool, cx);
-            }
-        }))
+    // Carried with the button for parity with the TOOLS row, but the render
+    // never reads them: the eraser branch lives in the caller's `on_click`
+    // glue, which captures the row's own values.
+    #[allow(dead_code)]
+    tool: NavigationTool,
+    #[allow(dead_code)]
+    eraser: bool,
+    on_click: ClickHandler,
 }
 
-fn swatch(
+impl ToolButton {
+    pub fn new(
+        tool: NavigationTool,
+        letter: &'static str,
+        icon: IconName,
+        name: &'static str,
+        eraser: bool,
+        selected: bool,
+    ) -> Self {
+        ToolButton {
+            tool,
+            letter,
+            icon,
+            name,
+            eraser,
+            selected,
+            on_click: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_click(mut self, on_click: ClickHandler) -> Self {
+        self.on_click = on_click;
+        self
+    }
+}
+
+impl RenderOnce for ToolButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Button::new(SharedString::from(format!("tool-{}", self.letter)))
+            .icon(Icon::new(self.icon))
+            // Icon-only buttons have no label to read aloud; the tooltip name
+            // doubles as the announced one.
+            .accessibility_label(self.name)
+            .ghost()
+            .compact()
+            .selected(self.selected)
+            .tooltip(self.name)
+            .on_click(move |event, window, cx| (self.on_click)(event, window, cx))
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Swatch {
+    id: SharedString,
     offset_x: f32,
     offset_y: f32,
     color: compositor_core::document::PaletteColor,
-) -> gpui_kit::Div {
-    let value = ((color.red * 255.0).round() as u32) << 16
-        | ((color.green * 255.0).round() as u32) << 8
-        | (color.blue * 255.0).round() as u32;
-    gpui_kit::div()
-        .absolute()
-        .top(px(offset_y))
-        .left(px(offset_x))
-        .w(px(18.0))
-        .h(px(18.0))
-        .rounded_sm()
-        .border_1()
-        .border_color(gpui_kit::rgb(crate::ui::BORDER_BRIGHT))
-        .bg(gpui_kit::rgb(value))
+    on_click: ClickHandler,
+}
+
+impl Swatch {
+    pub fn new(
+        id: impl Into<SharedString>,
+        offset_x: f32,
+        offset_y: f32,
+        color: compositor_core::document::PaletteColor,
+    ) -> Self {
+        Swatch {
+            id: id.into(),
+            offset_x,
+            offset_y,
+            color,
+            on_click: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_click(mut self, on_click: ClickHandler) -> Self {
+        self.on_click = on_click;
+        self
+    }
+}
+
+impl RenderOnce for Swatch {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_click = self.on_click;
+        let value = ((self.color.red * 255.0).round() as u32) << 16
+            | ((self.color.green * 255.0).round() as u32) << 8
+            | (self.color.blue * 255.0).round() as u32;
+        gpui_kit::div()
+            .id(self.id)
+            .absolute()
+            .top(px(self.offset_y))
+            .left(px(self.offset_x))
+            .w(px(18.0))
+            .h(px(18.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(gpui_kit::rgb(crate::ui::BORDER_BRIGHT))
+            .bg(gpui_kit::rgb(value))
+            .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
 }
 
 /// What one zoom header button does (the zoom toolbar's Fit / 100% / +
 /// / -). The command is explicit; the label is only the button's face.
 #[derive(Clone, Copy)]
-enum ZoomCommand {
+pub(crate) enum ZoomCommand {
     Fit,
     ActualSize,
     In,
@@ -477,39 +572,38 @@ impl ZoomCommand {
     }
 }
 
-fn zoom_button(
-    app: &gpui_kit::WeakEntity<AppState>,
+#[derive(IntoElement)]
+pub struct ZoomButton {
     id: &'static str,
     command: ZoomCommand,
-) -> Button {
-    let app = app.clone();
-    Button::new(id)
-        .label(command.label())
-        .outline()
-        .small()
-        .on_click(move |_, _, cx| {
-            app.update(cx, |state, cx| match command {
-                ZoomCommand::Fit => {
-                    let viewport = state.viewport_size();
-                    state.zoom_fit(viewport, cx);
-                    state.touch(cx);
-                }
-                ZoomCommand::ActualSize => {
-                    state.zoom = 1.0;
-                    state.revision += 1;
-                    state.touch(cx);
-                }
-                ZoomCommand::In => {
-                    state.zoom_at_viewport(2.0);
-                    state.touch(cx);
-                }
-                ZoomCommand::Out => {
-                    state.zoom_at_viewport(0.5);
-                    state.touch(cx);
-                }
-            })
-            .ok();
-        })
+    on_zoom: AppCallback<ZoomCommand>,
+}
+
+impl ZoomButton {
+    pub(crate) fn new(id: &'static str, command: ZoomCommand) -> Self {
+        ZoomButton {
+            id,
+            command,
+            on_zoom: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub(crate) fn with_on_zoom(mut self, on_zoom: AppCallback<ZoomCommand>) -> Self {
+        self.on_zoom = on_zoom;
+        self
+    }
+}
+
+impl RenderOnce for ZoomButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_zoom = self.on_zoom;
+        let command = self.command;
+        Button::new(self.id)
+            .label(command.label())
+            .outline()
+            .small()
+            .on_click(move |_, window, cx| on_zoom(command, window, cx))
+    }
 }
 
 // MARK: Tests

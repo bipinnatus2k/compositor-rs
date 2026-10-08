@@ -5,7 +5,10 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Disableable, Sizable};
-use gpui_kit::{Context, Entity, FontWeight, IntoElement, ParentElement, Styled, px};
+use gpui_kit::{
+    App, Context, Entity, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
+    Styled, Window, px,
+};
 
 use compositor_core::transform::LayerSampling;
 
@@ -80,10 +83,14 @@ impl AppState {
                     state.touch(cx);
                 }))
                 .into_any_element(),
-            number_field("transform-x", "X", &self.transform_x_input, px(52.0)).into_any_element(),
-            number_field("transform-y", "Y", &self.transform_y_input, px(52.0)).into_any_element(),
-            number_field("transform-w", "W", &self.transform_w_input, px(52.0)).into_any_element(),
-            number_field("transform-h", "H", &self.transform_h_input, px(52.0)).into_any_element(),
+            NumberField::new("transform-x", "X", self.transform_x_input.clone(), px(52.0))
+                .into_any_element(),
+            NumberField::new("transform-y", "Y", self.transform_y_input.clone(), px(52.0))
+                .into_any_element(),
+            NumberField::new("transform-w", "W", self.transform_w_input.clone(), px(52.0))
+                .into_any_element(),
+            NumberField::new("transform-h", "H", self.transform_h_input.clone(), px(52.0))
+                .into_any_element(),
             LabeledCheckbox::new("transform-lock-ratio", "Lock")
                 .checked(self.tab().session.read(cx).locks_transform_ratio)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
@@ -94,17 +101,17 @@ impl AppState {
                     state.touch(cx);
                 }))
                 .into_any_element(),
-            number_field(
+            NumberField::new(
                 "transform-scale",
                 "Scale %",
-                &self.transform_scale_input,
+                self.transform_scale_input.clone(),
                 px(56.0),
             )
             .into_any_element(),
-            number_field(
+            NumberField::new(
                 "transform-rotation",
                 "\u{b0}",
-                &self.transform_rotation_input,
+                self.transform_rotation_input.clone(),
                 px(48.0),
             )
             .into_any_element(),
@@ -185,13 +192,34 @@ impl AppState {
 /// One of the inspector's labeled numeric fields (TransformValueField's
 /// `label + rounded field`). Typing writes through the field's Change
 /// subscription; nothing here touches the session.
-fn number_field(
+#[derive(IntoElement)]
+pub struct NumberField {
     id: &'static str,
-    label: &str,
-    state: &Entity<InputState>,
-    width: gpui_kit::Pixels,
-) -> gpui_kit::Div {
-    div_row()
-        .child(text_label(label.to_string(), true))
-        .child(Input::new(state).id(id).small().w(width))
+    label: SharedString,
+    state: Entity<InputState>,
+    width: Pixels,
+}
+
+impl NumberField {
+    pub fn new(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        state: Entity<InputState>,
+        width: Pixels,
+    ) -> Self {
+        NumberField {
+            id,
+            label: label.into(),
+            state,
+            width,
+        }
+    }
+}
+
+impl RenderOnce for NumberField {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div_row()
+            .child(text_label(self.label.to_string(), true))
+            .child(Input::new(&self.state).id(self.id).small().w(self.width))
+    }
 }

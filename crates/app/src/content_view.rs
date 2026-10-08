@@ -187,7 +187,9 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_finish_lasso))
             .on_action(cx.listener(Self::on_cancel))
             // Layout
-            .child(crate::menu::render_menu_bar(self, cx))
+            .child(crate::menu::MenuBar::new(
+                self.current_tab().session.clone(),
+            ))
             .child(self.render_tab_bar(cx))
             .child(
                 div()

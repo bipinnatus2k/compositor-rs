@@ -1,6 +1,7 @@
 //! The right panel: blend mode + opacity for the active layer, the layer
 //! list (top-to-bottom), and the footer layer actions.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
@@ -10,8 +11,8 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::{
-    AnyElement, AppContext, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
-    Render, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window,
+    App, AppContext, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
+    RenderImage, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
     prelude::FluentBuilder as _, px, rgb,
 };
 
@@ -23,7 +24,7 @@ use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
 
 use crate::state::AppState;
-use crate::ui::{Dropdown, MenuEntry, app_dispatch, text_label};
+use crate::ui::{ClickHandler, Dropdown, MenuEntry, app_dispatch, app_on_click, text_label};
 
 const THUMB: f32 = 30.0;
 
@@ -143,36 +144,60 @@ fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTar
 /// The shared thumbnail cell: square, rounded, hairline border; the accent
 /// ring marks the edit target, a disabled mask reads dimmed, and an image
 /// fills the cell when one is on hand.
-fn thumbnail_cell(
-    element_id: SharedString,
+#[derive(IntoElement)]
+pub struct LayerThumbnailButton {
+    id: SharedString,
     is_target: bool,
     dimmed: bool,
     image: Option<Arc<RenderImage>>,
-    on_click: impl Fn(&mut AppState, &ClickEvent, &mut Window, &mut Context<AppState>) + 'static,
-    cx: &Context<AppState>,
-) -> AnyElement {
-    gpui_kit::div()
-        .id(element_id)
-        .w(px(THUMB))
-        .h(px(THUMB))
-        .flex_shrink_0()
-        .rounded_sm()
-        .overflow_hidden()
-        .border_1()
-        .border_color(gpui_kit::rgb(crate::ui::BORDER_THUMB))
-        .bg(rgb(crate::ui::FG_DISABLED))
-        .when(is_target, |cell| {
-            cell.border_2()
-                .border_color(gpui_kit::rgb(crate::ui::ACCENT))
-        })
-        .when(dimmed, |cell| cell.opacity(0.4))
-        .when_some(image, |cell, image| {
-            cell.child(gpui_kit::img(image).size_full())
-        })
-        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            on_click(this, event, window, cx);
-        }))
-        .into_any_element()
+    on_click: ClickHandler,
+}
+
+impl LayerThumbnailButton {
+    pub fn new(
+        id: SharedString,
+        is_target: bool,
+        dimmed: bool,
+        image: Option<Arc<RenderImage>>,
+    ) -> Self {
+        LayerThumbnailButton {
+            id,
+            is_target,
+            dimmed,
+            image,
+            on_click: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_click(mut self, on_click: ClickHandler) -> Self {
+        self.on_click = on_click;
+        self
+    }
+}
+
+impl RenderOnce for LayerThumbnailButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_click = self.on_click;
+        gpui_kit::div()
+            .id(self.id)
+            .w(px(THUMB))
+            .h(px(THUMB))
+            .flex_shrink_0()
+            .rounded_sm()
+            .overflow_hidden()
+            .border_1()
+            .border_color(gpui_kit::rgb(crate::ui::BORDER_THUMB))
+            .bg(rgb(crate::ui::FG_DISABLED))
+            .when(self.is_target, |cell| {
+                cell.border_2()
+                    .border_color(gpui_kit::rgb(crate::ui::ACCENT))
+            })
+            .when(self.dimmed, |cell| cell.opacity(0.4))
+            .when_some(self.image, |cell, image| {
+                cell.child(gpui_kit::img(image).size_full())
+            })
+            .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
 }
 
 impl AppState {
@@ -329,50 +354,59 @@ impl AppState {
                 .py_1()
                 .border_t_1()
                 .border_color(gpui_kit::black().opacity(0.4))
-                .child(footer_button(
-                    "layer-add",
-                    IconName::Plus,
-                    "New blank layer (⇧⌘N)",
-                    "New blank layer",
-                    !layers_enabled,
-                    cx.listener(|this, _, _, cx| {
-                        this.tab()
+                .child(
+                    FooterButton::new(
+                        "layer-add",
+                        IconName::Plus,
+                        "New blank layer (⇧⌘N)",
+                        "New blank layer",
+                        !layers_enabled,
+                    )
+                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
+                        state
+                            .tab()
                             .session
                             .update(cx, |session, _| session.add_blank_layer());
-                        this.touch(cx);
-                    }),
-                ))
-                .child(footer_button(
-                    "layer-group",
-                    IconName::FolderPlus,
-                    "Group selected layers (⌘G)",
-                    "New folder",
-                    !layers_enabled,
-                    cx.listener(|this, _, _, cx| {
+                        state.touch(cx);
+                    })),
+                )
+                .child(
+                    FooterButton::new(
+                        "layer-group",
+                        IconName::FolderPlus,
+                        "Group selected layers (⌘G)",
+                        "New folder",
+                        !layers_enabled,
+                    )
+                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
                         // The footer groups the SELECTION (LayerGroups.swift:
                         // 119 groupSelectedLayers), not an empty folder above
                         // the active layer.
-                        this.tab()
+                        state
+                            .tab()
                             .session
                             .update(cx, |session, _| session.group_selected_layers());
-                        this.touch(cx);
-                    }),
-                ))
-                .child(footer_button(
-                    "layer-mask",
-                    IconName::SquareDashedBottom,
-                    mask_tooltip,
-                    "Add layer mask",
-                    mask_disabled,
-                    cx.listener(|this, _, _, cx| {
+                        state.touch(cx);
+                    })),
+                )
+                .child(
+                    FooterButton::new(
+                        "layer-mask",
+                        IconName::SquareDashedBottom,
+                        mask_tooltip,
+                        "Add layer mask",
+                        mask_disabled,
+                    )
+                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
                         // addMask (LayerMask.swift:233): all white, or with a
                         // selection, the selection black.
-                        this.tab()
+                        state
+                            .tab()
                             .session
                             .update(cx, |session, _| session.add_mask_from_selection(true));
-                        this.touch(cx);
-                    }),
-                ))
+                        state.touch(cx);
+                    })),
+                )
                 // The effects menu (LayersPanel.swift's sparkles): one entry
                 // per effect kind; choosing one adds it to the active layer
                 // and opens its editor sheet.
@@ -409,31 +443,38 @@ impl AppState {
                 // deleteLayerOrMask (SelectionEdits.swift:71-75): a selected
                 // effect goes first; a targeted mask goes alone; otherwise
                 // every selected layer, through the live-mask ask.
-                .child(footer_button(
-                    "layer-del",
-                    IconName::Trash,
-                    delete_tooltip,
-                    delete_tooltip,
-                    trash_disabled,
-                    cx.listener(|this, _, window, cx| {
-                        let target = delete_target(this.tab().session.read(cx));
-                        match target {
-                            DeleteTarget::Effect => {
-                                this.tab()
-                                    .session
-                                    .update(cx, |session, _| session.remove_selected_effect());
-                                this.touch(cx);
+                .child(
+                    FooterButton::new(
+                        "layer-del",
+                        IconName::Trash,
+                        delete_tooltip,
+                        delete_tooltip,
+                        trash_disabled,
+                    )
+                    .with_on_click(app_on_click(
+                        &app,
+                        |state, _, window, cx| {
+                            let target = delete_target(state.tab().session.read(cx));
+                            match target {
+                                DeleteTarget::Effect => {
+                                    state
+                                        .tab()
+                                        .session
+                                        .update(cx, |session, _| session.remove_selected_effect());
+                                    state.touch(cx);
+                                }
+                                DeleteTarget::Mask => {
+                                    state
+                                        .tab()
+                                        .session
+                                        .update(cx, |session, _| session.delete_layer_mask());
+                                    state.touch(cx);
+                                }
+                                DeleteTarget::Layers => state.request_delete_layer(window, cx),
                             }
-                            DeleteTarget::Mask => {
-                                this.tab()
-                                    .session
-                                    .update(cx, |session, _| session.delete_layer_mask());
-                                this.touch(cx);
-                            }
-                            DeleteTarget::Layers => this.request_delete_layer(window, cx),
-                        }
-                    }),
-                )),
+                        },
+                    )),
+                ),
         );
 
         panel.into_any_element()
@@ -641,59 +682,55 @@ impl AppState {
             .as_ref()
             .map(|a| a.kind.is_editable())
             .unwrap_or(false);
-        row = row.child(thumbnail_cell(
-            layer_key("thumb", id),
-            layer_is_target,
-            false,
-            thumbnail,
-            move |this, event, window, cx| {
-                // A double-click on the thumbnail opens what the layer holds:
-                // its text, or an editable adjustment's editor (Invert falls
-                // through); anything else renames it.
-                if click_count(event) >= 2 {
-                    this.tab()
-                        .session
-                        .update(cx, |session, _| session.select_layer_target(id, false));
-                    if holds_text {
+        row = row.child(
+            LayerThumbnailButton::new(layer_key("thumb", id), layer_is_target, false, thumbnail)
+                .with_on_click(app_on_click(&app, move |this, event, window, cx| {
+                    // A double-click on the thumbnail opens what the layer holds:
+                    // its text, or an editable adjustment's editor (Invert falls
+                    // through); anything else renames it.
+                    if click_count(event) >= 2 {
                         this.tab()
                             .session
-                            .update(cx, |session, _| session.edit_active_text());
-                    } else if editable_adjustment {
-                        // Swift points adjustmentEditingID at the layer
-                        // unconditionally (NativeLayerList.swift:143); a
-                        // refused begin (busy) opens nothing, renames never.
-                        this.edit_layer_adjustment(id, cx);
+                            .update(cx, |session, _| session.select_layer_target(id, false));
+                        if holds_text {
+                            this.tab()
+                                .session
+                                .update(cx, |session, _| session.edit_active_text());
+                        } else if editable_adjustment {
+                            // Swift points adjustmentEditingID at the layer
+                            // unconditionally (NativeLayerList.swift:143); a
+                            // refused begin (busy) opens nothing, renames never.
+                            this.edit_layer_adjustment(id, cx);
+                        } else {
+                            this.begin_rename(id, window, cx);
+                        }
+                        this.touch(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let modifiers = event.modifiers();
+                    if !modifiers.control && !modifiers.platform {
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.select_layer_target(id, false));
+                        this.sync_opacity_slider(window, cx);
+                        this.touch(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let mode = selection_mode(modifiers.shift, modifiers.alt);
+                    if this.tab().session.read(cx).is_mask_selected {
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.load_mask_selection(id, mode));
                     } else {
-                        this.begin_rename(id, window, cx);
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.load_layer_selection(id, mode));
                     }
                     this.touch(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                let modifiers = event.modifiers();
-                if !modifiers.control && !modifiers.platform {
-                    this.tab()
-                        .session
-                        .update(cx, |session, _| session.select_layer_target(id, false));
-                    this.sync_opacity_slider(window, cx);
-                    this.touch(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                let mode = selection_mode(modifiers.shift, modifiers.alt);
-                if this.tab().session.read(cx).is_mask_selected {
-                    this.tab()
-                        .session
-                        .update(cx, |session, _| session.load_mask_selection(id, mode));
-                } else {
-                    this.tab()
-                        .session
-                        .update(cx, |session, _| session.load_layer_selection(id, mode));
-                }
-                this.touch(cx);
-            },
-            cx,
-        ));
+                })),
+        );
 
         // The mask thumbnail (the row's maskThumbnail): the mask placed on
         // its canvas frame at the layer thumbnail's size; a plain click makes
@@ -701,36 +738,40 @@ impl AppState {
         // selection. A disabled mask reads dimmed.
         if layer.mask.is_some() {
             let mask_image = self.mask_thumbnail_image(layer, cx);
-            row = row.child(thumbnail_cell(
-                layer_key("mask-thumb", id),
-                is_active && mask_selected,
-                !mask_enabled,
-                mask_image,
-                move |this, event, window, cx| {
-                    let modifiers = event.modifiers();
-                    if !modifiers.control && !modifiers.platform {
-                        // selectMask (NativeLayerList.swift:793-796): the
-                        // mask becomes the edit target; Shift also toggles
-                        // it on/off.
-                        this.tab().session.update(cx, |session, _| {
-                            session.select_layer_target(id, true);
-                            if modifiers.shift {
-                                session.toggle_layer_mask();
-                            }
-                        });
-                        this.sync_opacity_slider(window, cx);
+            row = row.child(
+                LayerThumbnailButton::new(
+                    layer_key("mask-thumb", id),
+                    is_active && mask_selected,
+                    !mask_enabled,
+                    mask_image,
+                )
+                .with_on_click(app_on_click(
+                    &app,
+                    move |this, event, window, cx| {
+                        let modifiers = event.modifiers();
+                        if !modifiers.control && !modifiers.platform {
+                            // selectMask (NativeLayerList.swift:793-796): the
+                            // mask becomes the edit target; Shift also toggles
+                            // it on/off.
+                            this.tab().session.update(cx, |session, _| {
+                                session.select_layer_target(id, true);
+                                if modifiers.shift {
+                                    session.toggle_layer_mask();
+                                }
+                            });
+                            this.sync_opacity_slider(window, cx);
+                            this.touch(cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        let mode = selection_mode(modifiers.shift, modifiers.alt);
+                        this.tab()
+                            .session
+                            .update(cx, |session, _| session.load_mask_selection(id, mode));
                         this.touch(cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    let mode = selection_mode(modifiers.shift, modifiers.alt);
-                    this.tab()
-                        .session
-                        .update(cx, |session, _| session.load_mask_selection(id, mode));
-                    this.touch(cx);
-                },
-                cx,
-            ));
+                    },
+                )),
+            );
         }
 
         // Name (or the rename input).
@@ -1208,24 +1249,53 @@ fn app_activate(
     .ok();
 }
 
-fn footer_button(
+#[derive(IntoElement)]
+pub struct FooterButton {
     id: &'static str,
     icon: IconName,
     tooltip: &'static str,
     accessibility: &'static str,
     disabled: bool,
-    listener: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
-) -> Button {
-    Button::new(id)
-        .icon(Icon::new(icon))
-        // Swift sets these labels explicitly (LayersPanel.swift:38-60);
-        // group's differs from its help text ("New folder").
-        .accessibility_label(accessibility)
-        .ghost()
-        .small()
-        .tooltip(tooltip)
-        .disabled(disabled)
-        .on_click(listener)
+    on_click: ClickHandler,
+}
+
+impl FooterButton {
+    pub fn new(
+        id: &'static str,
+        icon: IconName,
+        tooltip: &'static str,
+        accessibility: &'static str,
+        disabled: bool,
+    ) -> Self {
+        FooterButton {
+            id,
+            icon,
+            tooltip,
+            accessibility,
+            disabled,
+            on_click: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_click(mut self, on_click: ClickHandler) -> Self {
+        self.on_click = on_click;
+        self
+    }
+}
+
+impl RenderOnce for FooterButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Button::new(self.id)
+            .icon(Icon::new(self.icon))
+            // Swift sets these labels explicitly (LayersPanel.swift:38-60);
+            // group's differs from its help text ("New folder").
+            .accessibility_label(self.accessibility)
+            .ghost()
+            .small()
+            .tooltip(self.tooltip)
+            .disabled(self.disabled)
+            .on_click(move |event, window, cx| (self.on_click)(event, window, cx))
+    }
 }
 
 #[cfg(test)]

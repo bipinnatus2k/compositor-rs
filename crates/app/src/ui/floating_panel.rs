@@ -14,6 +14,7 @@
 //! wiring batch feeds sheet content into.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui_kit::component::Disableable;
@@ -22,16 +23,16 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
-    AnyElement, ClickEvent, Context, Global, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString,
-    Styled, WeakEntity, Window, anchored, canvas, div, point, px,
+    AnyElement, App, ClickEvent, Context, Global, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce,
+    SharedString, Styled, WeakEntity, Window, anchored, canvas, div, point, px,
 };
 
 use compositor_core::filters::FilterKind;
 use compositor_core::session::SelectionAmountOperation;
 
 use crate::state::AppState;
-use crate::ui::text_label;
+use crate::ui::{ClickHandler, app_on_click, text_label};
 
 /// Camera Raw's three grading wheels are the widest thing a docked panel
 /// holds; their own sliders are narrowed to fit this rather than the panel
@@ -265,7 +266,7 @@ impl Global for PanelDragState {}
 
 static NEXT_COOKIE: AtomicU64 = AtomicU64::new(1);
 
-/// Renders one floating panel as an in-window overlay:
+/// One floating panel (`FloatingPanelController` as a drawn overlay):
 /// `anchored().position(pos).snap_to_window()` + `.occlude()`, a title row
 /// that is the drag region with a ghost close button, and the content slot.
 ///
@@ -273,96 +274,140 @@ static NEXT_COOKIE: AtomicU64 = AtomicU64::new(1);
 /// result for `Automatic` panels, [`docked_top_left`] for docked ones.
 /// `fixed_size` is `Some` only for docked panels (440 × window height); an
 /// `Automatic` panel hugs its content, like AppKit's `fittingSize`.
-///
-/// Callbacks (the wiring batch supplies them via `cx.listener`-style
-/// closures over its entity):
-/// - `on_close`: the title row's ✕ reports here — treat as Cancel
-///   (Swift's `onClose`/`windowWillClose`).
-/// - `on_moved`: called during and at the end of a title-bar drag with the
-///   new top-left in window coordinates; store it with
-///   [`FloatingPanels::remember_position`] (Swift's `windowDidMove`).
-pub fn render_panel<E: 'static>(
-    app: &WeakEntity<E>,
+#[derive(IntoElement)]
+pub struct FloatingPanel<E: 'static> {
+    app: WeakEntity<E>,
     top_left: Point<Pixels>,
     title: SharedString,
     fixed_size: Option<(Pixels, Pixels)>,
     content: AnyElement,
-    on_close: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
-    on_moved: impl Fn(&mut E, Point<Pixels>, &mut Window, &mut Context<E>) + 'static,
-) -> AnyElement {
-    let cookie = NEXT_COOKIE.fetch_add(1, Ordering::Relaxed);
+    on_close: PanelClose<E>,
+    on_moved: PanelMoved<E>,
+}
 
-    // The title row is the drag region (`NSPanel`'s titled style). The press
-    // starts the drag; window-level move/up handlers (installed by the
-    // invisible canvas below, following color_picker_ui's pattern) track it
-    // so the panel keeps following the pointer outside the row.
-    let app_down = app.clone();
-    let on_moved_moved = on_moved;
-    let on_close_click = on_close;
+/// The title row's ✕ callback — treat as Cancel (Swift's
+/// `onClose`/`windowWillClose`).
+pub type PanelClose<E> = Box<dyn Fn(&mut E, &mut Window, &mut Context<E>)>;
 
-    let title_row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(gpui_kit::rgb(crate::ui::BORDER))
-        .on_mouse_down(
-            MouseButton::Left,
-            move |event: &MouseDownEvent, _window, cx| {
-                let state = cx.default_global::<PanelDragState>();
-                state.drag = Some(PanelDrag {
-                    cookie,
-                    origin: top_left,
-                    grab: event.position,
-                });
-            },
-        )
-        .child(
-            div()
-                .flex_1()
-                .child(text_label(title, false).text_size(px(13.0))),
-        )
-        .child(
-            Button::new(SharedString::from(format!("panel-close-{cookie}")))
-                .label("✕")
-                // The ✕ glyph alone announces as nothing to a screen reader.
-                .accessibility_label("Close panel")
-                .small()
-                .ghost()
-                .on_click(move |_event: &ClickEvent, window, cx| {
-                    app_down
-                        .update(cx, |state, cx| on_close_click(state, window, cx))
-                        .ok();
-                }),
-        )
-        // The invisible canvas exists only to install the window-level drag
-        // handlers during paint.
-        .child(drag_events_canvas(app.clone(), cookie, on_moved_moved));
+/// The title-bar drag's move callback (during and at the end of the drag,
+/// with the new top-left in window coordinates — store it with
+/// [`FloatingPanels::remember_position`], Swift's `windowDidMove`).
+pub type PanelMoved<E> = Box<dyn Fn(&mut E, Point<Pixels>, &mut Window, &mut Context<E>)>;
 
-    let shell = div()
-        .flex()
-        .flex_col()
-        .rounded_md()
-        .border_1()
-        .border_color(gpui_kit::rgb(crate::ui::BORDER))
-        .bg(gpui_kit::rgb(crate::ui::BG_PANEL))
-        .overflow_hidden()
-        .occlude()
-        .child(title_row)
-        .child(content);
+impl<E: 'static> FloatingPanel<E> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        app: WeakEntity<E>,
+        top_left: Point<Pixels>,
+        title: SharedString,
+        fixed_size: Option<(Pixels, Pixels)>,
+        content: AnyElement,
+    ) -> Self {
+        FloatingPanel {
+            app,
+            top_left,
+            title,
+            fixed_size,
+            content,
+            on_close: Box::new(|_, _, _| {}),
+            on_moved: Box::new(|_, _, _, _| {}),
+        }
+    }
 
-    let shell = match fixed_size {
-        Some((width, height)) => shell.w(width).h(height),
-        None => shell,
-    };
+    pub fn with_on_close(
+        mut self,
+        on_close: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self {
+        self.on_close = Box::new(on_close);
+        self
+    }
 
-    anchored()
-        .position(top_left)
-        .snap_to_window()
-        .child(shell)
-        .into_any_element()
+    pub fn with_on_moved(
+        mut self,
+        on_moved: impl Fn(&mut E, Point<Pixels>, &mut Window, &mut Context<E>) + 'static,
+    ) -> Self {
+        self.on_moved = Box::new(on_moved);
+        self
+    }
+}
+
+impl<E: 'static> RenderOnce for FloatingPanel<E> {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let cookie = NEXT_COOKIE.fetch_add(1, Ordering::Relaxed);
+
+        // The title row is the drag region (`NSPanel`'s titled style). The press
+        // starts the drag; window-level move/up handlers (installed by the
+        // invisible canvas below, following color_picker_ui's pattern) track it
+        // so the panel keeps following the pointer outside the row.
+        let app_down = self.app.clone();
+        let on_moved_moved = self.on_moved;
+        let on_close_click = self.on_close;
+        let app_canvas = self.app.clone();
+
+        let title_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(gpui_kit::rgb(crate::ui::BORDER))
+            .on_mouse_down(
+                MouseButton::Left,
+                move |event: &MouseDownEvent, _window, cx| {
+                    let state = cx.default_global::<PanelDragState>();
+                    state.drag = Some(PanelDrag {
+                        cookie,
+                        origin: self.top_left,
+                        grab: event.position,
+                    });
+                },
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(text_label(self.title, false).text_size(px(13.0))),
+            )
+            .child(
+                Button::new(SharedString::from(format!("panel-close-{cookie}")))
+                    .label("✕")
+                    // The ✕ glyph alone announces as nothing to a screen reader.
+                    .accessibility_label("Close panel")
+                    .small()
+                    .ghost()
+                    .on_click(move |_event: &ClickEvent, window, cx| {
+                        app_down
+                            .update(cx, |state, cx| on_close_click(state, window, cx))
+                            .ok();
+                    }),
+            )
+            // The invisible canvas exists only to install the window-level drag
+            // handlers during paint.
+            .child(drag_events_canvas(app_canvas, cookie, on_moved_moved));
+
+        let shell = div()
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(gpui_kit::rgb(crate::ui::BORDER))
+            .bg(gpui_kit::rgb(crate::ui::BG_PANEL))
+            .overflow_hidden()
+            .occlude()
+            .child(title_row)
+            .child(self.content);
+
+        let shell = match self.fixed_size {
+            Some((width, height)) => shell.w(width).h(height),
+            None => shell,
+        };
+
+        anchored()
+            .position(self.top_left)
+            .snap_to_window()
+            .child(shell)
+            .into_any_element()
+    }
 }
 
 /// Installs the window-level move/up handlers for one panel's title-bar drag
@@ -372,12 +417,13 @@ pub fn render_panel<E: 'static>(
 fn drag_events_canvas<E: 'static>(
     app: WeakEntity<E>,
     cookie: u64,
-    on_moved: impl Fn(&mut E, Point<Pixels>, &mut Window, &mut Context<E>) + 'static,
+    on_moved: PanelMoved<E>,
 ) -> AnyElement {
     canvas(
         |_bounds, _window, _cx| {},
         move |_bounds, _prepaint, window, _cx| {
             let app_move = app.clone();
+            let on_moved = on_moved;
             window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
                 let dragging = cx
                     .try_global::<PanelDragState>()
@@ -855,7 +901,6 @@ impl AppState {
 
         let content = self.panel_content(name, cx)?;
 
-        let app = app.clone();
         let on_close =
             move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
                 state.cancel_panel(name, cx);
@@ -869,9 +914,12 @@ impl AppState {
                 .remember_position(name, f32::from(position.x), f32::from(position.y));
             state.notify_only(cx);
         };
-        Some(render_panel(
-            &app, top_left, title, fixed_size, content, on_close, on_moved,
-        ))
+        Some(
+            FloatingPanel::new(app, top_left, title, fixed_size, content)
+                .with_on_close(on_close)
+                .with_on_moved(on_moved)
+                .into_any_element(),
+        )
     }
 
     /// The canvas area's center (`canvasCenter(in:)`): the panel's center
@@ -918,7 +966,14 @@ impl AppState {
         } else {
             false
         };
-        let footer = panel_footer(name, ok_disabled, cx);
+        let app = cx.entity().downgrade();
+        let footer = PanelFooter::new(name, ok_disabled)
+            .with_on_cancel(app_on_click(&app, move |state, _, _, cx| {
+                state.cancel_panel(name, cx);
+            }))
+            .with_on_ok(app_on_click(&app, move |state, _, _, cx| {
+                state.confirm_panel(name, cx);
+            }));
         Some(
             gpui_kit::div()
                 .flex()
@@ -936,34 +991,57 @@ impl AppState {
 /// The shared Cancel/OK footer row (Swift's `HStack { Cancel; Spacer; OK }`).
 /// OK runs the sheet's commit branch; Cancel — like the ✕ — runs the cancel
 /// branch.
-fn panel_footer(
+#[derive(IntoElement)]
+pub struct PanelFooter {
     name: &'static str,
     ok_disabled: bool,
-    cx: &mut Context<AppState>,
-) -> gpui_kit::Div {
-    gpui_kit::div()
-        .flex()
-        .flex_row()
-        .justify_end()
-        .gap_2()
-        .child(
-            Button::new(SharedString::from(format!("panel-{name}-cancel")))
-                .label("Cancel")
-                .small()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.cancel_panel(name, cx);
-                })),
-        )
-        .child(
-            Button::new(SharedString::from(format!("panel-{name}-ok")))
-                .label("OK")
-                .small()
-                .primary()
-                .disabled(ok_disabled)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.confirm_panel(name, cx);
-                })),
-        )
+    on_cancel: ClickHandler,
+    on_ok: ClickHandler,
+}
+
+impl PanelFooter {
+    pub fn new(name: &'static str, ok_disabled: bool) -> Self {
+        PanelFooter {
+            name,
+            ok_disabled,
+            on_cancel: Rc::new(|_, _, _| {}),
+            on_ok: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    pub fn with_on_cancel(mut self, on_cancel: ClickHandler) -> Self {
+        self.on_cancel = on_cancel;
+        self
+    }
+
+    pub fn with_on_ok(mut self, on_ok: ClickHandler) -> Self {
+        self.on_ok = on_ok;
+        self
+    }
+}
+
+impl RenderOnce for PanelFooter {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        gpui_kit::div()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new(SharedString::from(format!("panel-{}-cancel", self.name)))
+                    .label("Cancel")
+                    .small()
+                    .on_click(move |event, window, cx| (self.on_cancel)(event, window, cx)),
+            )
+            .child(
+                Button::new(SharedString::from(format!("panel-{}-ok", self.name)))
+                    .label("OK")
+                    .small()
+                    .primary()
+                    .disabled(self.ok_disabled)
+                    .on_click(move |event, window, cx| (self.on_ok)(event, window, cx)),
+            )
+    }
 }
 
 /// A first-open size estimate per panel (`fittingSize`): only used to center
