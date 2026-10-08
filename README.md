@@ -46,6 +46,16 @@ gpui-kit, the Rust UI framework.
 | SwiftUI UI | `crates/app` (gpui-kit) | tool rail, per-tool options header, canvas viewport with rulers/guides/grid/selection ants/crop overlay, layers panel (blend/opacity/thumbnails/rename), sheets (New/Image Size/Canvas Size/Levels with histogram/Hue-Saturation/Filters/Camera Raw with 14 sliders/Trim/Export), menus, Photoshop-style shortcuts |
 | `SmudgeLiquify.swift` (`WarpStroke`) | `core::tools::warp` + UI | Smudge pickup/paint, Liquify forward warp; the finished stroke paints back into the layer along its path (`finishWarp`) |
 | `ShapeTool.swift` | `core::render::render_shape_image` + UI | Rectangle/Rounded/Ellipse/Line as editable `LayerShape` layers, re-rendered live while uncommitted |
+| `Distort.swift` | `core::tools::distort` | free distortion — the layer's four corners move independently; on apply the pixels (and mask) resample into the new shape |
+| `ObjectSelection.swift` | `core::tools::object_selection` | click-to-select the foreground object, traced into the path-based selection (Swift's Vision segmentation has no Rust equivalent — documented deviation inside) |
+| `SubjectRemoval.swift` | `core::tools::subject_removal` | **blocked stub** — both Swift quality levels start from Vision's foreground-instance mask; recorded as a platform capability gap, not faked |
+| `MaskTracing.swift` | `core::tools::mask_tracing` | raster coverage → selection outline along exact pixel edges (Cmd-click mask/layer thumbnails, Subject Removal's mask) |
+| `SelectionClipboard.swift` | `core::session` | pixels copied from the canvas carry their origin, so Paste puts them back in place |
+| `LayerMerge.swift` | `core::session` | the ⌘E merge plan: one layer merges into the layer beneath, multi-selected layers merge together (with their folders' contents), a folder merges its contents and goes — stacking-order semantics per Swift `mergePlan` |
+| `LiveLayerMask.swift` | `core::session` + `core::render` | live masks — `mask_source_id` links a layer's mask to a source layer; chain validation, bake-on-commit |
+| `TypeTool.swift` | `core::tools::text` + `core::session` | typesetting half: text attributes, box measurement, fontdue rasterization; editing half: the session's TextDraft ops |
+| `BlurTool.swift` | `core::session` + `core::tools::warp` + `app::canvas` | `BlurToolMode` (blur/smudge/liquify); smudge & liquify ride the WarpStroke engine, Gaussian blur samples the displayed composite at document size |
+| `ToolDefaults.swift` | `app::settings` | per-tool option persistence (`tool-defaults.json`), applied when a tab's session is created |
 
 ## Building and testing
 
