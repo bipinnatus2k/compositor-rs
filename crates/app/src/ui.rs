@@ -474,7 +474,7 @@ pub fn text_label(label: impl Into<SharedString>, dim: bool) -> gpui_kit::Div {
         // ToolHeaderStyle.swift:7: the control font is 12.
         .text_size(px(12.0))
         .text_color(rgb_u32(if dim { FG_DIM } else { FG_TEXT }))
-        .child(SharedString::from(label.into()))
+        .child(label.into())
 }
 
 /// A horizontal flex row with centered items and a small gap.
