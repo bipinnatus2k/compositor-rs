@@ -4,6 +4,40 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-10：废除 AppState 票 40——图层面板视图实体 `Entity<LayersPanelView>`）
+
+票 40 落地（裁定全文见 `docs/adr/0003-abolish-appstate-dual-mirror.md`
+裁定 2/4，票序 C；票内字段归属审计随落地誊写如下）。`LayersPanelView`
+（`ui/native_layer_list.rs`）镜像 Swift `LayersPanel` + `NativeLayerList`
++ `LayerAppearanceControls` + 底部菜单族：行/效果行交互、重命名全态
+（输入实体、InputEvent commit 订阅、begin/commit/取消路径）、效果行
+拖拽 ghost、菜单装配与头部不透明度滑杆（含 `subscribe_sliders` 的
+opacity 切片）全部面板私有；面板观察 session，session 通知独立重渲染。
+提交流程（delete_ask 族、set_status、touch、effects/adjustment 面板
+开启、edit_layer_adjustment）留 AppState，面板经
+`app: WeakEntity<AppState>` 过渡缝调用（43 改形，未新增依赖面）。tab
+切换由 `sync_session_observer` 顺路重指面板 session 并重挂观察（每-tab
+重建随 43）。footer 按钮与缩略图点击改为面板实体回调（`panel_on_click`，
+`app_on_click` 的面板孪生）；三个 MenuEntry 下拉（blend/effects/
+adjustment）沿用 app 壳 `MenuDispatch` 适配器——AppState 味的
+`AppHandler` 是票 43 退役的过渡缝，ui.rs 不在本票独占清单。缩略图缓存
+的 revision 纪元仍是 app 壳的（39 号票审计裁定），面板经缝只读。
+宽度固定 248 的既有偏差不动（Swift 202–352 可拖拽 + PanelResizeEdge，
+独立小票）。
+
+**字段归属审计（2026-10-10，逐字段对照 Swift；实现照此执行）**：
+
+| state.rs 字段 | Swift 归属（已核） | 去向 |
+|---|---|---|
+| `rename_input` | NSTableView 行内编辑（视图自有）+ session.renamingLayerID（core，票 35 已迁） | 面板实体私有（已落地）；`begin_rename`/`commit_rename`/取消路径与 InputEvent 订阅随迁 |
+| `thumbnails` 缓存 | UI/CanvasThumbnail.swift 是**纯函数枚举**；缩略图源 = `asset.thumbnail`（core 模型数据，Rust 的 `ImportedImage::with_thumbnail` 已对齐）；行内图像归 NSTableView 单元所有 | 面板实体私有（已落地，消费方仅图层行）；缓存键的 revision 纪元留 app 壳、经缝只读；`mask_thumbnail_image` 的每帧重算归票 37 |
+| `opacity_slider` + `sync_opacity_slider` | LayerAppearanceControls（LayersPanel 头部，活动图层不透明度） | 面板实体私有（已落地）；`subscribe_sliders` 中 opacity 切片随迁（`subscribe_opacity_slider`），brush/wand/gradient 切片留 AppState（归票 42 工具头）；`opacity_digit` 的 Move 分支经面板 reader 取实体 |
+| `EffectDragGhost` | LayerEffectRow 的 Option-drag | 机制不变（本就是拖拽期 `cx.new` 的小实体），改由面板视图创建（已落地） |
+| 底部菜单族 | LayersPanel footer（add-layer/group/蒙版菜单/效果菜单/调整层菜单/删除） | 已落地：面板内会话突变 → 直闭包 `session.update`；需 app 流程的（删除问询、状态条）经 `app: WeakEntity<AppState>` 过渡缝 |
+
+**测试**：912 全绿 = core 627 + app 175 + 集成 110；断言零改动（机械
+适配为零——测试本就不经 AppState 触及面板）；`boot smoke` 通过。
+
 ## 架构裁定（2026-10-09：废除 AppState 票 39——画布视图实体 `Entity<EditorCanvasView>`）
 
 票 39 落地（裁定全文见 `docs/adr/0003-abolish-appstate-dual-mirror.md`

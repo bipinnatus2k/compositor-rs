@@ -1721,7 +1721,9 @@ impl AppState {
             .update(cx, |session, _| session.renaming_layer_id.take())
             .is_some()
         {
-            self.rename_input = None;
+            // The rename field is the layers panel's (ticket 40).
+            self.layers_panel
+                .update(cx, |panel, _| panel.discard_rename_input());
             self.touch(cx);
         }
     }

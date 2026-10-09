@@ -1,6 +1,13 @@
-//! The right panel: blend mode + opacity for the active layer, the layer
-//! list (top-to-bottom), and the footer layer actions.
+//! The right panel as its own view entity: blend mode + opacity for the
+//! active layer, the layer list (top-to-bottom), and the footer layer
+//! actions — the port of Swift's `LayersPanel` + `NativeLayerList` +
+//! `LayerAppearanceControls` + the footer menu family (ADR 0003 step C,
+//! ticket 40). The window shell (`AppState`, the transitional root) keeps
+//! the delete-ask flows, the panel openings, the status line and the
+//! revision epoch; the panel reaches them through its
+//! `app: WeakEntity<AppState>` seam until ticket 43 reshapes it.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -9,11 +16,13 @@ use gpui_kit::component::Disableable;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::{
-    App, AppContext, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    RenderImage, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
-    prelude::FluentBuilder as _, px, rgb,
+    App, AppContext, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, RenderImage, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, WeakEntity, Window, prelude::FluentBuilder as _, px, rgb,
 };
 
 use compositor_core::adjustment::AdjustmentKind;
@@ -23,8 +32,8 @@ use compositor_core::effects::{LayerEffectKind, LayerEffectSelection};
 use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
 
-use crate::state::AppState;
-use crate::ui::{ClickHandler, Dropdown, MenuEntry, app_dispatch, app_on_click, text_label};
+use crate::state::{AppState, bgra_render_image, slider};
+use crate::ui::{ClickHandler, Dropdown, MenuEntry, app_dispatch, text_label};
 
 const THUMB: f32 = 30.0;
 
@@ -141,6 +150,367 @@ fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTar
     }
 }
 
+/// The right panel as its own view entity (Swift `LayersPanel` — the
+/// header's blend/opacity controls, the layer list and the footer menu
+/// family; ADR 0003 step C, ticket 40). It observes the session so a
+/// session notification re-renders the panel alone; the row/effect-row
+/// RenderOnce components below are its rendering bodies (ADR 0002).
+pub struct LayersPanelView {
+    /// The active tab's session — the header readouts, the layer rows and
+    /// the footer guards read it, and the panel's handlers mutate it
+    /// directly (Swift's panel speaks to its session the same way).
+    /// Re-pointed on tab changes by [`AppState::sync_session_observer`]
+    /// (the per-tab rebuild lands with ticket 43).
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the delete-ask flows, the
+    /// effects/adjustment panel openings and the touch/revision epoch stay
+    /// there. No AppState dependencies beyond what the moved handlers
+    /// already used.
+    app: WeakEntity<AppState>,
+    /// The layers-panel rename edit field (`renamingLayerID`'s widget half;
+    /// the session flag itself lives in the core session since stage-D
+    /// ticket 35). Built in [`Self::begin_rename`] — an input needs the
+    /// window.
+    rename_input: Option<Entity<InputState>>,
+    /// The cached thumbnail textures for one layer row, keyed by layer and
+    /// by whether the mask is the row's subject; values are (revision,
+    /// image). The revision epoch is the app shell's (ticket 39's field
+    /// audit) and is read through the seam as the cache key.
+    thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
+    /// The active layer's opacity (Layers panel header,
+    /// LayerAppearanceControls).
+    opacity_slider: Entity<SliderState>,
+    /// Subscriptions owned here: the header slider's writes and the rename
+    /// input's commit events.
+    subscriptions: Vec<Subscription>,
+    /// The observe subscription on the active tab's session entity (ticket
+    /// 40's item 1): a session-entity notify re-renders this panel alone.
+    /// Re-attached whenever the active tab changes
+    /// ([`Self::set_session`]); kept in a dedicated field — not
+    /// `subscriptions` — so a tab switch drops the outgoing session's
+    /// observation.
+    session_observer: Option<(Entity<EditorSession>, Subscription)>,
+}
+
+impl LayersPanelView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // LayerAppearanceControls' opacity slider: 0…100 %, whole steps —
+        // the same seed `AppState::new` used when the slider lived there.
+        let opacity_slider = cx.new(|_| slider(0.0, 100.0, 1.0, 100.0));
+        let mut panel = LayersPanelView {
+            session,
+            app,
+            rename_input: None,
+            thumbnails: HashMap::new(),
+            opacity_slider,
+            subscriptions: Vec::new(),
+            session_observer: None,
+        };
+        panel.subscribe_opacity_slider(cx);
+        panel.attach_session_observer(cx);
+        panel
+    }
+
+    /// The header slider's writes (`subscribe_sliders`' opacity slice moved
+    /// with the slider, ticket 40): Change begins an opacity edit and
+    /// tracks it, Release folds it closed; both bump the repaint epoch.
+    fn subscribe_opacity_slider(&mut self, cx: &mut Context<Self>) {
+        let opacity_slider = self.opacity_slider.clone();
+        let subscription = cx.subscribe(
+            &opacity_slider,
+            |this, _slider, event: &SliderEvent, cx: &mut Context<Self>| {
+                match event {
+                    SliderEvent::Change(value) => {
+                        this.session.update(cx, |session, _| {
+                            session.begin_opacity_edit();
+                            session.set_layer_opacity((value.start() / 100.0) as f64);
+                        });
+                    }
+                    SliderEvent::Release(value) => {
+                        this.session.update(cx, |session, _| {
+                            session.set_layer_opacity((value.start() / 100.0) as f64);
+                            session.finish_opacity_edit();
+                        });
+                    }
+                }
+                this.touch(cx);
+                cx.notify();
+            },
+        );
+        self.subscriptions.push(subscription);
+    }
+
+    /// Observes the session entity so its notifications re-render this
+    /// panel alone (ticket 40's item 1). Drops the outgoing observation.
+    fn attach_session_observer(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let subscription = cx.observe(&session, |_, _, cx| cx.notify());
+        self.session_observer = Some((session, subscription));
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view; the per-tab rebuild itself lands with ticket
+    /// 43): the observation follows, so the non-active tab is not observed.
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>, cx: &mut Context<Self>) {
+        if self
+            .session_observer
+            .as_ref()
+            .is_some_and(|(observed, _)| observed.entity_id() == session.entity_id())
+        {
+            return;
+        }
+        self.session = session;
+        self.attach_session_observer(cx);
+    }
+
+    /// The panel's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// a panel interaction that changed the session asks the shell through
+    /// the seam.
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// The header slider entity, for `AppState::opacity_digit`'s Move-tool
+    /// sync — the one write to it from outside this view.
+    pub(crate) fn opacity_slider(&self) -> Entity<SliderState> {
+        self.opacity_slider.clone()
+    }
+
+    /// Drops the rename input; the caller (`AppState::cancel_active`'s
+    /// Escape chain) already cleared `renaming_layer_id` through the
+    /// session.
+    pub(crate) fn discard_rename_input(&mut self) {
+        self.rename_input = None;
+    }
+
+    /// Puts the active layer's opacity into the header slider.
+    fn sync_opacity_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(opacity) = self.session.read(cx).active_layer().map(|l| l.opacity) else {
+            return;
+        };
+        let value = (opacity * 100.0) as f32;
+        let slider = self.opacity_slider.clone();
+        slider.update(cx, |state, cx| {
+            state.set_value(
+                gpui_kit::component::slider::SliderValue::Single(value),
+                window,
+                cx,
+            )
+        });
+    }
+
+    /// The layer-effect kinds (LayersPanel.swift's sparkles menu), disabled
+    /// unless the active layer can take effects.
+    fn effects_menu_entries(&self, cx: &App) -> Vec<MenuEntry> {
+        let enabled = self.session.read(cx).can_edit_effects();
+        LayerEffectKind::ALL
+            .iter()
+            .map(|kind| {
+                let kind = *kind;
+                // Adding an effect opens its editor panel — an app-side flow,
+                // reached through the seam.
+                MenuEntry::new(format!("{}…", kind.label()), move |state, window, cx| {
+                    state.add_effect(kind, window, cx);
+                })
+                .disabled(!enabled)
+            })
+            .collect()
+    }
+
+    /// The 12 adjustment kinds (LayersPanel.swift's half-circle menu): one
+    /// entry per kind; choosing one adds an adjustment layer. Entries use
+    /// the kinds' raw labels, no ellipsis, like Swift's footer menu.
+    fn adjustment_menu_entries(&self, cx: &App) -> Vec<MenuEntry> {
+        let enabled = self.session.read(cx).can_edit_layers();
+        AdjustmentKind::ALL
+            .iter()
+            .map(|kind| {
+                let kind = *kind;
+                // The session mutation closes over the panel's session; only
+                // the repaint epoch goes through the seam.
+                let session = self.session.clone();
+                MenuEntry::new(kind.label(), move |state, _, cx| {
+                    session.update(cx, |session, _| session.add_adjustment(kind));
+                    state.touch(cx);
+                })
+                .disabled(!enabled)
+            })
+            .collect()
+    }
+
+    /// The 24 blend modes, grouped with separators like the original menu.
+    fn blend_menu_entries(&self, cx: &App) -> Vec<MenuEntry> {
+        let current = self
+            .session
+            .read(cx)
+            .active_layer()
+            .map(|layer| layer.blend_mode);
+        let mut entries = Vec::new();
+        for (group_index, group) in LayerBlendMode::GROUPS.iter().enumerate() {
+            if group_index > 0 {
+                entries.push(MenuEntry::separator());
+            }
+            for mode in group.iter() {
+                let mode = *mode;
+                // The session mutation closes over the panel's session; only
+                // the repaint epoch goes through the seam.
+                let session = self.session.clone();
+                entries.push(
+                    MenuEntry::new(mode.label(), move |state, _, cx| {
+                        session.update(cx, |session, _| session.set_layer_blend_mode(mode));
+                        state.touch(cx);
+                    })
+                    .checked(current == Some(mode)),
+                );
+            }
+        }
+        entries
+    }
+
+    /// The cached thumbnail texture for one layer row, keyed by layer and by
+    /// whether the mask is the row's subject (the mask thumbnail swaps in).
+    fn thumbnail_image(
+        &mut self,
+        id: uuid::Uuid,
+        layer: &ImageLayer,
+        cx: &App,
+    ) -> Option<Arc<RenderImage>> {
+        let mask_selected = self.session.read(cx).is_mask_selected && layer.mask.is_some();
+        let revision = self
+            .app
+            .upgrade()
+            .map(|app| app.read(cx).revision)
+            .unwrap_or(0);
+        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected))
+            && *rev == revision
+        {
+            return Some(image.clone());
+        }
+        let document = self.session.read(cx).document.as_ref()?;
+        let canvas =
+            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
+        // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
+        // frame, whatever the layer's own bounds.
+        let thumbnail = if mask_selected {
+            compositor_core::render::mask_canvas_thumbnail(
+                layer.mask.as_ref()?,
+                &layer.mask_transform(),
+                canvas,
+            )?
+        } else {
+            compositor_core::render::layer_canvas_thumbnail(layer, canvas)?
+        };
+        let image = bgra_render_image(&thumbnail);
+        self.thumbnails
+            .insert((id, mask_selected), (revision, image.clone()));
+        Some(image)
+    }
+
+    // MARK: Rename
+
+    pub(crate) fn begin_rename(
+        &mut self,
+        id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .session
+            .read(cx)
+            .document
+            .as_ref()
+            .and_then(|d| d.layer(id))
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let subscription = cx.subscribe(
+            &input,
+            |this: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_rename(cx),
+                _ => {}
+            },
+        );
+        self.subscriptions.push(subscription);
+        self.session
+            .update(cx, |session, _| session.renaming_layer_id = Some(id));
+        self.rename_input = Some(input);
+        cx.notify();
+    }
+
+    pub(crate) fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let id = self.session.read(cx).renaming_layer_id;
+        if let (Some(id), Some(input)) = (id, self.rename_input.clone()) {
+            let text = input.read(cx).value().to_string();
+            self.session.update(cx, |session, _| {
+                session.rename_layer(id, &text);
+                session.renaming_layer_id = None;
+            });
+        }
+        self.rename_input = None;
+        self.touch(cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.session
+            .update(cx, |session, _| session.renaming_layer_id = None);
+        self.rename_input = None;
+        cx.notify();
+    }
+}
+
+/// The panel-entity twin of `ui::app_on_click`: run a handler inside the
+/// panel entity (the footer and thumbnail callbacks are the panel's own
+/// now, ticket 40).
+fn panel_on_click(
+    panel: &WeakEntity<LayersPanelView>,
+    handler: impl Fn(&mut LayersPanelView, &ClickEvent, &mut Window, &mut Context<LayersPanelView>)
+    + 'static,
+) -> ClickHandler {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, event, window, cx))
+            .ok();
+    })
+}
+
+/// The right-click activation: the row becomes the active layer, with the
+/// header's blend/opacity readouts following it, before any menu item runs.
+fn row_activate(
+    panel: &WeakEntity<LayersPanelView>,
+    id: uuid::Uuid,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::Context<gpui_kit::component::menu::PopupMenu>,
+) {
+    panel
+        .update(cx, |panel, cx| {
+            // Swift's menu activation runs selectLayerTarget -> selectLayer,
+            // which moves the ACTIVE layer without touching selectedLayerIDs
+            // (NativeLayerList.swift:763, EditorSession.swift:325-331): a right
+            // click on a row already inside a multi-selection keeps that
+            // selection, so the menu's Delete acts on all of it.
+            panel.session.update(cx, |session, _| {
+                if session.selected_layer_ids.contains(&id) {
+                    session.active_layer_id = Some(id);
+                    session.is_mask_selected = false;
+                } else {
+                    session.select_layer(Some(id));
+                }
+            });
+            panel.sync_opacity_slider(window, cx);
+            panel.touch(cx);
+        })
+        .ok();
+}
+
 /// The shared thumbnail cell: square, rounded, hairline border; the accent
 /// ring marks the edit target, a disabled mask reads dimmed, and an image
 /// fills the cell when one is on hand.
@@ -200,31 +570,9 @@ impl RenderOnce for LayerThumbnailButton {
     }
 }
 
-impl AppState {
-    /// Puts the active layer's opacity into the header slider.
-    pub fn sync_opacity_slider(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        let Some(opacity) = self
-            .tab()
-            .session
-            .read(cx)
-            .active_layer()
-            .map(|l| l.opacity)
-        else {
-            return;
-        };
-        let value = (opacity * 100.0) as f32;
-        let slider = self.opacity_slider.clone();
-        slider.update(cx, |state, cx| {
-            state.set_value(
-                gpui_kit::component::slider::SliderValue::Single(value),
-                window,
-                cx,
-            )
-        });
-    }
-
-    pub fn render_layers_panel(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let app = cx.entity().downgrade();
+impl Render for LayersPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
         let mut panel = gpui_kit::div()
             .flex()
             .flex_col()
@@ -235,7 +583,7 @@ impl AppState {
             .border_color(gpui_kit::black().opacity(0.4));
 
         // Header: title + blend mode + opacity.
-        let session = self.current_tab().session.read(cx);
+        let session = self.session.read(cx);
         let blend_label = session
             .active_layer()
             .map(|layer| session.displayed_blend_mode(layer).label().to_string())
@@ -270,7 +618,7 @@ impl AppState {
                             Dropdown::new("blend-mode", blend_label)
                                 .with_width(px(130.0))
                                 .with_entries(self.blend_menu_entries(cx))
-                                .with_dispatch(app_dispatch(&app)),
+                                .with_dispatch(app_dispatch(&self.app)),
                         )
                         .child(text_label("Opacity", true))
                         .child(gpui_kit::div().w(px(60.0)).child(
@@ -292,7 +640,7 @@ impl AppState {
             .flex()
             .flex_col();
         let (collapsed, document, active_id) = {
-            let session = self.tab().session.read(cx);
+            let session = self.session.read(cx);
             (
                 session.collapsed_group_ids.clone(),
                 session.document.clone(),
@@ -321,7 +669,7 @@ impl AppState {
         // The trash's label follows the target (deleteLayerOrMask,
         // SelectionEdits.swift:71-75) — the same decision its action makes.
         let delete_tooltip = {
-            let session = self.current_tab().session.read(cx);
+            let session = self.session.read(cx);
             match delete_target(session) {
                 DeleteTarget::Effect => "Delete selected effect",
                 DeleteTarget::Mask => "Delete layer mask",
@@ -337,7 +685,7 @@ impl AppState {
         // The footer's disabled lines are Swift's (LayersPanel.swift:38-60,
         // LayerMaskMenu.swift): edit guards per button, the mask retiring
         // once the active layer carries one.
-        let footer = self.current_tab().session.read(cx);
+        let footer = self.session.read(cx);
         let layers_enabled = footer.can_edit_layers();
         let fx_enabled = footer.can_edit_effects();
         let mask_disabled = footer_mask_disabled(footer);
@@ -362,12 +710,11 @@ impl AppState {
                         "New blank layer",
                         !layers_enabled,
                     )
-                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
-                        state
-                            .tab()
+                    .with_on_click(panel_on_click(&this, |panel, _, _, cx| {
+                        panel
                             .session
                             .update(cx, |session, _| session.add_blank_layer());
-                        state.touch(cx);
+                        panel.touch(cx);
                     })),
                 )
                 .child(
@@ -378,15 +725,14 @@ impl AppState {
                         "New folder",
                         !layers_enabled,
                     )
-                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
+                    .with_on_click(panel_on_click(&this, |panel, _, _, cx| {
                         // The footer groups the SELECTION (LayerGroups.swift:
                         // 119 groupSelectedLayers), not an empty folder above
                         // the active layer.
-                        state
-                            .tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.group_selected_layers());
-                        state.touch(cx);
+                        panel.touch(cx);
                     })),
                 )
                 .child(
@@ -397,14 +743,13 @@ impl AppState {
                         "Add layer mask",
                         mask_disabled,
                     )
-                    .with_on_click(app_on_click(&app, |state, _, _, cx| {
+                    .with_on_click(panel_on_click(&this, |panel, _, _, cx| {
                         // addMask (LayerMask.swift:233): all white, or with a
                         // selection, the selection black.
-                        state
-                            .tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.add_mask_from_selection(true));
-                        state.touch(cx);
+                        panel.touch(cx);
                     })),
                 )
                 // The effects menu (LayersPanel.swift's sparkles): one entry
@@ -422,7 +767,7 @@ impl AppState {
                         // (gpui-component button.rs dropdown_caret).
                         .dropdown_caret(true)
                         .dropdown_menu({
-                            let app = app.clone();
+                            let app = self.app.clone();
                             move |menu, _, _| crate::ui::build_menu(&app, menu, &fx_entries)
                         }),
                 )
@@ -436,7 +781,7 @@ impl AppState {
                         .disabled(!layers_enabled)
                         .dropdown_caret(true)
                         .dropdown_menu({
-                            let app = app.clone();
+                            let app = self.app.clone();
                             move |menu, _, _| crate::ui::build_menu(&app, menu, &adjustment_entries)
                         }),
                 )
@@ -451,26 +796,29 @@ impl AppState {
                         delete_tooltip,
                         trash_disabled,
                     )
-                    .with_on_click(app_on_click(
-                        &app,
-                        |state, _, window, cx| {
-                            let target = delete_target(state.tab().session.read(cx));
+                    .with_on_click(panel_on_click(
+                        &this,
+                        |panel, _, window, cx| {
+                            let target = delete_target(panel.session.read(cx));
                             match target {
                                 DeleteTarget::Effect => {
-                                    state
-                                        .tab()
+                                    panel
                                         .session
                                         .update(cx, |session, _| session.remove_selected_effect());
-                                    state.touch(cx);
+                                    panel.touch(cx);
                                 }
                                 DeleteTarget::Mask => {
-                                    state
-                                        .tab()
+                                    panel
                                         .session
                                         .update(cx, |session, _| session.delete_layer_mask());
-                                    state.touch(cx);
+                                    panel.touch(cx);
                                 }
-                                DeleteTarget::Layers => state.request_delete_layer(window, cx),
+                                DeleteTarget::Layers => {
+                                    panel
+                                        .app
+                                        .update(cx, |app, cx| app.request_delete_layer(window, cx))
+                                        .ok();
+                                }
                             }
                         },
                     )),
@@ -479,70 +827,9 @@ impl AppState {
 
         panel.into_any_element()
     }
+}
 
-    /// The layer-effect kinds (LayersPanel.swift's sparkles menu), disabled
-    /// unless the active layer can take effects.
-    fn effects_menu_entries(&self, cx: &gpui_kit::App) -> Vec<MenuEntry> {
-        let enabled = self.current_tab().session.read(cx).can_edit_effects();
-        LayerEffectKind::ALL
-            .iter()
-            .map(|kind| {
-                let kind = *kind;
-                MenuEntry::new(format!("{}…", kind.label()), move |state, window, cx| {
-                    state.add_effect(kind, window, cx);
-                })
-                .disabled(!enabled)
-            })
-            .collect()
-    }
-
-    /// The 12 adjustment kinds (LayersPanel.swift's half-circle menu): one
-    /// entry per kind; choosing one adds an adjustment layer. Entries use
-    /// the kinds' raw labels, no ellipsis, like Swift's footer menu.
-    fn adjustment_menu_entries(&self, cx: &gpui_kit::App) -> Vec<MenuEntry> {
-        let enabled = self.current_tab().session.read(cx).can_edit_layers();
-        AdjustmentKind::ALL
-            .iter()
-            .map(|kind| {
-                let kind = *kind;
-                MenuEntry::new(kind.label(), move |state, _, cx| {
-                    state.add_adjustment(kind, cx);
-                })
-                .disabled(!enabled)
-            })
-            .collect()
-    }
-
-    /// The 24 blend modes, grouped with separators like the original menu.
-    fn blend_menu_entries(&self, cx: &gpui_kit::App) -> Vec<MenuEntry> {
-        let current = self
-            .current_tab()
-            .session
-            .read(cx)
-            .active_layer()
-            .map(|layer| layer.blend_mode);
-        let mut entries = Vec::new();
-        for (group_index, group) in LayerBlendMode::GROUPS.iter().enumerate() {
-            if group_index > 0 {
-                entries.push(MenuEntry::separator());
-            }
-            for mode in group.iter() {
-                let mode = *mode;
-                entries.push(
-                    MenuEntry::new(mode.label(), move |state, _, cx| {
-                        state
-                            .tab()
-                            .session
-                            .update(cx, |session, _| session.set_layer_blend_mode(mode));
-                        state.touch(cx);
-                    })
-                    .checked(current == Some(mode)),
-                );
-            }
-        }
-        entries
-    }
-
+impl LayersPanelView {
     fn render_layer_row(
         &mut self,
         layer: &ImageLayer,
@@ -556,20 +843,20 @@ impl AppState {
         let has_mask = layer.mask.is_some();
         let mask_enabled = layer.mask.as_ref().map(|m| m.is_enabled).unwrap_or(false);
         let (mask_selected, collapsed) = {
-            let session = self.tab().session.read(cx);
+            let session = self.session.read(cx);
             (
                 session.is_mask_selected,
                 session.collapsed_group_ids.contains(&id),
             )
         };
         let in_folder = layer.parent_id.is_some();
-        let renaming = self.tab().session.read(cx).renaming_layer_id == Some(id);
+        let renaming = self.session.read(cx).renaming_layer_id == Some(id);
         // Swift indents one 24px step per hierarchy level, capped at 8, and
         // a clipped layer steps in another 24 — the same distance a folder
         // step takes, and the two add up (NativeLayerList.swift:625-631).
         let clipped_to = layer.mask_source_id;
         let indent = (depth.min(8) as f32) * 24.0 + if clipped_to.is_some() { 24.0 } else { 0.0 };
-        let app = cx.entity().downgrade();
+        let panel = cx.entity().downgrade();
 
         let mut row = gpui_kit::div()
             .id(layer_key("row", id))
@@ -583,11 +870,10 @@ impl AppState {
             .rounded_sm()
             .on_click(cx.listener(move |this, event, window, cx| {
                 let double = click_count(event) >= 2;
-                if this.tab().session.read(cx).renaming_layer_id == Some(id) {
+                if this.session.read(cx).renaming_layer_id == Some(id) {
                     return;
                 }
-                this.tab()
-                    .session
+                this.session
                     .update(cx, |session, _| session.select_layer(Some(id)));
                 this.sync_opacity_slider(window, cx);
                 if double {
@@ -619,8 +905,7 @@ impl AppState {
                     .justify_center()
                     .rounded_sm()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.tab()
-                            .session
+                        this.session
                             .update(cx, |session, _| session.toggle_group_expansion(id));
                         this.touch(cx);
                         cx.stop_propagation();
@@ -648,8 +933,7 @@ impl AppState {
                 .justify_center()
                 .rounded_sm()
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.tab()
-                        .session
+                    this.session
                         .update(cx, |session, _| session.toggle_layer_visibility(id));
                     this.touch(cx);
                 }))
@@ -684,51 +968,57 @@ impl AppState {
             .unwrap_or(false);
         row = row.child(
             LayerThumbnailButton::new(layer_key("thumb", id), layer_is_target, false, thumbnail)
-                .with_on_click(app_on_click(&app, move |this, event, window, cx| {
+                .with_on_click(panel_on_click(&panel, move |panel, event, window, cx| {
                     // A double-click on the thumbnail opens what the layer holds:
                     // its text, or an editable adjustment's editor (Invert falls
                     // through); anything else renames it.
                     if click_count(event) >= 2 {
-                        this.tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.select_layer_target(id, false));
                         if holds_text {
-                            this.tab()
+                            panel
                                 .session
                                 .update(cx, |session, _| session.edit_active_text());
                         } else if editable_adjustment {
                             // Swift points adjustmentEditingID at the layer
                             // unconditionally (NativeLayerList.swift:143); a
                             // refused begin (busy) opens nothing, renames never.
-                            this.edit_layer_adjustment(id, cx);
+                            // Opening the editor panel is an app-side flow.
+                            panel
+                                .app
+                                .update(cx, |app, cx| {
+                                    app.edit_layer_adjustment(id, cx);
+                                })
+                                .ok();
                         } else {
-                            this.begin_rename(id, window, cx);
+                            panel.begin_rename(id, window, cx);
                         }
-                        this.touch(cx);
+                        panel.touch(cx);
                         cx.stop_propagation();
                         return;
                     }
                     let modifiers = event.modifiers();
                     if !modifiers.control && !modifiers.platform {
-                        this.tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.select_layer_target(id, false));
-                        this.sync_opacity_slider(window, cx);
-                        this.touch(cx);
+                        panel.sync_opacity_slider(window, cx);
+                        panel.touch(cx);
                         cx.stop_propagation();
                         return;
                     }
                     let mode = selection_mode(modifiers.shift, modifiers.alt);
-                    if this.tab().session.read(cx).is_mask_selected {
-                        this.tab()
+                    if panel.session.read(cx).is_mask_selected {
+                        panel
                             .session
                             .update(cx, |session, _| session.load_mask_selection(id, mode));
                     } else {
-                        this.tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.load_layer_selection(id, mode));
                     }
-                    this.touch(cx);
+                    panel.touch(cx);
                 })),
         );
 
@@ -745,30 +1035,30 @@ impl AppState {
                     !mask_enabled,
                     mask_image,
                 )
-                .with_on_click(app_on_click(
-                    &app,
-                    move |this, event, window, cx| {
+                .with_on_click(panel_on_click(
+                    &panel,
+                    move |panel, event, window, cx| {
                         let modifiers = event.modifiers();
                         if !modifiers.control && !modifiers.platform {
                             // selectMask (NativeLayerList.swift:793-796): the
                             // mask becomes the edit target; Shift also toggles
                             // it on/off.
-                            this.tab().session.update(cx, |session, _| {
+                            panel.session.update(cx, |session, _| {
                                 session.select_layer_target(id, true);
                                 if modifiers.shift {
                                     session.toggle_layer_mask();
                                 }
                             });
-                            this.sync_opacity_slider(window, cx);
-                            this.touch(cx);
+                            panel.sync_opacity_slider(window, cx);
+                            panel.touch(cx);
                             cx.stop_propagation();
                             return;
                         }
                         let mode = selection_mode(modifiers.shift, modifiers.alt);
-                        this.tab()
+                        panel
                             .session
                             .update(cx, |session, _| session.load_mask_selection(id, mode));
-                        this.touch(cx);
+                        panel.touch(cx);
                     },
                 )),
             );
@@ -795,7 +1085,6 @@ impl AppState {
             );
             let clip_tooltip = clipped_to.map(|source| {
                 let source_name = self
-                    .tab()
                     .session
                     .read(cx)
                     .document
@@ -809,7 +1098,6 @@ impl AppState {
             });
             let subtitle = if let Some(source) = clipped_to {
                 let source_name = self
-                    .tab()
                     .session
                     .read(cx)
                     .document
@@ -877,136 +1165,145 @@ impl AppState {
         // The row's right-click menu (NativeLayerList.swift:604-613, cropped
         // to what the session models). Opening it first activates the row —
         // Swift's menu actions all run through selectImage().
-        let row =
-            row.context_menu(move |menu, window, cx| {
-                app_activate(&app, id, window, cx);
-                let menu = menu
-                    .item(PopupMenuItem::new("Rename…").on_click({
-                        let app = app.clone();
-                        move |_, window, cx| {
-                            app.update(cx, |state, cx| state.begin_rename(id, window, cx))
-                                .ok();
-                        }
-                    }))
-                    .item({
-                        let app = app.clone();
-                        PopupMenuItem::new(if visible { "Hide" } else { "Show" }).on_click(
-                            move |_, _, cx| {
-                                app.update(cx, |state, cx| {
-                                    state.tab().session.update(cx, |session, _| {
+        let menu_panel = panel.clone();
+        let row = row.context_menu(move |menu, window, cx| {
+            row_activate(&menu_panel, id, window, cx);
+            let menu = menu
+                .item(PopupMenuItem::new("Rename…").on_click({
+                    let panel = menu_panel.clone();
+                    move |_, window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.begin_rename(id, window, cx))
+                            .ok();
+                    }
+                }))
+                .item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new(if visible { "Hide" } else { "Show" }).on_click(
+                        move |_, _, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.session.update(cx, |session, _| {
                                         session.toggle_layer_visibility(id)
                                     });
-                                    state.touch(cx);
+                                    panel.touch(cx);
                                 })
                                 .ok();
-                            },
-                        )
+                        },
+                    )
+                })
+                .separator();
+            let menu = if has_mask {
+                menu.item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new(if mask_enabled {
+                        "Disable Mask"
+                    } else {
+                        "Enable Mask"
                     })
-                    .separator();
-                let menu = if has_mask {
-                    menu.item({
-                        let app = app.clone();
-                        PopupMenuItem::new(if mask_enabled {
-                            "Disable Mask"
-                        } else {
-                            "Enable Mask"
-                        })
-                        .on_click(move |_, _, cx| {
-                            app.update(cx, |state, cx| {
-                                state
-                                    .tab()
+                    .on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel
                                     .session
                                     .update(cx, |session, _| session.toggle_layer_mask());
-                                state.touch(cx);
+                                panel.touch(cx);
                             })
-                            .ok();
-                        })
-                    })
-                    .item({
-                        let app = app.clone();
-                        PopupMenuItem::new("Delete Mask").on_click(move |_, _, cx| {
-                            app.update(cx, |state, cx| {
-                                state
-                                    .tab()
-                                    .session
-                                    .update(cx, |session, _| session.delete_layer_mask());
-                                state.touch(cx);
-                            })
-                            .ok();
-                        })
-                    })
-                } else {
-                    menu.item({
-                        let app = app.clone();
-                        PopupMenuItem::new("Add White Mask").on_click(move |_, _, cx| {
-                            app.update(cx, |state, cx| {
-                                state
-                                    .tab()
-                                    .session
-                                    .update(cx, |session, _| session.add_layer_mask(true));
-                                state.touch(cx);
-                            })
-                            .ok();
-                        })
-                    })
-                    .item({
-                        let app = app.clone();
-                        PopupMenuItem::new("Add Black Mask").on_click(move |_, _, cx| {
-                            app.update(cx, |state, cx| {
-                                state
-                                    .tab()
-                                    .session
-                                    .update(cx, |session, _| session.add_layer_mask(false));
-                                state.touch(cx);
-                            })
-                            .ok();
-                        })
-                    })
-                };
-                // Release Clipping Mask sits after the mask items for every row
-                // (NativeLayerList.swift:607); the session no-ops when the layer
-                // clips nothing.
-                let menu = menu.item({
-                    let app = app.clone();
-                    PopupMenuItem::new("Release Clipping Mask").on_click(move |_, _, cx| {
-                        app.update(cx, |state, cx| {
-                            state
-                                .tab()
-                                .session
-                                .update(cx, |session, _| session.remove_live_mask(id));
-                            state.touch(cx);
-                        })
-                        .ok();
-                    })
-                });
-                let menu = menu.separator();
-                let menu = if in_folder {
-                    menu.item({
-                        let app = app.clone();
-                        PopupMenuItem::new("Move Out of Folder").on_click(move |_, _, cx| {
-                            app.update(cx, |state, cx| {
-                                state.tab().session.update(cx, |session, _| {
-                                    session.move_active_layer_out_of_group()
-                                });
-                                state.touch(cx);
-                            })
-                            .ok();
-                        })
-                    })
-                } else {
-                    menu
-                };
-                menu.item({
-                    let app = app.clone();
-                    PopupMenuItem::new("Delete Layer / Folder").on_click(move |_, window, cx| {
-                        // deleteLayerOrMask: deletes the mask when it is the target,
-                        // and asks about live-mask dependents otherwise
-                        // (request_delete_layer).
-                        app.update(cx, |state, cx| state.request_delete_layer(window, cx))
                             .ok();
                     })
                 })
+                .item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new("Delete Mask").on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel
+                                    .session
+                                    .update(cx, |session, _| session.delete_layer_mask());
+                                panel.touch(cx);
+                            })
+                            .ok();
+                    })
+                })
+            } else {
+                menu.item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new("Add White Mask").on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel
+                                    .session
+                                    .update(cx, |session, _| session.add_layer_mask(true));
+                                panel.touch(cx);
+                            })
+                            .ok();
+                    })
+                })
+                .item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new("Add Black Mask").on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel
+                                    .session
+                                    .update(cx, |session, _| session.add_layer_mask(false));
+                                panel.touch(cx);
+                            })
+                            .ok();
+                    })
+                })
+            };
+            // Release Clipping Mask sits after the mask items for every row
+            // (NativeLayerList.swift:607); the session no-ops when the layer
+            // clips nothing.
+            let menu = menu.item({
+                let panel = menu_panel.clone();
+                PopupMenuItem::new("Release Clipping Mask").on_click(move |_, _, cx| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel
+                                .session
+                                .update(cx, |session, _| session.remove_live_mask(id));
+                            panel.touch(cx);
+                        })
+                        .ok();
+                })
             });
+            let menu = menu.separator();
+            let menu = if in_folder {
+                menu.item({
+                    let panel = menu_panel.clone();
+                    PopupMenuItem::new("Move Out of Folder").on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.session.update(cx, |session, _| {
+                                    session.move_active_layer_out_of_group()
+                                });
+                                panel.touch(cx);
+                            })
+                            .ok();
+                    })
+                })
+            } else {
+                menu
+            };
+            menu.item({
+                let panel = menu_panel.clone();
+                PopupMenuItem::new("Delete Layer / Folder").on_click(move |_, window, cx| {
+                    // deleteLayerOrMask: deletes the mask when it is the target,
+                    // and asks about live-mask dependents otherwise
+                    // (request_delete_layer).
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel
+                                .app
+                                .update(cx, |app, cx| app.request_delete_layer(window, cx))
+                                .ok();
+                        })
+                        .ok();
+                })
+            })
+        });
 
         // The per-effect rows (LayerEffectRow, NativeLayerList.swift:849-940,
         // built per kind in LayerCell.configure:620-629): one 24px line under
@@ -1018,7 +1315,7 @@ impl AppState {
             .as_ref()
             .map(|effects| effects.kinds())
             .unwrap_or_default();
-        let effect_selection = self.current_tab().session.read(cx).selected_effect();
+        let effect_selection = self.session.read(cx).selected_effect();
         let mut entry = gpui_kit::div().flex().flex_col().child(row);
         for kind in effect_kinds {
             entry = entry.child(self.render_effect_row(layer, kind, indent, effect_selection, cx));
@@ -1027,21 +1324,19 @@ impl AppState {
         // The entry answers an effect's Option-drag (validateDrop/acceptDrop,
         // NativeLayerList.swift:156-203): the copy lands on the row under the
         // pointer, so the whole entry — layer row and effect rows — counts.
-        let app = cx.entity().downgrade();
         entry
             .drag_over::<EffectDrag>(move |style, drag: &EffectDrag, window, cx| {
                 // Only an Option-drag copies, and only onto a layer that can
                 // take the effect — highlight those targets alone.
                 let copies = option_drag_modifiers(window.modifiers())
-                    && app
+                    && panel
                         .upgrade()
-                        .map(|state| {
-                            state
-                                .read(cx)
-                                .current_tab()
-                                .session
-                                .read(cx)
-                                .can_copy_effect(drag.kind, drag.layer_id, id)
+                        .map(|panel| {
+                            panel.read(cx).session.read(cx).can_copy_effect(
+                                drag.kind,
+                                drag.layer_id,
+                                id,
+                            )
                         })
                         .unwrap_or(false);
                 if copies {
@@ -1058,7 +1353,7 @@ impl AppState {
                 if !option_drag_modifiers(window.modifiers()) {
                     return;
                 }
-                this.tab().session.update(cx, |session, _| {
+                this.session.update(cx, |session, _| {
                     session.copy_effect(drag.kind, drag.layer_id, id)
                 });
                 this.sync_opacity_slider(window, cx);
@@ -1079,7 +1374,7 @@ impl AppState {
         kind: LayerEffectKind,
         indent: f32,
         effect_selection: Option<LayerEffectSelection>,
-        cx: &Context<AppState>,
+        cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let id = layer.id;
         let enabled = layer
@@ -1115,14 +1410,16 @@ impl AppState {
                 // panel itself opens off `effectsEditing` exactly as it
                 // does for a fresh add.
                 let editing = click_count(event) >= 2;
-                this.tab()
-                    .session
+                this.session
                     .update(cx, |session, _| session.select_effect(kind, id, editing));
                 if editing
-                    && this.tab().session.read(cx).effects_editing
+                    && this.session.read(cx).effects_editing
                         == Some(LayerEffectSelection { layer_id: id, kind })
                 {
-                    this.open_effects_panel(cx);
+                    // Opening the floating panel is an app-side flow.
+                    this.app
+                        .update(cx, |app, cx| app.open_effects_panel(cx))
+                        .ok();
                 }
                 this.sync_opacity_slider(window, cx);
                 this.touch(cx);
@@ -1156,8 +1453,7 @@ impl AppState {
                     .justify_center()
                     .rounded_sm()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.tab()
-                            .session
+                        this.session
                             .update(cx, |session, _| session.toggle_effect(kind, id));
                         this.touch(cx);
                         cx.stop_propagation();
@@ -1203,50 +1499,13 @@ impl AppState {
         cx: &gpui_kit::App,
     ) -> Option<Arc<RenderImage>> {
         let mask = layer.mask.as_ref()?;
-        let document = self.current_tab().session.read(cx).document.as_ref()?;
+        let document = self.session.read(cx).document.as_ref()?;
         let canvas =
             compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
         let thumbnail =
             compositor_core::render::mask_canvas_thumbnail(mask, &layer.mask_transform(), canvas)?;
         Some(crate::state::bgra_render_image(&thumbnail))
     }
-
-    /// New Group: a folder inserted above the active layer, which becomes
-    /// its first child.
-    pub fn add_group(&mut self, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_group());
-        self.touch(cx);
-    }
-}
-
-/// The right-click activation: the row becomes the active layer, with the
-/// header's blend/opacity readouts following it, before any menu item runs.
-fn app_activate(
-    app: &gpui_kit::WeakEntity<AppState>,
-    id: uuid::Uuid,
-    window: &mut gpui_kit::Window,
-    cx: &mut gpui_kit::Context<gpui_kit::component::menu::PopupMenu>,
-) {
-    app.update(cx, |state, cx| {
-        // Swift's menu activation runs selectLayerTarget -> selectLayer,
-        // which moves the ACTIVE layer without touching selectedLayerIDs
-        // (NativeLayerList.swift:763, EditorSession.swift:325-331): a right
-        // click on a row already inside a multi-selection keeps that
-        // selection, so the menu's Delete acts on all of it.
-        state.tab().session.update(cx, |session, _| {
-            if session.selected_layer_ids.contains(&id) {
-                session.active_layer_id = Some(id);
-                session.is_mask_selected = false;
-            } else {
-                session.select_layer(Some(id));
-            }
-        });
-        state.sync_opacity_slider(window, cx);
-        state.touch(cx);
-    })
-    .ok();
 }
 
 #[derive(IntoElement)]

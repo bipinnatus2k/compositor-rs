@@ -210,7 +210,10 @@ impl Render for AppState {
                             // including the welcome form on an empty tab.
                             .child(self.canvas_view.clone()),
                     )
-                    .child(self.render_layers_panel(cx)),
+                    // The layers panel is its own view entity too (Swift
+                    // `LayersPanel`, ticket 40): header, layer list and
+                    // footer render there.
+                    .child(self.layers_panel.clone()),
             )
             .child(self.render_status_bar(cx))
             .children(self.render_sheet_overlay(cx))
@@ -751,6 +754,15 @@ impl AppState {
     fn on_new_group(&mut self, _: &keys::NewGroup, _w: &mut Window, cx: &mut Context<Self>) {
         self.add_group(cx);
     }
+
+    /// New Group: a folder inserted above the active layer, which becomes
+    /// its first child.
+    pub(crate) fn add_group(&mut self, cx: &mut Context<Self>) {
+        self.tab()
+            .session
+            .update(cx, |session, _| session.add_group());
+        self.touch(cx);
+    }
     fn on_add_mask(&mut self, _: &keys::AddMask, _w: &mut Window, cx: &mut Context<Self>) {
         self.tab()
             .session
@@ -803,7 +815,9 @@ impl AppState {
     }
     fn on_rename_layer(&mut self, _: &keys::RenameLayer, w: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            self.begin_rename(id, w, cx);
+            // The rename field is the layers panel's (ticket 40).
+            self.layers_panel
+                .update(cx, |panel, cx| panel.begin_rename(id, w, cx));
         }
     }
     fn on_toggle_layer_visibility(

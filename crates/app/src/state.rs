@@ -1,8 +1,8 @@
 //! Application state: the window shell around the per-tab `EditorSession` —
-//! the frame/thumbnail caches, the modal sheet, the panels and the preview
-//! pipelines — plus the canvas view entity (see `canvas::editor_canvas`).
+//! the frame cache, the modal sheet, the panels and the preview pipelines —
+//! plus the canvas view entity (see `canvas::editor_canvas`) and the layers
+//! panel view entity (see `ui::native_layer_list`).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::component::WindowExt;
@@ -27,6 +27,7 @@ use compositor_core::tools::brush::RasterEdit;
 use compositor_core::transform::LayerTransform;
 
 use crate::canvas::editor_canvas::{CanvasDrag, CanvasGesture, EditorCanvasView};
+use crate::ui::native_layer_list::LayersPanelView;
 
 pub const RULER_SIZE: f32 = 20.0;
 
@@ -254,17 +255,17 @@ pub struct AppState {
     /// pipelines and the frame cache. Its session field is re-pointed on
     /// tab changes by [`Self::sync_session_observer`].
     pub canvas_view: Entity<EditorCanvasView>,
+    /// The layers-panel view entity (Swift `LayersPanel`, ADR 0003 step C /
+    /// ticket 40): it owns the rename field, the thumbnail cache and the
+    /// header's opacity slider, and renders itself. Its session field is
+    /// re-pointed on tab changes by [`Self::sync_session_observer`].
+    pub layers_panel: Entity<LayersPanelView>,
     pub sheet: Option<SheetState>,
     /// The floating panels (design doc §5): the registry of open panels plus
     /// their remembered positions, and the per-panel widget bundles.
     pub panels: crate::ui::floating_panel::FloatingPanels,
     pub panel_widgets: crate::ui::floating_panel::PanelWidgets,
     pub status: Option<String>,
-    /// The layers-panel rename edit field (`renamingLayerID`'s widget half;
-    /// the session flag itself lives in the core session since stage-D
-    /// ticket 35).
-    pub rename_input: Option<Entity<InputState>>,
-    thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
     pub preview_base: Option<Arc<Bitmap>>,
@@ -280,8 +281,6 @@ pub struct AppState {
     pub brush_sliders: [Entity<SliderState>; 4],
     pub wand_slider: Entity<SliderState>,
     pub gradient_slider: Entity<SliderState>,
-    /// The active layer's opacity (Layers panel header).
-    pub opacity_slider: Entity<SliderState>,
     pub subscriptions: Vec<Subscription>,
     /// The open color picker's widgets (`color_picker_ui`).
     pub picker_ui: Option<crate::ui::color_picker_sheet::PickerUi>,
@@ -341,7 +340,7 @@ pub enum SaveAfter {
 }
 
 /// Creates a slider with the given range and initial value.
-fn slider(min: f32, max: f32, step: f32, value: f32) -> SliderState {
+pub(crate) fn slider(min: f32, max: f32, step: f32, value: f32) -> SliderState {
     SliderState::new()
         .min(min)
         .max(max)
@@ -458,7 +457,6 @@ impl AppState {
         let wand_slider = cx.new(|_| slider(0.0, 255.0, 1.0, wand_tolerance as f32));
         let gradient_slider =
             cx.new(|_| slider(1.0, 100.0, 1.0, (gradient_opacity * 100.0) as f32));
-        let opacity_slider = cx.new(|_| slider(0.0, 100.0, 1.0, 100.0));
 
         // The canvas view (Swift `CanvasView`): it builds its own inline
         // text input (an `InputState` needs the window), and it holds the
@@ -466,7 +464,12 @@ impl AppState {
         // here (ticket 39's transitional seam).
         let app = cx.weak_entity();
         let active_session = workspace.current().session.clone();
-        let canvas_view = cx.new(|cx| EditorCanvasView::new(active_session, app, window, cx));
+        let canvas_view =
+            cx.new(|cx| EditorCanvasView::new(active_session.clone(), app.clone(), window, cx));
+        // The layers panel (Swift `LayersPanel`): it builds its own rename
+        // input and header opacity slider, and reaches the shell's flows
+        // through the same seam (ticket 40).
+        let layers_panel = cx.new(|cx| LayersPanelView::new(active_session, app, cx));
 
         let mut state = AppState {
             workspace,
@@ -476,12 +479,11 @@ impl AppState {
             frame_image_rev: 0,
             frame_image_tab: crate::project::TabId::nil(),
             canvas_view,
+            layers_panel,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
             panel_widgets: crate::ui::floating_panel::PanelWidgets::default(),
             status: None,
-            rename_input: None,
-            thumbnails: HashMap::new(),
             preview_base: None,
             camera_raw_samples_defringe: false,
             camera_raw_readout: None,
@@ -490,7 +492,6 @@ impl AppState {
             brush_sliders,
             wand_slider,
             gradient_slider,
-            opacity_slider,
             subscriptions: Vec::new(),
             picker_ui: None,
             curves_editor: None,
@@ -574,9 +575,12 @@ impl AppState {
                 self.gradient_slider.clone(),
                 (gradient_opacity * 100.0) as f32,
             )),
-            NavigationTool::Move => {
-                Some((self.opacity_slider.clone(), (active_opacity * 100.0) as f32))
-            }
+            // The Move tool's digits drive the active layer's opacity — the
+            // layers panel header's slider (ticket 40 moved it there).
+            NavigationTool::Move => Some((
+                self.layers_panel.read(cx).opacity_slider(),
+                (active_opacity * 100.0) as f32,
+            )),
             _ => None,
         };
         if let Some((slider, value)) = sync {
@@ -630,7 +634,10 @@ impl AppState {
         }
     }
 
-    /// Keeps the session's tool settings in sync with the sliders.
+    /// Keeps the session's tool settings in sync with the sliders. The
+    /// layers panel header's opacity slider is not among them: it moved to
+    /// `LayersPanelView` with its subscription (ticket 40); what stays here
+    /// are the tool-option sliders of the tool headers (ticket 42).
     fn subscribe_sliders(&mut self, cx: &mut Context<Self>) {
         let brush_indices = [0usize, 1, 2, 3];
         for index in brush_indices {
@@ -676,29 +683,6 @@ impl AppState {
                 state.tab().session.update(cx, |session, _| {
                     session.gradient_settings.opacity = (value / 100.0) as f64
                 });
-                state.revision += 1;
-                cx.notify();
-            },
-        );
-        self.subscriptions.push(subscription);
-        let opacity_slider = self.opacity_slider.clone();
-        let subscription = cx.subscribe(
-            &opacity_slider,
-            |state, _slider, event: &SliderEvent, cx| {
-                match event {
-                    SliderEvent::Change(value) => {
-                        state.tab().session.update(cx, |session, _| {
-                            session.begin_opacity_edit();
-                            session.set_layer_opacity((value.start() / 100.0) as f64);
-                        });
-                    }
-                    SliderEvent::Release(value) => {
-                        state.tab().session.update(cx, |session, _| {
-                            session.set_layer_opacity((value.start() / 100.0) as f64);
-                            session.finish_opacity_edit();
-                        });
-                    }
-                }
                 state.revision += 1;
                 cx.notify();
             },
@@ -1092,6 +1076,10 @@ impl AppState {
         // (ticket 39 — the per-tab rebuild itself lands with ticket 43).
         self.canvas_view
             .update(cx, |canvas, _| canvas.session = session.clone());
+        // The layers panel renders and observes the active tab's session;
+        // its set_session follows the observation (ticket 40).
+        self.layers_panel
+            .update(cx, |panel, cx| panel.set_session(session.clone(), cx));
         if self
             .session_observer
             .as_ref()
@@ -1372,97 +1360,11 @@ impl AppState {
         self.frame_image.clone().unwrap()
     }
 
-    /// The cached thumbnail texture for one layer row, keyed by layer and by
-    /// whether the mask is the row's subject (the mask thumbnail swaps in).
-    pub fn thumbnail_image(
-        &mut self,
-        id: uuid::Uuid,
-        layer: &ImageLayer,
-        cx: &App,
-    ) -> Option<Arc<RenderImage>> {
-        let mask_selected = self.tab().session.read(cx).is_mask_selected && layer.mask.is_some();
-        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected))
-            && *rev == self.revision
-        {
-            return Some(image.clone());
-        }
-        let document = self.tab().session.read(cx).document.as_ref()?;
-        let canvas =
-            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
-        // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
-        // frame, whatever the layer's own bounds.
-        let thumbnail = if mask_selected {
-            render::mask_canvas_thumbnail(layer.mask.as_ref()?, &layer.mask_transform(), canvas)?
-        } else {
-            render::layer_canvas_thumbnail(layer, canvas)?
-        };
-        let image = bgra_render_image(&thumbnail);
-        self.thumbnails
-            .insert((id, mask_selected), (self.revision, image.clone()));
-        Some(image)
-    }
-
     // MARK: Status
 
     pub fn set_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.status = Some(message.into());
         self.touch(cx);
-    }
-
-    // MARK: Rename
-
-    pub fn begin_rename(&mut self, id: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .tab()
-            .session
-            .read(cx)
-            .document
-            .as_ref()
-            .and_then(|d| d.layer(id))
-            .map(|l| l.name.clone())
-            .unwrap_or_default();
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
-        let subscription = cx.subscribe(
-            &input,
-            |this: &mut Self,
-             _input,
-             event: &gpui_kit::component::input::InputEvent,
-             cx: &mut Context<Self>| {
-                match event {
-                    gpui_kit::component::input::InputEvent::PressEnter { .. }
-                    | gpui_kit::component::input::InputEvent::Blur => this.commit_rename(cx),
-                    _ => {}
-                }
-            },
-        );
-        self.subscriptions.push(subscription);
-        self.tab()
-            .session
-            .update(cx, |session, _| session.renaming_layer_id = Some(id));
-        self.rename_input = Some(input);
-        self.notify_only(cx);
-    }
-
-    pub fn commit_rename(&mut self, cx: &mut Context<Self>) {
-        let id = self.tab().session.read(cx).renaming_layer_id;
-        if let (Some(id), Some(input)) = (id, self.rename_input.clone()) {
-            let text = input.read(cx).value().to_string();
-            self.tab().session.update(cx, |session, _| {
-                session.rename_layer(id, &text);
-                session.renaming_layer_id = None;
-            });
-        }
-        self.rename_input = None;
-        self.touch(cx);
-    }
-
-    #[allow(dead_code)]
-    pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.renaming_layer_id = None);
-        self.rename_input = None;
-        self.notify_only(cx);
     }
 
     // MARK: Sheets
