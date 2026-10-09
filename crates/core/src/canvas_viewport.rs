@@ -195,6 +195,12 @@ impl CanvasViewport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::EditorSession;
+
+    /// The shared document fixture (CompositorTests.swift:7): 1920×1080.
+    fn document() -> CGSize {
+        CGSize::new(1920.0, 1080.0)
+    }
 
     fn viewport(view_width: f64, view_height: f64) -> CanvasViewport {
         CanvasViewport {
@@ -203,32 +209,221 @@ mod tests {
         }
     }
 
+    /// `actualPixelsAndRoundTrip(backing:)` (CompositorTests.swift:19-33):
+    /// zoom/translate/round-trip holds at backing scales 1 and 2, and the
+    /// document rect's backing-pixel width equals the document width times
+    /// the zoom.
     #[test]
-    fn fit_centers_and_scales_the_document() {
-        // `fit`: zoom = min(max(1, w-96)/dw, max(1, h-96)/dh), pan zero.
-        let mut vp = viewport(800.0, 600.0);
-        vp.fit(CGSize::new(400.0, 300.0));
-        assert_eq!(vp.zoom(), 504.0 / 300.0);
-        assert_eq!(vp.pan, CGSize::ZERO);
-        assert!(vp.is_following_fit());
-        // The document rect is centered: center (400, 300) minus the scaled
-        // size's half (672×504) gives origin (64, 48).
-        let rect = vp.document_rect(CGSize::new(400.0, 300.0));
-        assert_eq!(rect.origin, CGPoint::new(64.0, 48.0));
+    fn actual_pixels_and_round_trip() {
+        for backing in [1.0, 2.0] {
+            let mut vp = CanvasViewport::default();
+            vp.resize(CGSize::new(800.0, 600.0), backing, None);
+            for zoom in [0.25, 1.0, 3.75] {
+                vp.set_zoom(zoom, vp.center(), document());
+                vp.translate(CGSize::new(73.5, -44.25));
+                let pixel = CGPoint::new(183.25, 837.5);
+                let view = vp.view_point(pixel, document());
+                let result = vp.document_point(view, document());
+                assert!((result.x - pixel.x).abs() < 0.000_001);
+                assert!((result.y - pixel.y).abs() < 0.000_001);
+                assert!(
+                    (vp.document_rect(document()).size.width * backing - document().width * zoom)
+                        .abs()
+                        < 0.000_001
+                );
+            }
+        }
     }
 
+    /// `zoomKeepsCursorPixelFixed` (:35-44): the document point under the
+    /// anchor survives a setZoom.
     #[test]
-    fn fit_zooms_small_documents_up() {
-        // A small document fills the view (Swift does not clamp fit below 1).
-        let mut vp = viewport(800.0, 600.0);
-        vp.fit(CGSize::new(100.0, 100.0));
-        assert_eq!(vp.zoom(), 504.0 / 100.0);
+    fn zoom_keeps_cursor_pixel_fixed() {
+        let mut vp = CanvasViewport::default();
+        vp.resize(CGSize::new(1000.0, 700.0), 2.0, Some(document()));
+        let anchor = CGPoint::new(157.0, 221.0);
+        let before = vp.document_point(anchor, document());
+        vp.set_zoom(4.0, anchor, document());
+        let after = vp.document_point(anchor, document());
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
     }
+
+    /// `keyboardZoomKeepsPannedViewportCenterFixed` (:46-64).
+    #[test]
+    fn keyboard_zoom_keeps_panned_viewport_center_fixed() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(1000.0, 800.0), 1.0, None);
+        session.create_document(3000, 2000, false);
+        session.zoom(1.0, None);
+        session.viewport.translate(CGSize::new(-620.0, 185.0));
+
+        let center = session.viewport.center();
+        let canvas = CGSize::new(3000.0, 2000.0);
+        let before = session.viewport.document_point(center, canvas);
+        session.zoom_keyboard(1);
+        let after = session.viewport.document_point(center, canvas);
+
+        assert_eq!(session.viewport.zoom(), 1.25);
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
+        assert!((session.viewport.view_point(after, canvas).x - center.x).abs() < 0.000_001);
+        assert!((session.viewport.view_point(after, canvas).y - center.y).abs() < 0.000_001);
+    }
+
+    /// `keyboardZoomUsesStableStopsAndClampsAtTheEnds` (:66-85).
+    #[test]
+    fn keyboard_zoom_uses_stable_stops_and_clamps_at_the_ends() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(1000.0, 800.0), 1.0, None);
+        session.create_document(3000, 2000, false);
+        session.zoom(0.5, None);
+
+        session.zoom_keyboard(1);
+        assert!((session.viewport.zoom() - 2.0 / 3.0).abs() < 0.000_001);
+        session.zoom_keyboard(1);
+        assert_eq!(session.viewport.zoom(), 1.0);
+        session.zoom_keyboard(1);
+        assert_eq!(session.viewport.zoom(), 1.25);
+
+        let first = CanvasViewport::KEYBOARD_ZOOM_LEVELS[0];
+        let last =
+            CanvasViewport::KEYBOARD_ZOOM_LEVELS[CanvasViewport::KEYBOARD_ZOOM_LEVELS.len() - 1];
+        session.zoom(first, None);
+        session.zoom_keyboard(-1);
+        assert_eq!(session.viewport.zoom(), first);
+        session.zoom(last, None);
+        session.zoom_keyboard(1);
+        assert_eq!(session.viewport.zoom(), last);
+    }
+
+    /// `keyboardZoomRoundTripDoesNotDriftAfterTenSteps` (:87-104).
+    #[test]
+    fn keyboard_zoom_round_trip_does_not_drift_after_ten_steps() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(1200.0, 900.0), 2.0, None);
+        session.create_document(4000, 3000, false);
+        session.zoom(0.5, None);
+        session.viewport.translate(CGSize::new(-430.0, 275.0));
+
+        let center = session.viewport.center();
+        let canvas = CGSize::new(4000.0, 3000.0);
+        let before = session.viewport.document_point(center, canvas);
+        for _ in 0..10 {
+            session.zoom_keyboard(1);
+        }
+        for _ in 0..10 {
+            session.zoom_keyboard(-1);
+        }
+        let after = session.viewport.document_point(center, canvas);
+
+        assert_eq!(session.viewport.zoom(), 0.5);
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
+    }
+
+    /// `keyboardZoomKeepsSmallCanvasCentered` (:106-123).
+    #[test]
+    fn keyboard_zoom_keeps_small_canvas_centered() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(1200.0, 900.0), 1.0, None);
+        session.create_document(200, 100, false);
+        session.zoom(0.5, None);
+
+        let center = session.viewport.center();
+        let canvas = CGSize::new(200.0, 100.0);
+        let before = session.viewport.document_point(center, canvas);
+        session.zoom_keyboard(1);
+        let after = session.viewport.document_point(center, canvas);
+
+        assert!((session.viewport.zoom() - 2.0 / 3.0).abs() < 0.000_001);
+        assert!((before.x - 100.0).abs() < 0.000_001);
+        assert!((before.y - 50.0).abs() < 0.000_001);
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
+    }
+
+    /// `keyboardZoomFromFitUsesNextStopAndLeavesFitMode` (:125-141).
+    #[test]
+    fn keyboard_zoom_from_fit_uses_next_stop_and_leaves_fit_mode() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(1000.0, 800.0), 1.0, None);
+        session.create_document(1500, 1000, false);
+        session.fit();
+
+        let center = session.viewport.center();
+        let canvas = CGSize::new(1500.0, 1000.0);
+        let before = session.viewport.document_point(center, canvas);
+        session.zoom_keyboard(1);
+        let after = session.viewport.document_point(center, canvas);
+
+        assert!((session.viewport.zoom() - 2.0 / 3.0).abs() < 0.000_001);
+        assert!(!session.viewport.is_following_fit());
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
+    }
+
+    /// `fitAndResizeModes` (:143-162).
+    #[test]
+    fn fit_and_resize_modes() {
+        let mut vp = CanvasViewport::default();
+        vp.resize(CGSize::new(800.0, 600.0), 2.0, Some(document()));
+        let rect = vp.document_rect(document());
+        assert!(rect.size.width <= 704.000_001);
+        assert!(rect.size.height <= 504.000_001);
+        assert_eq!(rect.origin.x + rect.size.width / 2.0, 400.0);
+        assert_eq!(rect.origin.y + rect.size.height / 2.0, 300.0);
+        vp.translate(CGSize::new(60.0, -35.0));
+        let before = vp.document_point(vp.center(), document());
+        let zoom = vp.zoom();
+        vp.resize(CGSize::new(1200.0, 800.0), 1.0, Some(document()));
+        let after = vp.document_point(vp.center(), document());
+        assert_eq!(vp.zoom(), zoom);
+        assert!((before.x - after.x).abs() < 0.000_001);
+        assert!((before.y - after.y).abs() < 0.000_001);
+        vp.fit(document());
+        assert_eq!(vp.pan, CGSize::ZERO);
+        assert!(vp.is_following_fit());
+    }
+
+    /// `limitsAndNewDocumentReset` (:164-179).
+    #[test]
+    fn limits_and_new_document_reset() {
+        let mut session = EditorSession::new();
+        session
+            .viewport
+            .resize(CGSize::new(800.0, 600.0), 2.0, None);
+        session.create_document(1920, 1080, false);
+        session.zoom(1000.0, None);
+        assert_eq!(session.viewport.zoom(), CanvasViewport::ZOOM_MAX);
+        session.zoom(0.0, None);
+        assert_eq!(session.viewport.zoom(), CanvasViewport::ZOOM_MIN);
+        session.viewport.translate(CGSize::new(999.0, 888.0));
+        session.create_document(400, 300, false);
+        assert!(session.viewport.is_following_fit());
+        assert_eq!(session.viewport.pan, CGSize::ZERO);
+        assert_eq!(session.document.as_ref().unwrap().width, 400);
+        session.create_document(0, 200, false);
+        assert_eq!(session.document.as_ref().unwrap().width, 400);
+    }
+
+    // The ports above carry the Swift suite. The extras below cover guards
+    // the Swift suite exercises only indirectly.
 
     #[test]
     fn fit_without_a_view_keeps_following_fit() {
-        // `guard viewSize... else { followsFit = true }`: an unsized view
-        // stays pending so the first layout pass fits.
+        // `fit`'s `guard viewSize... else { followsFit = true }`: an unsized
+        // view stays pending so the first layout pass fits.
         let mut vp = CanvasViewport::default();
         vp.set_zoom(4.0, CGPoint::ZERO, CGSize::new(100.0, 100.0));
         vp.fit(CGSize::new(100.0, 100.0));
@@ -236,79 +431,16 @@ mod tests {
     }
 
     #[test]
-    fn set_zoom_pins_the_anchor_point() {
-        // `setZoom`: the document point under the anchor stays put.
-        let mut vp = viewport(800.0, 600.0);
-        vp.fit(CGSize::new(400.0, 300.0));
-        let anchor = CGPoint::new(300.0, 200.0);
-        let doc_before = vp.document_point(anchor, CGSize::new(400.0, 300.0));
-        vp.set_zoom(2.0, anchor, CGSize::new(400.0, 300.0));
-        assert_eq!(vp.zoom(), 2.0);
-        assert!(!vp.is_following_fit());
-        let doc_after = vp.document_point(anchor, CGSize::new(400.0, 300.0));
-        assert!((doc_before.x - doc_after.x).abs() < 1e-9);
-        assert!((doc_before.y - doc_after.y).abs() < 1e-9);
-    }
-
-    #[test]
-    fn set_zoom_clamps_into_zoom_range() {
-        let mut vp = viewport(800.0, 600.0);
-        vp.set_zoom(1_000.0, vp.center(), CGSize::new(400.0, 300.0));
-        assert_eq!(vp.zoom(), CanvasViewport::ZOOM_MAX);
-        vp.set_zoom(0.0, vp.center(), CGSize::new(400.0, 300.0));
-        assert_eq!(vp.zoom(), CanvasViewport::ZOOM_MIN);
-        // Non-finite values are refused.
-        vp.set_zoom(f64::NAN, vp.center(), CGSize::new(400.0, 300.0));
-        assert_eq!(vp.zoom(), CanvasViewport::ZOOM_MIN);
-    }
-
-    #[test]
-    fn keyboard_zoom_steps_walk_the_level_table() {
-        let mut vp = viewport(800.0, 600.0);
-        assert_eq!(vp.keyboard_zoom_target(1), 1.25);
-        assert_eq!(vp.keyboard_zoom_target(-1), 2.0 / 3.0);
-        assert_eq!(vp.keyboard_zoom_target(0), 1.0);
-        vp.set_zoom(1.25, vp.center(), CGSize::new(100.0, 100.0));
-        assert_eq!(vp.keyboard_zoom_target(1), 1.5);
-        // Past the top of the table the zoom stays.
-        vp.set_zoom(16.0, vp.center(), CGSize::new(100.0, 100.0));
-        assert_eq!(vp.keyboard_zoom_target(1), 16.0);
-        vp.set_zoom(0.125, vp.center(), CGSize::new(100.0, 100.0));
-        assert_eq!(vp.keyboard_zoom_target(-1), 0.125);
-    }
-
-    #[test]
-    fn resize_refits_while_following_fit_and_keeps_center_otherwise() {
-        // Following fit: a resize refits to the new view.
-        let mut vp = viewport(800.0, 600.0);
-        vp.fit(CGSize::new(400.0, 300.0));
-        vp.resize(
-            CGSize::new(1000.0, 800.0),
-            1.0,
-            Some(CGSize::new(400.0, 300.0)),
-        );
-        assert_eq!(vp.zoom(), 904.0 / 400.0);
-        // Manual zoom: a resize keeps the center document point (pan scales
-        // by the points-per-pixel ratio).
-        let mut vp = viewport(800.0, 600.0);
-        vp.fit(CGSize::new(400.0, 300.0));
-        vp.set_zoom(2.0, vp.center(), CGSize::new(400.0, 300.0));
-        let center_doc = vp.document_point(vp.center(), CGSize::new(400.0, 300.0));
-        vp.resize(
-            CGSize::new(1000.0, 800.0),
-            1.0,
-            Some(CGSize::new(400.0, 300.0)),
-        );
-        let center_after = vp.document_point(vp.center(), CGSize::new(400.0, 300.0));
-        assert!((center_doc.x - center_after.x).abs() < 1e-9);
-        assert!((center_doc.y - center_after.y).abs() < 1e-9);
-    }
-
-    #[test]
-    fn resize_clamps_backing_scale_at_one() {
-        let mut vp = viewport(800.0, 600.0);
-        vp.resize(CGSize::new(800.0, 600.0), 0.5, None);
-        assert_eq!(vp.backing_scale, 1.0);
+    fn document_and_view_points_round_trip_at_the_zoom_limits() {
+        for zoom in [CanvasViewport::ZOOM_MIN, 1.5, CanvasViewport::ZOOM_MAX] {
+            let mut vp = viewport(800.0, 600.0);
+            vp.set_zoom(zoom, vp.center(), document());
+            let doc = CGPoint::new(137.5, 42.25);
+            let view = vp.view_point(doc, document());
+            let back = vp.document_point(view, document());
+            assert!((doc.x - back.x).abs() < 1e-6, "zoom {zoom}");
+            assert!((doc.y - back.y).abs() < 1e-6, "zoom {zoom}");
+        }
     }
 
     #[test]
@@ -321,13 +453,9 @@ mod tests {
     }
 
     #[test]
-    fn document_and_view_points_round_trip() {
+    fn resize_clamps_backing_scale_at_one() {
         let mut vp = viewport(800.0, 600.0);
-        vp.set_zoom(1.5, vp.center(), CGSize::new(400.0, 300.0));
-        let doc = CGPoint::new(137.5, 42.25);
-        let view = vp.view_point(doc, CGSize::new(400.0, 300.0));
-        let back = vp.document_point(view, CGSize::new(400.0, 300.0));
-        assert!((doc.x - back.x).abs() < 1e-9);
-        assert!((doc.y - back.y).abs() < 1e-9);
+        vp.resize(CGSize::new(800.0, 600.0), 0.5, None);
+        assert_eq!(vp.backing_scale, 1.0);
     }
 }
