@@ -15,7 +15,7 @@ use compositor_core::session::SelectionAmountOperation;
 
 use crate::keys;
 use crate::project::{Pending, Step};
-use crate::state::{AppState, FitDims, SaveAfter, Sheet};
+use crate::state::{AppState, SaveAfter, Sheet};
 use crate::ui::{FG_DIM, text_label};
 
 impl Render for AppState {
@@ -455,7 +455,6 @@ impl AppState {
         // `newCanvas` (:53-57): a fresh tab, no modal.
         if self.workspace.new_canvas(cx) {
             self.sync_session_observer(cx);
-            self.request_refit();
             self.touch(cx);
         }
     }
@@ -532,7 +531,6 @@ impl AppState {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {
                 self.sync_session_observer(cx);
-                self.request_refit();
                 self.touch(cx);
             }
         }
@@ -555,47 +553,14 @@ impl AppState {
     // MARK: Edit
 
     fn on_undo(&mut self, _: &keys::Undo, _w: &mut Window, cx: &mut Context<Self>) {
-        // A restored document of a different size refits the viewport
-        // (EditorSession.undo → viewport.fit).
-        let before = self
-            .tab()
-            .session
-            .read(cx)
-            .document
-            .as_ref()
-            .map(|d| (d.id, d.width, d.height));
+        // A restored document of a different canvas refits the viewport
+        // inside the session (`restore` → `changedCanvas`, ticket 38).
         self.tab().session.update(cx, |session, _| session.undo());
-        self.refit_if_document_changed(before, cx);
         self.touch(cx);
     }
     fn on_redo(&mut self, _: &keys::Redo, _w: &mut Window, cx: &mut Context<Self>) {
-        let before = self
-            .tab()
-            .session
-            .read(cx)
-            .document
-            .as_ref()
-            .map(|d| (d.id, d.width, d.height));
         self.tab().session.update(cx, |session, _| session.redo());
-        self.refit_if_document_changed(before, cx);
         self.touch(cx);
-    }
-    /// Refits the viewport when undo/redo swapped in a different document.
-    fn refit_if_document_changed(&mut self, before: Option<(uuid::Uuid, usize, usize)>, cx: &App) {
-        let after = self
-            .tab()
-            .session
-            .read(cx)
-            .document
-            .as_ref()
-            .map(|d| (d.id, d.width, d.height));
-        if before.is_some() && before != after {
-            let vw = f32::from(self.viewport.size.width);
-            let vh = f32::from(self.viewport.size.height);
-            if vw > 10.0 && vh > 10.0 {
-                self.zoom_fit((vw, vh), cx);
-            }
-        }
     }
     fn on_fill_foreground(
         &mut self,
@@ -1193,20 +1158,27 @@ impl AppState {
         self.touch(cx);
     }
     fn on_zoom_in(&mut self, _: &keys::ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_at_viewport(2.0);
+        // Zoom In/Out walk the stable keyboard levels (CompositorApp.swift:91-96).
+        self.tab()
+            .session
+            .update(cx, |session, _| session.zoom_keyboard(1));
         self.touch(cx);
     }
     fn on_zoom_out(&mut self, _: &keys::ZoomOut, _w: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_at_viewport(0.5);
+        self.tab()
+            .session
+            .update(cx, |session, _| session.zoom_keyboard(-1));
         self.touch(cx);
     }
     fn on_zoom_fit(&mut self, _: &keys::ZoomFit, _w: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_fit(self.viewport_size(), cx);
+        self.zoom_fit(cx);
         self.touch(cx);
     }
     fn on_zoom_100(&mut self, _: &keys::Zoom100, _w: &mut Window, cx: &mut Context<Self>) {
-        self.zoom = 1.0;
-        self.revision += 1;
+        // Actual Pixels: `session.zoom(to: 1)` (CompositorApp.swift:88).
+        self.tab()
+            .session
+            .update(cx, |session, _| session.zoom(1.0, None));
         self.touch(cx);
     }
 
@@ -1600,7 +1572,6 @@ impl AppState {
                 } else {
                     this.set_status(failures.join("; "), cx);
                 }
-                this.fit_for = FitDims::REFIT;
                 this.touch(cx);
             })
             .ok();
@@ -1620,18 +1591,6 @@ impl AppState {
         if self.canvas_keys_active(window, cx) {
             body(self, window, cx);
         }
-    }
-
-    pub(crate) fn zoom_at_viewport(&mut self, factor: f64) {
-        let size = self.viewport_size();
-        self.zoom_at((size.0 / 2.0, size.1 / 2.0), factor);
-    }
-
-    pub(crate) fn viewport_size(&self) -> (f32, f32) {
-        (
-            f32::from(self.viewport.size.width),
-            f32::from(self.viewport.size.height),
-        )
     }
 
     fn nudge(&mut self, dx: f64, dy: f64, large: bool, w: &mut Window, cx: &mut Context<Self>) {
@@ -1670,7 +1629,10 @@ impl AppState {
                 session.brush_error.clone(),
             )
         };
-        let zoom = format!("{:.0}%", self.zoom * 100.0);
+        let zoom = format!(
+            "{:.0}%",
+            self.current_tab().session.read(cx).viewport.zoom() * 100.0
+        );
         let undo_text = if can_undo {
             format!("Undo: {}", undo)
         } else {

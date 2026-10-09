@@ -936,15 +936,15 @@ impl AppState {
     /// lands there on the first open. Uses the canvas paint area's bounds;
     /// before the first layout pass it falls back to the window's center.
     fn panel_canvas_center(&self, window: &mut Window) -> (f32, f32) {
-        let viewport = self.viewport;
+        let canvas_bounds = self.canvas_bounds;
         let (w, h) = (
-            f32::from(viewport.size.width),
-            f32::from(viewport.size.height),
+            f32::from(canvas_bounds.size.width),
+            f32::from(canvas_bounds.size.height),
         );
         if w > 1.0 && h > 1.0 {
             (
-                f32::from(viewport.origin.x) + w / 2.0,
-                f32::from(viewport.origin.y) + h / 2.0,
+                f32::from(canvas_bounds.origin.x) + w / 2.0,
+                f32::from(canvas_bounds.origin.y) + h / 2.0,
             )
         } else {
             let size = window.viewport_size();

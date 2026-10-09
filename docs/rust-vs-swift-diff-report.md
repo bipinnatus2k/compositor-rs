@@ -4,6 +4,45 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-09：废除 AppState 票 38——viewport 进 core session）
+
+`CanvasViewport`（`Rendering/CanvasViewport.swift`）全量移植为 core
+`canvas_viewport` 模块并挂上 `EditorSession.viewport`（Swift
+EditorSession.swift:170），session 增 `fit()`/`zoom(to:anchor:)`/
+`zoomKeyboard(by:)`（:908-924）；五个 fit 点随行落位——create_document
+(:904)、insert_image 首文档分支(:795-798)、import_photoshop_data 首文档
+分支(:862-866)、install_project（Projects.swift:39）、restore 的
+`changedCanvas`(:585-590)。app 侧 `zoom`/`pan`/`fit_for`/`fit_tab`/
+`FitDims`/`MIN_ZOOM`/`clamp_zoom`/`doc_to_screen_at` 家族与
+`request_refit` 全删，13 处 refit 站点清零；`AppState.viewport`（画布
+绘制区 Bounds）更名 `canvas_bounds` 避撞名。裁定全文见
+`docs/adr/0003-abolish-appstate-dual-mirror.md`（票序 A）。
+
+**销账的偏差**：viewport 结构性窗口级偏离（D 步二记录的「zoom/pan/fit
+为窗口级状态」）自此消除——视口逐 tab 持有，切 tab 还原（Swift `.id`
+重建的另一半语义）；`MIN_ZOOM 0.008` 让位于 Swift `zoomRange
+0.001...32`；project.rs 的 .comp 打开路径由内联 install 复写收敛为
+`session.install_project`（补齐 project_url、折叠态清理、pending 手势
+取消等 installProject 语义）。
+
+**行为变化（朝 parity，逐条）**：切 tab 从 refit 近似改为还原每 tab
+视口；fit 边距 48→96 且小文档放大填充（Swift fit 不钳 ≤1.0）；窗口
+resize 且 `followsFit` 时持续 refit（Swift syncGeometry 语义，Rust
+画布帧准备镜像之）；undo/redo 仅在 canvas id 变化时 refit（Swift
+`changedCanvas`，原为 (id,w,h) 变化即 refit）；Cmd 加减号走 17 档
+`keyboardZoomLevels`（原 2×/0.5× 倍乘）；Actual Pixels 走
+`session.zoom(to: 1)` 居中锚定（原裸赋值 pan 不动）；手型平移改增量
+`translate(by:)`（镜像 EditorCanvas.swift:1616）；zoom/pan 不再 bump
+revision——composite 与视口无关，帧缓存不再因视口变化失效（票 37 缓存
+作用域化的前置兑现）。
+
+**测试**：app 4 个旧 zoom/pan 映射测试的覆盖随纯函数迁 core（新增 10
+个 `canvas_viewport` 语义测试），909 全绿 = core 624 + app 175 + 集成
+110；断言零改动（构造机械适配）。**留档偏差**：`backing_scale` 恒
+1.0（Rust 从未处理 Retina 系数，Swift 用真实 backingScale——沿用既有
+HiDPI 偏差）；`transform_overlay` 的 dead-code `new(transform, zoom,
+pan)` 未随改，待变换柄票接线。
+
 ## 架构裁定（2026-10-09：UI 组件一律为 struct 组件）
 
 app 侧 36 个返回 `impl IntoElement` 的自由函数组件全部 struct 化

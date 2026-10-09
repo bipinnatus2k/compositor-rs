@@ -5,7 +5,7 @@
 use gpui_kit::{Context, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px};
 
 use crate::project::Step;
-use crate::state::{AppState, FitDims};
+use crate::state::AppState;
 
 /// `projectTabLabelWidth` (ProjectTabs.swift:59-64): the title's rendered
 /// width plus the 10px unsaved dot when it shows, clamped to 35...155. The
@@ -56,7 +56,6 @@ impl AppState {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.workspace.select(id, cx) {
                         this.sync_session_observer(cx);
-                        this.request_refit();
                         this.touch(cx);
                     }
                 }));
@@ -78,7 +77,6 @@ impl AppState {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(()) => {
                                 this.sync_session_observer(cx);
-                                this.request_refit();
                                 this.touch(cx);
                             }
                         }
@@ -99,7 +97,6 @@ impl AppState {
                     if this.workspace.can_switch(cx) {
                         this.workspace.add_tab(true, cx);
                         this.sync_session_observer(cx);
-                        this.request_refit();
                         this.touch(cx);
                     }
                 })),
@@ -127,7 +124,6 @@ impl AppState {
                 if !failures.is_empty() {
                     this.set_status(failures.join("; "), cx);
                 }
-                this.fit_for = FitDims::REFIT;
                 this.touch(cx);
             }))
             .child(bar)

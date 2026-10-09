@@ -17,6 +17,7 @@
 //! - `session` ← `EditorSession` operation logic
 
 pub mod blend;
+pub mod canvas_viewport;
 pub mod document;
 pub mod effects;
 pub mod geometry;

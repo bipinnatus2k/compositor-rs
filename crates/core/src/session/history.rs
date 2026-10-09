@@ -87,6 +87,9 @@ impl EditorSession {
         // layer (`keepMaskTarget`).
         let keep_mask_target =
             self.is_mask_selected && self.active_layer_id == snapshot.active_layer_id;
+        // `changedCanvas` (EditorSession.swift:585) — computed pre-swap.
+        let changed_canvas =
+            self.document.as_ref().map(|d| d.id) != snapshot.document.as_ref().map(|d| d.id);
         self.document = snapshot.document;
         self.active_layer_id = snapshot.active_layer_id;
         if let Some(id) = self.active_layer_id {
@@ -97,9 +100,13 @@ impl EditorSession {
                 .active_layer()
                 .map(|l| l.mask.is_some())
                 .unwrap_or(false);
-        // Swift then refits the viewport when the canvas itself changed
-        // (`viewport.fit(documentSize:)`); the core session has no viewport,
-        // so that stays with the app.
+        // `restore` refits the viewport when the canvas itself changed
+        // (`viewport.fit(documentSize:)`, EditorSession.swift:590).
+        if changed_canvas {
+            if let Some(size) = self.document_size() {
+                self.viewport.fit(size);
+            }
+        }
     }
 
     pub fn is_modified(&self) -> bool {

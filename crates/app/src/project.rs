@@ -26,7 +26,7 @@ use compositor_core::geometry::CGPoint;
 use compositor_core::raster::Bitmap;
 use compositor_core::session::EditorSession;
 
-use crate::state::{AppState, FitDims};
+use crate::state::AppState;
 
 /// A tab's identity (`ProjectTab.id`, a `UUID` in Swift). Declared here so
 /// `Pending::Confirm` can name the tab being asked about.
@@ -874,24 +874,23 @@ impl AppState {
         let dir = std::path::PathBuf::from(path);
         if dir.is_dir() || path.ends_with(".comp") {
             match compositor_core::project::load(&dir) {
-                Ok(data) => match compositor_core::project::document_from_project(&data) {
-                    Ok((document, active)) => {
-                        self.tab().session.update(cx, |session, _| {
-                            session.active_layer_id =
-                                active.or_else(|| document.layers.last().map(|layer| layer.id));
-                            session.selected_layer_ids = session
-                                .active_layer_id
-                                .map(|id| vec![id])
-                                .unwrap_or_default();
-                            session.document = Some(document);
-                            session.history.reset();
+                Ok(data) => {
+                    // `installProject` (EditorSession+Projects.swift:30-40):
+                    // validate, swap the whole project in, reset history,
+                    // fit the viewport. The reload marks the project saved
+                    // right after (ProjectController's same-path reload).
+                    let installed = self.tab().session.update(cx, |session, _| {
+                        let installed = session.install_project(&data, &dir);
+                        if installed.is_ok() {
                             session.mark_saved();
-                        });
-                        self.fit_for = FitDims::REFIT;
-                        self.set_status(format!("Opened {}", dir.display()), cx);
+                        }
+                        installed
+                    });
+                    match installed {
+                        Ok(()) => self.set_status(format!("Opened {}", dir.display()), cx),
+                        Err(error) => self.set_status(format!("Open failed: {}", error), cx),
                     }
-                    Err(error) => self.set_status(format!("Open failed: {}", error), cx),
-                },
+                }
                 Err(error) => self.set_status(format!("Open failed: {}", error), cx),
             }
             return;
@@ -917,7 +916,6 @@ impl AppState {
                 .update(cx, |session, _| session.import_photoshop_data(&name, &data))
             {
                 Ok(notes) => {
-                    self.fit_for = FitDims::REFIT;
                     self.set_status(
                         if notes > 0 {
                             format!(
@@ -973,7 +971,6 @@ impl AppState {
                     },
                     cx,
                 );
-                self.fit_for = FitDims::REFIT;
                 self.set_status(format!("Opened {}", path), cx);
             }
             Err(error) => self.set_status(format!("Open failed: {}", error), cx),

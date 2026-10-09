@@ -29,33 +29,13 @@ use compositor_core::transform::LayerTransform;
 use crate::canvas::inline_text_editor::inline_text_key;
 
 pub const RULER_SIZE: f32 = 20.0;
-pub const MIN_ZOOM: f64 = 0.008;
-pub const MAX_ZOOM: f64 = 32.0;
-
-/// Document coordinates to viewport pixels under the given zoom and pan.
-/// Pure so tests can cover it without a window.
-pub fn doc_to_screen_at(zoom: f64, pan: (f64, f64), x: f64, y: f64) -> (f32, f32) {
-    ((x * zoom + pan.0) as f32, (y * zoom + pan.1) as f32)
-}
-
-/// Viewport pixels back to document coordinates; the inverse of
-/// `doc_to_screen_at`.
-pub fn screen_to_doc_at(zoom: f64, pan: (f64, f64), x: f32, y: f32) -> CGPoint {
-    CGPoint::new((x as f64 - pan.0) / zoom, (y as f64 - pan.1) / zoom)
-}
-
-/// Clamps a zoom factor to the editor's supported range.
-pub fn clamp_zoom(zoom: f64) -> f64 {
-    zoom.clamp(MIN_ZOOM, MAX_ZOOM)
-}
 
 /// What the pointer is currently doing on the canvas.
 pub enum CanvasDrag {
-    /// Hand tool or middle-mouse panning.
-    Pan {
-        start: Point<Pixels>,
-        start_pan: (f64, f64),
-    },
+    /// Hand tool or middle-mouse panning. `last` is the previous event
+    /// position: each move translates the session viewport by the delta
+    /// (Swift's incremental `viewport.translate(by:)`).
+    Pan { last: Point<Pixels> },
     /// A brush-family stroke in progress on the layer captured at
     /// `begin_stroke` (EditorSession+Brush.swift:130-133 commits to the
     /// captured layer, never to whatever is active at mouse-up).
@@ -313,19 +293,19 @@ pub fn transform_field_texts(
 pub struct AppState {
     pub workspace: crate::tabs::ProjectWorkspace,
     pub focus: FocusHandle,
-    /// Screen pixels per document pixel.
-    pub zoom: f64,
-    /// Document (0, 0) in viewport pixels.
-    pub pan: (f64, f64),
-    /// Bumped on every session/viewport mutation; invalidates the frame image.
+    /// Bumped on every session mutation; invalidates the frame image. Zoom
+    /// and pan live on the session's `CanvasViewport` (per tab, ticket 38)
+    /// and redraw through the paint transform without touching this.
     pub revision: u64,
     frame_image: Option<Arc<RenderImage>>,
     frame_image_rev: u64,
     /// The tab the cached frame was rendered for — the cache key is
     /// `(tab_id, revision)`, so switching tabs never shows a stale frame.
     frame_image_tab: crate::project::TabId,
-    /// The canvas paint area, updated by every frame.
-    pub viewport: Bounds<Pixels>,
+    /// The canvas paint area in window coordinates, updated by every frame.
+    /// (The document view transform is the session's `CanvasViewport`; this
+    /// is the window geometry the canvas element paints into.)
+    pub canvas_bounds: Bounds<Pixels>,
     pub drag: Option<CanvasDrag>,
     pub sheet: Option<SheetState>,
     /// The floating panels (design doc §5): the registry of open panels plus
@@ -338,11 +318,6 @@ pub struct AppState {
     /// ticket 35).
     pub rename_input: Option<Entity<InputState>>,
     thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
-    /// Document dims the viewport was last fit for, and the tab it was fit
-    /// for: Swift rebuilds the view per tab (`.id(tab.id)`), so a tab switch
-    /// refits the viewport too.
-    pub fit_for: FitDims,
-    pub fit_tab: crate::project::TabId,
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
     pub preview_base: Option<Arc<Bitmap>>,
@@ -503,21 +478,6 @@ pub(crate) fn delete_ask_targets(
         .collect()
 }
 
-/// Document pixel dimensions the viewport was last fit for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FitDims {
-    pub width: usize,
-    pub height: usize,
-}
-
-impl FitDims {
-    /// The sentinel meaning "refit requested" — no real document is 0×0.
-    pub const REFIT: FitDims = FitDims {
-        width: 0,
-        height: 0,
-    };
-}
-
 impl AppState {
     /// The current tab (its session entity and controller) — the rewrite of
     /// every former `self.tab().session` call site (design doc §1).
@@ -584,13 +544,11 @@ impl AppState {
         let mut state = AppState {
             workspace,
             focus: cx.focus_handle(),
-            zoom: 1.0,
-            pan: (0.0, 0.0),
             revision: 1,
             frame_image: None,
             frame_image_rev: 0,
             frame_image_tab: crate::project::TabId::nil(),
-            viewport: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
+            canvas_bounds: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
             drag: None,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
@@ -598,8 +556,6 @@ impl AppState {
             status: None,
             rename_input: None,
             thumbnails: HashMap::new(),
-            fit_for: FitDims::REFIT,
-            fit_tab: crate::project::TabId::nil(),
             preview_base: None,
             camera_raw_samples_defringe: false,
             camera_raw_readout: None,
@@ -1450,61 +1406,50 @@ impl AppState {
             .unwrap_or((0.0, 0.0))
     }
 
-    pub fn doc_to_screen(&self, x: f64, y: f64) -> (f32, f32) {
-        doc_to_screen_at(self.zoom, self.pan, x, y)
+    /// The active tab's view transform (`CanvasViewport` is `Copy`); the
+    /// mapping methods below mirror Swift's direct `session.viewport` reads.
+    pub fn canvas_viewport(&self, cx: &App) -> compositor_core::canvas_viewport::CanvasViewport {
+        self.current_tab().session.read(cx).viewport
     }
 
-    pub fn screen_to_doc(&self, x: f32, y: f32) -> CGPoint {
-        screen_to_doc_at(self.zoom, self.pan, x, y)
-    }
-
-    /// The document rect in viewport pixels.
-    pub fn image_rect(&self, cx: &App) -> Bounds<Pixels> {
+    pub fn doc_to_screen(&self, cx: &App, x: f64, y: f64) -> (f32, f32) {
+        let viewport = self.canvas_viewport(cx);
         let (w, h) = self.doc_size(cx);
-        let (x, y) = self.doc_to_screen(0.0, 0.0);
+        let point = viewport.view_point(CGPoint::new(x, y), CGSize::new(w, h));
+        (point.x as f32, point.y as f32)
+    }
+
+    pub fn screen_to_doc(&self, cx: &App, x: f32, y: f32) -> CGPoint {
+        let viewport = self.canvas_viewport(cx);
+        let (w, h) = self.doc_size(cx);
+        viewport.document_point(CGPoint::new(x as f64, y as f64), CGSize::new(w, h))
+    }
+
+    /// The document rect in canvas pixels.
+    pub fn image_rect(&self, cx: &App) -> Bounds<Pixels> {
+        let viewport = self.canvas_viewport(cx);
+        let (w, h) = self.doc_size(cx);
+        let per_pixel = viewport.points_per_pixel();
+        let origin = viewport.view_point(CGPoint::ZERO, CGSize::new(w, h));
         Bounds::<Pixels>::new(
-            Point::new(px(x), px(y)),
-            gpui_kit::size(px((w * self.zoom) as f32), px((h * self.zoom) as f32)),
+            Point::new(px(origin.x as f32), px(origin.y as f32)),
+            gpui_kit::size(px((w * per_pixel) as f32), px((h * per_pixel) as f32)),
         )
     }
 
-    pub fn zoom_at(&mut self, screen: (f32, f32), factor: f64) {
-        let doc = self.screen_to_doc(screen.0, screen.1);
-        self.zoom = clamp_zoom(self.zoom * factor);
-        self.pan = (
-            screen.0 as f64 - doc.x * self.zoom,
-            screen.1 as f64 - doc.y * self.zoom,
-        );
-        self.revision += 1;
+    /// Zoom by a factor with the document point under `screen` pinned
+    /// (`session.zoom(to:anchor:)`, EditorSession.swift:913-916).
+    pub fn zoom_at(&mut self, screen: (f32, f32), factor: f64, cx: &mut Context<Self>) {
+        let current = self.current_tab().session.read(cx).viewport.zoom();
+        let anchor = CGPoint::new(screen.0 as f64, screen.1 as f64);
+        self.tab().session.update(cx, |session, _| {
+            session.zoom(current * factor, Some(anchor))
+        });
     }
 
-    pub fn zoom_fit(&mut self, viewport: (f32, f32), cx: &App) {
-        let (w, h) = self.doc_size(cx);
-        if w <= 0.0 || h <= 0.0 || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
-            return;
-        }
-        let margin = 48.0f64;
-        let zoom = ((viewport.0 as f64 - margin) / w)
-            .min((viewport.1 as f64 - margin) / h)
-            .clamp(MIN_ZOOM, 1.0);
-        self.zoom = zoom;
-        self.pan = (
-            (viewport.0 as f64 - w * zoom) / 2.0,
-            (viewport.1 as f64 - h * zoom) / 2.0,
-        );
-        self.fit_for = FitDims {
-            width: w as usize,
-            height: h as usize,
-        };
-        self.fit_tab = self.workspace.selected_id();
-        self.revision += 1;
-    }
-
-    /// Requests a viewport refit on the next canvas layout pass (Swift's
-    /// view rebuild on a tab switch or a document size change).
-    pub fn request_refit(&mut self) {
-        self.fit_for = FitDims::REFIT;
-        self.fit_tab = crate::project::TabId::nil();
+    /// `session.fit()` — View > Fit Canvas (EditorSession.swift:908-911).
+    pub fn zoom_fit(&mut self, cx: &mut Context<Self>) {
+        self.tab().session.update(cx, |session, _| session.fit());
     }
 
     // MARK: Frame image
@@ -2019,21 +1964,14 @@ pub fn byte_count_label(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_ZOOM, MIN_ZOOM, TransformField, byte_count_label, clamp_font_size, clamp_zoom,
-        doc_to_screen_at, format_number, leading_from_text, leading_to_text, normalize_rotation,
-        parse_field, resize_transform, screen_to_doc_at, transform_field_texts,
+        TransformField, byte_count_label, clamp_font_size, format_number, leading_from_text,
+        leading_to_text, normalize_rotation, parse_field, resize_transform, transform_field_texts,
     };
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::LayerTransform;
 
-    #[test]
-    fn doc_to_screen_applies_zoom_and_pan() {
-        // A 100x100 document at 2x zoom, panned so its origin sits at (40, 30).
-        let (sx, sy) = doc_to_screen_at(2.0, (40.0, 30.0), 10.0, 5.0);
-        assert_eq!((sx, sy), (60.0, 40.0));
-        // Identity zoom and zero pan map document coordinates unchanged.
-        assert_eq!(doc_to_screen_at(1.0, (0.0, 0.0), 12.5, 3.25), (12.5, 3.25));
-    }
+    // The doc↔screen mapping and zoom-clamp coverage moved with the viewport
+    // onto the core session (crates/core/src/canvas_viewport.rs, ticket 38).
 
     /// ByteCountFormatter's file style: decimal units, one decimal while
     /// under ten of the unit.
@@ -2045,36 +1983,6 @@ mod tests {
         assert_eq!(byte_count_label(1_234_000), "1.2 MB");
         assert_eq!(byte_count_label(12_400_000), "12 MB");
         assert_eq!(byte_count_label(2_500_000_000), "2.5 GB");
-    }
-
-    #[test]
-    fn screen_doc_roundtrip_recovers_document_point() {
-        let zoom = 0.35;
-        let pan = (-123.0, 456.5);
-        let (sx, sy) = doc_to_screen_at(zoom, pan, 88.0, -21.0);
-        let doc = screen_to_doc_at(zoom, pan, sx, sy);
-        // Screen coordinates are f32, so the roundtrip loses some precision.
-        assert!((doc.x - 88.0).abs() < 1e-3, "x = {}", doc.x);
-        assert!((doc.y - -21.0).abs() < 1e-3, "y = {}", doc.y);
-    }
-
-    #[test]
-    fn clamp_zoom_keeps_zoom_in_range() {
-        assert_eq!(clamp_zoom(1.0), 1.0);
-        assert_eq!(clamp_zoom(0.000_001), MIN_ZOOM);
-        assert_eq!(clamp_zoom(1_000.0), MAX_ZOOM);
-        assert_eq!(clamp_zoom(2.5), 2.5);
-    }
-
-    #[test]
-    fn screen_doc_roundtrip_holds_at_zoom_extremes() {
-        for zoom in [MIN_ZOOM, 0.1, 1.0, 8.0, MAX_ZOOM] {
-            let pan = (37.5, -18.25);
-            let (sx, sy) = doc_to_screen_at(zoom, pan, 250.0, 90.0);
-            let doc = screen_to_doc_at(zoom, pan, sx, sy);
-            assert!((doc.x - 250.0).abs() < 1e-2, "zoom {zoom}: x = {}", doc.x);
-            assert!((doc.y - 90.0).abs() < 1e-2, "zoom {zoom}: y = {}", doc.y);
-        }
     }
 
     #[test]

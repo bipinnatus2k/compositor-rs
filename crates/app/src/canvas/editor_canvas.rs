@@ -14,6 +14,7 @@ use gpui_kit::{
 use gpui_kit::{DragMoveEvent, ExternalPaths};
 
 use compositor_core::canvas::CropDragMode;
+use compositor_core::canvas_viewport::CanvasViewport;
 use compositor_core::document::LayoutGrid;
 use compositor_core::document::{CanvasDocument, GuideAxis, ImageLayer, NavigationTool};
 use compositor_core::geometry::{CGPoint, CGRect, CGSize};
@@ -27,7 +28,7 @@ use crate::canvas::inline_text_editor::{
     inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_overflows,
     inline_text_resize,
 };
-use crate::state::{AppState, CanvasDrag, FitDims, RULER_SIZE};
+use crate::state::{AppState, CanvasDrag, RULER_SIZE};
 
 /// `guideHitDistance` (Guides.swift): how close a Move press must land to a
 /// guide to take it, in screen points.
@@ -41,8 +42,8 @@ pub struct CanvasScene {
     pub image: Option<Arc<RenderImage>>,
     pub image_rect: Bounds<Pixels>,
     pub rulers: bool,
-    pub zoom: f64,
-    pub pan: (f64, f64),
+    /// The frame's view transform snapshot (`CanvasViewport` is `Copy`).
+    pub viewport: CanvasViewport,
     pub doc: (f64, f64),
     pub guides: Vec<(bool, f32)>,
     pub grid: Vec<(f32, bool, bool)>,
@@ -94,11 +95,11 @@ impl AppState {
                 style.bg(gpui_kit::rgb(crate::ui::BG_DROP_AREA))
             })
             .on_drag_move::<ExternalPaths>(cx.listener(
-                |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {
+                |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
                     // Remember the hover point in document coordinates: the
                     // drop lands its imports there (ImageFileDrop's point).
                     let local = this.local_position(event.event.position);
-                    this.drop_point_doc = Some(this.screen_to_doc(local.0, local.1));
+                    this.drop_point_doc = Some(this.screen_to_doc(cx, local.0, local.1));
                 },
             ))
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
@@ -121,27 +122,30 @@ impl AppState {
                     move |bounds, _window, cx| {
                         app_prepaint
                             .update(cx, |state, cx| {
-                                state.viewport = bounds;
+                                state.canvas_bounds = bounds;
+                                // `syncGeometry` (EditorCanvas.swift:719-728):
+                                // the canvas size lives on the session
+                                // viewport; a change resizes it, which refits
+                                // while the viewport still follows fit.
                                 let vw = f32::from(bounds.size.width);
                                 let vh = f32::from(bounds.size.height);
-                                let dims = {
-                                    let (w, h) = state.doc_size(cx);
-                                    FitDims {
-                                        width: w as usize,
-                                        height: h as usize,
-                                    }
-                                };
-                                // Swift rebuilds the view per tab
-                                // (`.id(tab.id)`), so a tab switch refits
-                                // just like a document size change.
-                                let tab_changed = state.fit_tab != state.workspace.selected_id();
-                                if (dims != state.fit_for || tab_changed)
-                                    && dims.width > 0
-                                    && vw > 10.0
-                                    && vh > 10.0
-                                {
-                                    state.zoom_fit((vw, vh), cx);
-                                    cx.notify();
+                                if vw <= 10.0 || vh <= 10.0 {
+                                    return;
+                                }
+                                let needs_sync =
+                                    state.current_tab().session.read_with(cx, |session, _| {
+                                        session.viewport.view_size
+                                            != CGSize::new(vw as f64, vh as f64)
+                                    });
+                                if needs_sync {
+                                    state.tab().session.update(cx, |session, _| {
+                                        let document_size = session.document_size();
+                                        session.viewport.resize(
+                                            CGSize::new(vw as f64, vh as f64),
+                                            1.0,
+                                            document_size,
+                                        );
+                                    });
                                 }
                             })
                             .ok();
@@ -162,6 +166,18 @@ impl AppState {
     fn build_scene(&self, image: Option<Arc<RenderImage>>, cx: &App) -> CanvasScene {
         let session = self.current_tab().session.read(cx);
         let image_rect = self.image_rect(cx);
+        // The frame's view transform; `to_screen` mirrors Swift's direct
+        // `session.viewport.viewPoint(from:documentSize:)` reads.
+        let viewport = session.viewport;
+        let doc_size = session
+            .document
+            .as_ref()
+            .map(|d| CGSize::new(d.width as f64, d.height as f64))
+            .unwrap_or(CGSize::ZERO);
+        let to_screen = |x: f64, y: f64| {
+            let p = viewport.view_point(CGPoint::new(x, y), doc_size);
+            (p.x as f32, p.y as f32)
+        };
         let mut guides = Vec::new();
         let mut grid = Vec::new();
         let mut selection = Vec::new();
@@ -185,9 +201,9 @@ impl AppState {
                 drag_drawn |= session.guide_drag.as_ref().map(|d| d.id) == Some(guide.id);
                 let vertical = axis == GuideAxis::Vertical;
                 let position = if vertical {
-                    self.doc_to_screen(position, 0.0).0
+                    to_screen(position, 0.0).0
                 } else {
-                    self.doc_to_screen(0.0, position).1
+                    to_screen(0.0, position).1
                 };
                 guides.push((vertical, position));
             }
@@ -196,28 +212,28 @@ impl AppState {
             {
                 let vertical = drag.axis == GuideAxis::Vertical;
                 let position = if vertical {
-                    self.doc_to_screen(drag.position, 0.0).0
+                    to_screen(drag.position, 0.0).0
                 } else {
-                    self.doc_to_screen(0.0, drag.position).1
+                    to_screen(0.0, drag.position).1
                 };
                 guides.push((vertical, position));
             }
             if session.shows_grid {
                 for x in LayoutGrid::lines(document.width as f64) {
-                    grid.push((self.doc_to_screen(x, 0.0).0, LayoutGrid::is_major(x), true));
+                    grid.push((to_screen(x, 0.0).0, LayoutGrid::is_major(x), true));
                 }
                 for y in LayoutGrid::lines(document.height as f64) {
-                    grid.push((self.doc_to_screen(0.0, y).1, LayoutGrid::is_major(y), false));
+                    grid.push((to_screen(0.0, y).1, LayoutGrid::is_major(y), false));
                 }
             }
             // The ants follow a pixel move or outline drag (`displayedSelection`).
             if let Some(selection_state) = session.displayed_selection() {
                 for ring in &selection_state.path.rings {
-                    selection.push(ring.iter().map(|p| self.doc_to_screen(p.x, p.y)).collect());
+                    selection.push(ring.iter().map(|p| to_screen(p.x, p.y)).collect());
                 }
             } else if let Some(selection_state) = &document.selection {
                 for ring in &selection_state.path.rings {
-                    selection.push(ring.iter().map(|p| self.doc_to_screen(p.x, p.y)).collect());
+                    selection.push(ring.iter().map(|p| to_screen(p.x, p.y)).collect());
                 }
             }
             if let Some(draft) = &session.lasso_draft {
@@ -225,20 +241,20 @@ impl AppState {
                     draft
                         .points
                         .iter()
-                        .map(|p| self.doc_to_screen(p.x, p.y))
+                        .map(|p| to_screen(p.x, p.y))
                         .collect::<Vec<(f32, f32)>>(),
                 ];
                 if let Some(cursor) = draft.cursor
                     && !rings[0].is_empty()
                 {
-                    let (x, y) = self.doc_to_screen(cursor.x, cursor.y);
+                    let (x, y) = to_screen(cursor.x, cursor.y);
                     rings[0].push((x, y));
                 }
                 lasso = Some(rings);
             }
             if let Some(rect) = session.crop_rect {
-                let min = self.doc_to_screen(rect.min_x(), rect.min_y());
-                let max = self.doc_to_screen(rect.max_x(), rect.max_y());
+                let min = to_screen(rect.min_x(), rect.min_y());
+                let max = to_screen(rect.max_x(), rect.max_y());
                 crop = Some((min, max));
             }
             if let Some(edit) = &session.transform_edit {
@@ -248,7 +264,7 @@ impl AppState {
                         edit.draft
                             .corners()
                             .iter()
-                            .map(|p| self.doc_to_screen(p.x, p.y))
+                            .map(|p| to_screen(p.x, p.y))
                             .collect(),
                     );
                 }
@@ -256,8 +272,8 @@ impl AppState {
             // The Type tool's box drag preview (`drawTextBoxDraft`).
             if let Some(rect) = self.text_box_rect {
                 text_box = Some((
-                    self.doc_to_screen(rect.min_x(), rect.min_y()),
-                    self.doc_to_screen(rect.max_x(), rect.max_y()),
+                    to_screen(rect.min_x(), rect.min_y()),
+                    to_screen(rect.max_x(), rect.max_y()),
                 ));
             }
             // The inline text editor's frame and handles: the draft's shown
@@ -273,8 +289,8 @@ impl AppState {
                     draft.style.box_size,
                     measured,
                     asset_width,
-                    self.zoom,
-                    self.pan,
+                    viewport,
+                    doc_size,
                 );
                 let rotation = draft.transform.map(|t| t.rotation).unwrap_or(0.0);
                 inline_text_frame = Some(inline_text_box_corners((ox, oy), (w, h), rotation));
@@ -286,8 +302,7 @@ impl AppState {
             image,
             image_rect,
             rulers: session.shows_rulers,
-            zoom: self.zoom,
-            pan: self.pan,
+            viewport,
             doc: self.doc_size(cx),
             guides,
             grid,
@@ -314,7 +329,7 @@ impl AppState {
             // sheet instead of touching the tools.
             if self.camera_raw_samples_defringe {
                 let local = self.local_position(event.position);
-                let doc = self.screen_to_doc(local.0, local.1);
+                let doc = self.screen_to_doc(cx, local.0, local.1);
                 self.sample_camera_raw_defringe(doc, cx);
             }
             return;
@@ -333,7 +348,7 @@ impl AppState {
             return;
         }
         let local = self.local_position(event.position);
-        let doc = self.screen_to_doc(local.0, local.1);
+        let doc = self.screen_to_doc(cx, local.0, local.1);
         let alt = event.modifiers.alt;
         let shift = event.modifiers.shift;
 
@@ -365,7 +380,8 @@ impl AppState {
         if self.tab().session.read(cx).tool == NavigationTool::Move {
             // `guideHitDistance` is 5 screen points; the core measures in
             // document pixels.
-            let tolerance = GUIDE_HIT_DISTANCE / self.zoom.max(0.0001);
+            let zoom = self.current_tab().session.read(cx).viewport.zoom();
+            let tolerance = GUIDE_HIT_DISTANCE / zoom.max(0.0001);
             if let Some(guide_id) = self.tab().session.read(cx).hit_guide(doc, tolerance) {
                 self.tab()
                     .session
@@ -380,17 +396,16 @@ impl AppState {
             NavigationTool::Hand => {
                 self.set_drag(
                     Some(CanvasDrag::Pan {
-                        start: event.position,
-                        start_pan: self.pan,
+                        last: event.position,
                     }),
                     cx,
                 );
             }
             NavigationTool::Zoom => {
                 if alt {
-                    self.zoom_at(local, 0.5);
+                    self.zoom_at(local, 0.5, cx);
                 } else {
-                    self.zoom_at(local, 2.0);
+                    self.zoom_at(local, 2.0, cx);
                 }
             }
             NavigationTool::Marquee | NavigationTool::Lasso => {
@@ -513,17 +528,32 @@ impl AppState {
             return;
         }
         let local = self.local_position(event.position);
-        let doc = self.screen_to_doc(local.0, local.1);
+        let doc = self.screen_to_doc(cx, local.0, local.1);
         let shift = event.modifiers.shift;
         let alt = event.modifiers.alt;
 
-        match self.drag.as_mut() {
-            Some(CanvasDrag::Pan { start, start_pan }) => {
-                self.pan = (
-                    start_pan.0 + (f32::from(event.position.x) - f32::from(start.x)) as f64,
-                    start_pan.1 + (f32::from(event.position.y) - f32::from(start.y)) as f64,
-                );
+        // Swift pans incrementally (`viewport.translate(by:)`,
+        // EditorCanvas.swift:1616): each move applies the delta since the
+        // last position and ends the fit follow. Handled before the borrow
+        // of `self.drag` below, since the translate updates the session.
+        let pan_delta = match self.drag.as_ref() {
+            Some(CanvasDrag::Pan { last }) => Some((
+                (f32::from(event.position.x) - f32::from(last.x)) as f64,
+                (f32::from(event.position.y) - f32::from(last.y)) as f64,
+            )),
+            _ => None,
+        };
+        if let Some((dx, dy)) = pan_delta {
+            self.tab().session.update(cx, |session, _| {
+                session.viewport.translate(CGSize::new(dx, dy))
+            });
+            if let Some(CanvasDrag::Pan { last }) = self.drag.as_mut() {
+                *last = event.position;
             }
+        }
+
+        match self.drag.as_mut() {
+            Some(CanvasDrag::Pan { .. }) => {}
             Some(CanvasDrag::Stroke(edit, _)) => {
                 edit.append_smoothed(doc);
             }
@@ -699,7 +729,7 @@ impl AppState {
                 }
                 CanvasDrag::Gradient(edit, start, id) => {
                     let local = self.local_position(event.position);
-                    self.gradient_cursor = Some(self.screen_to_doc(local.0, local.1));
+                    self.gradient_cursor = Some(self.screen_to_doc(cx, local.0, local.1));
                     let result = self.gradient_result(&edit, start, cx);
                     self.commit_pixels(
                         compositor_core::raster::ImportedImage::new(result, String::new()),
@@ -783,8 +813,8 @@ impl AppState {
         let local = self.local_position(event.position);
         if local.0 < 0.0
             || local.1 < 0.0
-            || local.0 > f32::from(self.viewport.size.width)
-            || local.1 > f32::from(self.viewport.size.height)
+            || local.0 > f32::from(self.canvas_bounds.size.width)
+            || local.1 > f32::from(self.canvas_bounds.size.height)
         {
             return;
         }
@@ -794,7 +824,7 @@ impl AppState {
         };
         if dy != 0.0 {
             let factor = (-dy / 400.0).exp();
-            self.zoom_at(local, factor as f64);
+            self.zoom_at(local, factor as f64, cx);
             self.touch(cx);
         }
     }
@@ -822,8 +852,8 @@ impl AppState {
 
     pub(crate) fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
         (
-            f32::from(position.x) - f32::from(self.viewport.origin.x),
-            f32::from(position.y) - f32::from(self.viewport.origin.y),
+            f32::from(position.x) - f32::from(self.canvas_bounds.origin.x),
+            f32::from(position.y) - f32::from(self.canvas_bounds.origin.y),
         )
     }
 
@@ -883,7 +913,13 @@ impl AppState {
         // points — in document pixels the radius divides by the zoom. Only
         // the Brush tool smooths (EditorSession+Brush.swift:78).
         if self.tab().session.read(cx).tool == NavigationTool::Brush {
-            settings.smoothing /= self.zoom.max(0.0001);
+            settings.smoothing /= self
+                .current_tab()
+                .session
+                .read(cx)
+                .viewport
+                .zoom()
+                .max(0.0001);
         } else {
             settings.smoothing = 0.0;
         }
@@ -2274,12 +2310,15 @@ fn paint_rulers(window: &mut Window, bounds: Bounds<Pixels>, scene: &CanvasScene
     window.paint_quad(gpui_kit::fill(top, background));
     window.paint_quad(gpui_kit::fill(left, background));
 
-    // Ticks every `tick` document pixels, chosen for roughly 50 px on screen.
-    let tick = nice_tick(70.0 / scene.zoom.max(0.001));
+    // Ticks every `tick` document pixels, chosen for roughly 70 px on screen.
+    let viewport = scene.viewport;
+    let doc_size = CGSize::new(scene.doc.0, scene.doc.1);
+    let per_pixel = viewport.points_per_pixel();
+    let tick = nice_tick(70.0 / per_pixel.max(0.001));
     let color = rgba(0xb4b4b4aa);
     let mut value = 0.0f64;
-    while value * scene.zoom <= scene.doc.0 * scene.zoom {
-        let screen = scene.pan.0 + value * scene.zoom;
+    while value <= scene.doc.0 {
+        let screen = viewport.view_point(CGPoint::new(value, 0.0), doc_size).x;
         if screen >= thickness as f64 && screen <= f32::from(bounds.size.width) as f64 {
             let x = f32::from(bounds.origin.x) + screen as f32;
             window.paint_quad(gpui_kit::fill(
@@ -2293,8 +2332,8 @@ fn paint_rulers(window: &mut Window, bounds: Bounds<Pixels>, scene: &CanvasScene
         value += tick;
     }
     let mut value = 0.0f64;
-    while value * scene.zoom <= scene.doc.1 * scene.zoom {
-        let screen = scene.pan.1 + value * scene.zoom;
+    while value <= scene.doc.1 {
+        let screen = viewport.view_point(CGPoint::new(0.0, value), doc_size).y;
         if screen >= thickness as f64 && screen <= f32::from(bounds.size.height) as f64 {
             let y = f32::from(bounds.origin.y) + screen as f32;
             window.paint_quad(gpui_kit::fill(
@@ -3073,7 +3112,10 @@ mod tests {
         // (CanvasRulerNSView.documentPosition), so a cursor at 120 viewport
         // pixels with the document's origin panned 20 px at 2× sits at
         // document x = 50.
-        let doc = crate::state::screen_to_doc_at(2.0, (20.0, 10.0), 120.0, 60.0);
+        let mut viewport = compositor_core::canvas_viewport::CanvasViewport::default();
+        viewport.set_zoom(2.0, CGPoint::ZERO, CGSize::ZERO);
+        viewport.pan = CGSize::new(20.0, 10.0);
+        let doc = viewport.document_point(CGPoint::new(120.0, 60.0), CGSize::ZERO);
         assert_eq!(guide_axis_position(GuideAxis::Vertical, doc), 50.0);
         assert_eq!(guide_axis_position(GuideAxis::Horizontal, doc), 25.0);
     }

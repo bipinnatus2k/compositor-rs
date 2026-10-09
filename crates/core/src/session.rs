@@ -11,6 +11,7 @@ use crate::canvas::{
     CanvasSizeOptions, CropDrag, CropDragMode, CropGeometry, TrimOptions, mirrored_transform,
     resize_canvas, resize_image, trim as trim_document,
 };
+use crate::canvas_viewport::CanvasViewport;
 use crate::document::PickerHSB;
 use crate::document::{
     CanvasDocument, CanvasGuide, GuideAxis, ImageLayer, LayerMask, LayerTextStyle, NavigationTool,
@@ -367,6 +368,10 @@ pub struct EditorSession {
     pub renaming_layer_id: Option<Uuid>,
     pub collapsed_group_ids: std::collections::HashSet<Uuid>,
     pub history: DocumentHistory,
+    /// The canvas view transform (`viewport`, EditorSession.swift:170,
+    /// `Rendering/CanvasViewport.swift`): per-tab zoom/pan that survives tab
+    /// switches; `followsFit` keeps refitting until the user zooms or pans.
+    pub viewport: CanvasViewport,
     /// An Option-drag duplicate in progress (`transformDuplicate`): the
     /// copies, the selection they came from, and the primary then.
     pub transform_duplicate: Option<TransformDuplicate>,
@@ -555,6 +560,7 @@ impl Default for EditorSession {
             gradient_edit: None,
             guide_drag: None,
             history: DocumentHistory::default(),
+            viewport: crate::canvas_viewport::CanvasViewport::default(),
             project_url: None,
             is_project_busy: false,
             is_importing: false,
@@ -660,11 +666,50 @@ impl EditorSession {
         self.active_layer_id = layer_id;
         self.selected_layer_ids = layer_id.map(|i| vec![i]).unwrap_or_default();
         self.history.end(&self.document, self.active_layer_id);
+        // `viewport.fit(documentSize: document.size)` (EditorSession.swift:904).
+        if let Some(size) = self.document_size() {
+            self.viewport.fit(size);
+        }
         self.shows_new_document = false;
     }
 
     pub fn document_size(&self) -> Option<CGSize> {
         self.document.as_ref().map(|d| d.size())
+    }
+
+    /// `fit()` (EditorSession.swift:908-911).
+    pub fn fit(&mut self) {
+        let Some(size) = self.document_size() else {
+            return;
+        };
+        self.viewport.fit(size);
+    }
+
+    /// `zoom(to:anchor:)` (EditorSession.swift:913-916): a nil anchor means
+    /// the view center.
+    pub fn zoom(&mut self, value: CGFloat, anchor: Option<CGPoint>) {
+        let Some(size) = self.document_size() else {
+            return;
+        };
+        let anchor = anchor.unwrap_or_else(|| self.viewport.center());
+        self.viewport.set_zoom(value, anchor, size);
+    }
+
+    /// `zoomKeyboard(by:)` (EditorSession.swift:918-924): step through the
+    /// stable keyboard zoom levels, anchored at the view center.
+    pub fn zoom_keyboard(&mut self, step: i32) {
+        if step == 0 {
+            return;
+        }
+        let Some(size) = self.document_size() else {
+            return;
+        };
+        let target = self.viewport.keyboard_zoom_target(step);
+        if target == self.viewport.zoom() {
+            return;
+        }
+        let center = self.viewport.center();
+        self.viewport.set_zoom(target, center, size);
     }
 
     pub fn active_layer(&self) -> Option<&ImageLayer> {
@@ -704,6 +749,11 @@ impl EditorSession {
         self.document = Some(document);
         self.project_url = Some(url.to_path_buf());
         self.history.reset();
+        // `viewport.fit(documentSize: document!.size)` — installProject's
+        // last line (EditorSession+Projects.swift:39).
+        if let Some(size) = self.document_size() {
+            self.viewport.fit(size);
+        }
         Ok(())
     }
 
@@ -1484,6 +1534,11 @@ impl EditorSession {
                 asset.image.width.max(1),
                 asset.image.height.max(1),
             ));
+            // `viewport.fit(documentSize: document!.size)` in the
+            // first-document branch (EditorSession.swift:795-798).
+            if let Some(size) = self.document_size() {
+                self.viewport.fit(size);
+            }
         }
         let Some(document) = self.document.clone() else {
             return;
@@ -1611,7 +1666,11 @@ impl EditorSession {
                 .map(|layer| layer.id)
                 .or_else(|| incoming.last().map(|layer| layer.id));
             document.layers = incoming;
+            let size = document.size();
             self.document = Some(document);
+            // `viewport.fit(documentSize: document!.size)` in the
+            // first-document branch (EditorSession.swift:862-866).
+            self.viewport.fit(size);
             self.select_layer(active);
         } else {
             let size = self.document.as_ref().unwrap().size();

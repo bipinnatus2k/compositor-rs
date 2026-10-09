@@ -459,7 +459,6 @@ impl AppState {
                         compositor_core::transform::LayerSampling::High,
                     );
                 });
-                self.request_refit();
             }
             Sheet::CanvasSize => {
                 let (mut width, mut height, relative, anchor) = {
@@ -482,7 +481,6 @@ impl AppState {
                 self.with_current_tab(cx, |controller, session| {
                     controller.finish_canvas_size(session, Some(&options));
                 });
-                self.request_refit();
             }
             Sheet::ExportPng => {
                 let url = path_or_none(&self.sheet_path(cx));
@@ -589,7 +587,6 @@ impl AppState {
                 self.with_current_tab(cx, |controller, session| {
                     controller.finish_trim(session, Some(&options));
                 });
-                self.request_refit();
             }
             Sheet::About | Sheet::Confirm | Sheet::Alert => {}
         }

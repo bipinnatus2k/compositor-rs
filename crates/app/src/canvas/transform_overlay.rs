@@ -28,9 +28,11 @@ pub(crate) struct TransformOverlayGeometry {
 impl TransformOverlayGeometry {
     /// `init(transform:viewport:documentSize:)`: the handles at the
     /// transform's corners and edge midpoints in view space. `zoom`/`pan`
-    /// are the canvas viewport's document-to-view mapping
-    /// (`CanvasViewport.viewPoint(from:documentSize:)` — the affine that
-    /// `state::doc_to_screen_at` applies, in full precision).
+    /// are the canvas viewport's document-to-view mapping — the affine
+    /// `CanvasViewport::view_point` applies (Swift
+    /// `CanvasViewport.viewPoint(from:documentSize:)`); this unwired
+    /// geometry keeps the caller-supplied zoom/pan pair until the
+    /// transform-handle ticket wires it to the session's viewport.
     pub(crate) fn new(transform: LayerTransform, zoom: f64, pan: (f64, f64)) -> Self {
         let view = |p: CGPoint| CGPoint::new(p.x * zoom + pan.0, p.y * zoom + pan.1);
         let handles: [CGPoint; 8] = HANDLES.map(|unit| view(transform.point(unit)));

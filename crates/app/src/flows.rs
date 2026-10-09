@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use gpui_kit::{Context, IntoElement, Styled, Window, px, rgb};
 
 use crate::project::{ConfirmStep, Pending, Step, TabId, UnsavedChoice};
-use crate::state::{AppState, FitDims, SaveAfter, Sheet};
+use crate::state::{AppState, SaveAfter, Sheet};
 use crate::tabs::ProjectTab;
 use compositor_core::transform::LayerSampling;
 
@@ -37,7 +37,6 @@ impl AppState {
         if !failures.is_empty() {
             self.set_status(failures.join("; "), cx);
         }
-        self.fit_for = FitDims::REFIT;
         self.touch(cx);
     }
 
@@ -225,7 +224,6 @@ impl AppState {
     fn follow_close_step(&mut self, step: Step<()>, _window: &mut Window, cx: &mut Context<Self>) {
         match step {
             Step::Done(()) => {
-                self.request_refit();
                 self.touch(cx);
             }
             Step::Pending(pending) => self.present_pending(pending, _window, cx),
@@ -392,7 +390,6 @@ impl AppState {
                 match self.workspace.resolve_close(choice, cx) {
                     Step::Done(()) => {
                         self.sync_session_observer(cx);
-                        self.request_refit();
                         self.touch(cx);
                     }
                     Step::Pending(Pending::SaveAs { .. }) => {

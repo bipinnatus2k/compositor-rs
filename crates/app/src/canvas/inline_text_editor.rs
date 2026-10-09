@@ -71,6 +71,7 @@ use gpui_kit::{
     Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px, relative,
 };
 
+use compositor_core::canvas_viewport::CanvasViewport;
 use compositor_core::document::LayerTextStyle;
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::transform::{HANDLES, LayerTransform};
@@ -135,25 +136,25 @@ pub fn inline_text_shown_transform(
 }
 
 /// `InlineTextEditor.synchronize`'s geometry, as a pure function: the shown
-/// transform mapped through the view transform (origin through doc_to_screen,
-/// size scaled by the zoom).
+/// transform mapped through the view transform (origin through
+/// `viewport.viewPoint`, size scaled by the points-per-pixel ratio).
 pub fn inline_text_box(
     origin: CGPoint,
     transform: Option<LayerTransform>,
     box_size: Option<CGSize>,
     measured: CGSize,
     asset_width: f64,
-    zoom: f64,
-    pan: (f64, f64),
+    viewport: CanvasViewport,
+    document_size: CGSize,
 ) -> ((f32, f32), (f32, f32)) {
     let transform = inline_text_shown_transform(origin, transform, box_size, measured, asset_width);
-    let (sx, sy) =
-        crate::state::doc_to_screen_at(zoom, pan, transform.origin.x, transform.origin.y);
+    let shown = viewport.view_point(transform.origin, document_size);
+    let per_pixel = viewport.points_per_pixel();
     (
-        (sx, sy),
+        (shown.x as f32, shown.y as f32),
         (
-            (transform.size.width * zoom) as f32,
-            (transform.size.height * zoom) as f32,
+            (transform.size.width * per_pixel) as f32,
+            (transform.size.height * per_pixel) as f32,
         ),
     )
 }
@@ -655,14 +656,17 @@ impl AppState {
         let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
         let measured = inline_text_measured_size(&draft.style);
         let logical = draft.style.box_size.unwrap_or(measured);
+        let viewport = self.canvas_viewport(cx);
+        let per_pixel = viewport.points_per_pixel();
+        let (doc_w, doc_h) = self.doc_size(cx);
         let ((ox, oy), (w, h)) = inline_text_box(
             draft.origin,
             draft.transform,
             draft.style.box_size,
             measured,
             self.inline_text_asset_width(draft, cx),
-            self.zoom,
-            self.pan,
+            viewport,
+            CGSize::new(doc_w, doc_h),
         );
         let rotation = draft.transform.map(|t| t.rotation).unwrap_or(0.0);
         let corners = inline_text_box_corners((ox, oy), (w, h), rotation);
@@ -677,9 +681,9 @@ impl AppState {
         Some(InlineTextOverlay {
             origin: ScreenPoint::new(min_x, min_y),
             size,
-            inset: inline_text_content_inset(size, logical, self.zoom),
+            inset: inline_text_content_inset(size, logical, per_pixel),
             line_ratio: inline_text_line_ratio(&draft.style),
-            font_px: (draft.style.font_size * self.zoom).max(6.0) as f32,
+            font_px: (draft.style.font_size * per_pixel).max(6.0) as f32,
             color: (rgb(draft.style.red) << 16)
                 | (rgb(draft.style.green) << 8)
                 | rgb(draft.style.blue),
@@ -696,7 +700,7 @@ impl AppState {
             return None;
         }
         let (bounds, _line_height) = self.inline_text_input.read(cx).cursor_layout()?;
-        let origin = self.viewport.origin;
+        let origin = self.canvas_bounds.origin;
         let left = bounds.origin.x - origin.x;
         let top = bounds.origin.y - origin.y;
         let (left, top) = (f32::from(left), f32::from(top));
@@ -730,7 +734,7 @@ impl AppState {
         let input = self.inline_text_input.clone();
         let on_press = cx.listener(|this, event: &gpui_kit::MouseDownEvent, _window, cx| {
             let local = this.local_position(event.position);
-            let doc = this.screen_to_doc(local.0, local.1);
+            let doc = this.screen_to_doc(cx, local.0, local.1);
             if this.tab().session.read(cx).text_draft.is_some()
                 && let Some(handle) = this.inline_text_handle_hit(doc, cx)
             {
@@ -915,7 +919,8 @@ impl AppState {
     pub fn inline_text_handle_hit(&self, doc: CGPoint, cx: &gpui_kit::App) -> Option<usize> {
         let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
         let (logical, transform) = self.inline_text_shown(draft, cx);
-        let handle_size = inline_text_handle_size(&transform, logical, self.zoom);
+        let per_pixel = self.canvas_viewport(cx).points_per_pixel();
+        let handle_size = inline_text_handle_size(&transform, logical, per_pixel);
         let local = inline_text_local_point(&transform, logical, doc);
         inline_text_handle_at(local, logical, handle_size)
     }
@@ -968,10 +973,20 @@ mod tests {
         inline_text_line_ratio, inline_text_local_point, inline_text_measured_size,
         inline_text_overflows, inline_text_resize, inline_text_shown_transform,
     };
-    use crate::state::doc_to_screen_at;
+    use compositor_core::canvas_viewport::CanvasViewport;
     use compositor_core::document::{LayerTextStyle, TextAlignment};
     use compositor_core::geometry::{CGPoint, CGSize};
     use compositor_core::transform::{HANDLES, LayerTransform};
+
+    /// A viewport with zero view size, the given zoom, and a raw pan — the
+    /// pan-form mapping the old `doc_to_screen_at(zoom, pan)` tests encoded,
+    /// since with a zero document rect the origin is exactly `pan`.
+    fn viewport_with(zoom: f64, pan: (f64, f64)) -> CanvasViewport {
+        let mut viewport = CanvasViewport::default();
+        viewport.set_zoom(zoom, CGPoint::ZERO, CGSize::ZERO);
+        viewport.pan = CGSize::new(pan.0, pan.1);
+        viewport
+    }
 
     #[test]
     fn boxed_text_uses_the_draft_transform_through_the_view_transform() {
@@ -983,11 +998,11 @@ mod tests {
             Some(box_size),
             CGSize::new(999.0, 999.0),
             0.0,
-            2.0,
-            (5.0, 7.0),
+            viewport_with(2.0, (5.0, 7.0)),
+            CGSize::ZERO,
         );
-        // Origin maps through doc_to_screen, size scales by zoom; the
-        // measurement must not leak into a boxed draft.
+        // Origin maps through the viewport, size scales by the per-pixel
+        // ratio; the measurement must not leak into a boxed draft.
         assert_eq!((ox, oy), (25.0, 47.0));
         assert_eq!((w, h), (400.0, 160.0));
     }
@@ -1007,8 +1022,8 @@ mod tests {
             None,
             measured,
             0.0,
-            1.0,
-            (0.0, 0.0),
+            viewport_with(1.0, (0.0, 0.0)),
+            CGSize::ZERO,
         );
         assert_eq!((ox, oy), (4.0, 6.0));
         assert_eq!((w, h), (measured.width as f32, measured.height as f32));
@@ -1198,8 +1213,8 @@ mod tests {
             None,
             CGSize::new(60.0, 24.0),
             60.0,
-            0.5,
-            (0.0, 0.0),
+            viewport_with(0.5, (0.0, 0.0)),
+            CGSize::ZERO,
         );
         assert_eq!((ox, oy), (0.0, 0.0));
         assert_eq!((w, h), (150.0, 60.0));
@@ -1371,16 +1386,15 @@ mod tests {
             let mut transform =
                 LayerTransform::new(CGPoint::new(10.0, 20.0), CGSize::new(200.0, 80.0));
             transform.rotation = rotation;
-            let zoom = 2.0;
-            let pan = (5.0, 7.0);
+            let viewport = viewport_with(2.0, (5.0, 7.0));
             let ((ox, oy), (w, h)) = inline_text_box(
                 transform.origin,
                 Some(transform),
                 Some(transform.size),
                 CGSize::new(999.0, 999.0),
                 999.0,
-                zoom,
-                pan,
+                viewport,
+                CGSize::ZERO,
             );
             let corners = inline_text_box_corners((ox, oy), (w, h), rotation);
             let units = [
@@ -1391,7 +1405,8 @@ mod tests {
             ];
             for (corner, unit) in corners.iter().zip(units) {
                 let doc = transform.point(unit);
-                let (sx, sy) = doc_to_screen_at(zoom, pan, doc.x, doc.y);
+                let shown = viewport.view_point(doc, CGSize::ZERO);
+                let (sx, sy) = (shown.x as f32, shown.y as f32);
                 assert!((corner.0 - sx).abs() < 0.001, "rotation {rotation}");
                 assert!((corner.1 - sy).abs() < 0.001, "rotation {rotation}");
             }

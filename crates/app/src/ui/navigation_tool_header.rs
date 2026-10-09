@@ -387,22 +387,27 @@ impl AppState {
             }
             NavigationTool::Zoom => {
                 let on_zoom = app_on(&app, |state, command, _, cx| match command {
-                    ZoomCommand::Fit => {
-                        let viewport = state.viewport_size();
-                        state.zoom_fit(viewport, cx);
-                        state.touch(cx);
-                    }
+                    ZoomCommand::Fit => state.zoom_fit(cx),
                     ZoomCommand::ActualSize => {
-                        state.zoom = 1.0;
-                        state.revision += 1;
+                        // Actual Pixels: `session.zoom(to: 1)` (CompositorApp.swift:88).
+                        state
+                            .tab()
+                            .session
+                            .update(cx, |session, _| session.zoom(1.0, None));
                         state.touch(cx);
                     }
                     ZoomCommand::In => {
-                        state.zoom_at_viewport(2.0);
+                        state
+                            .tab()
+                            .session
+                            .update(cx, |session, _| session.zoom_keyboard(1));
                         state.touch(cx);
                     }
                     ZoomCommand::Out => {
-                        state.zoom_at_viewport(0.5);
+                        state
+                            .tab()
+                            .session
+                            .update(cx, |session, _| session.zoom_keyboard(-1));
                         state.touch(cx);
                     }
                 });

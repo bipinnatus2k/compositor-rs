@@ -84,7 +84,6 @@ impl AppState {
         self.tab().session.update(cx, |session, _| {
             session.create_document(width, height, true)
         });
-        self.request_refit();
         self.touch(cx);
     }
 
@@ -203,9 +202,9 @@ impl AppState {
                 style.bg(rgb(crate::ui::BG_DROP_AREA))
             })
             .on_drag_move::<ExternalPaths>(cx.listener(
-                |this, event: &DragMoveEvent<ExternalPaths>, _window, _cx| {
+                |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
                     let local = this.local_position(event.event.position);
-                    this.drop_point_doc = Some(this.screen_to_doc(local.0, local.1));
+                    this.drop_point_doc = Some(this.screen_to_doc(cx, local.0, local.1));
                 },
             ))
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
