@@ -203,8 +203,13 @@ impl AppState {
             })
             .on_drag_move::<ExternalPaths>(cx.listener(
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
-                    let local = this.local_position(event.event.position);
-                    this.drop_point_doc = Some(this.screen_to_doc(cx, local.0, local.1));
+                    // The drop point is canvas gesture state (ticket 39); the
+                    // welcome form shares the canvas's file-drop import, so it
+                    // records the point through the canvas entity.
+                    this.canvas_view.update(cx, |canvas, cx| {
+                        let local = canvas.local_position(event.event.position);
+                        canvas.drop_point_doc = Some(canvas.screen_to_doc(cx, local.0, local.1));
+                    });
                 },
             ))
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {

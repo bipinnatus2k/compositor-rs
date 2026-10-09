@@ -897,7 +897,7 @@ impl AppState {
             PanelPlacement::Automatic => {
                 let (x, y) = self.panels.position(
                     name,
-                    self.panel_canvas_center(window),
+                    self.panel_canvas_center(window, cx),
                     panel_estimated_size(name),
                 )?;
                 Point::new(px(x), px(y))
@@ -933,10 +933,11 @@ impl AppState {
     }
 
     /// The canvas area's center (`canvasCenter(in:)`): the panel's center
-    /// lands there on the first open. Uses the canvas paint area's bounds;
-    /// before the first layout pass it falls back to the window's center.
-    fn panel_canvas_center(&self, window: &mut Window) -> (f32, f32) {
-        let canvas_bounds = self.canvas_bounds;
+    /// lands there on the first open. Uses the canvas paint area's bounds
+    /// (canvas view state since ticket 39); before the first layout pass it
+    /// falls back to the window's center.
+    fn panel_canvas_center(&self, window: &mut Window, cx: &App) -> (f32, f32) {
+        let canvas_bounds = self.canvas_view.read(cx).canvas_bounds;
         let (w, h) = (
             f32::from(canvas_bounds.size.width),
             f32::from(canvas_bounds.size.height),

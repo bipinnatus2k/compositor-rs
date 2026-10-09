@@ -205,7 +205,10 @@ impl Render for AppState {
                             .flex_1()
                             .min_w_0()
                             .child(self.render_options_header(cx))
-                            .child(self.render_canvas(cx)),
+                            // The canvas is its own view entity now (Swift
+                            // `CanvasView`, ticket 39): it renders itself,
+                            // including the welcome form on an empty tab.
+                            .child(self.canvas_view.clone()),
                     )
                     .child(self.render_layers_panel(cx)),
             )

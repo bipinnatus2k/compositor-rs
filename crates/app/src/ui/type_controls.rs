@@ -232,7 +232,8 @@ impl AppState {
                         this.tab()
                             .session
                             .update(cx, |session, _| session.cancel_text());
-                        this.sync_inline_text(window, cx);
+                        this.canvas_view
+                            .update(cx, |canvas, cx| canvas.sync_inline_text(window, cx));
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);
                     }))
@@ -248,7 +249,8 @@ impl AppState {
                         this.tab()
                             .session
                             .update(cx, |session, _| session.finish_text());
-                        this.sync_inline_text(window, cx);
+                        this.canvas_view
+                            .update(cx, |canvas, cx| canvas.sync_inline_text(window, cx));
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);
                     }))
@@ -264,7 +266,8 @@ impl AppState {
                         this.tab()
                             .session
                             .update(cx, |session, _| session.edit_active_text());
-                        this.sync_inline_text(window, cx);
+                        this.canvas_view
+                            .update(cx, |canvas, cx| canvas.sync_inline_text(window, cx));
                         this.sync_text_style_inputs(window, cx);
                         this.touch(cx);
                     }))

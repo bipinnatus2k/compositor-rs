@@ -22,7 +22,8 @@ use compositor_core::document::NavigationTool;
 use compositor_core::session::{BrushToolMode, EditorSession};
 use compositor_core::tools::brush::GradientShape;
 
-use crate::state::{AppState, CanvasDrag};
+use crate::canvas::editor_canvas::CanvasDrag;
+use crate::state::AppState;
 use crate::ui::{
     AppCallback, ClickHandler, Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch,
     app_on, app_on_click, text_label,
@@ -166,12 +167,13 @@ impl AppState {
         // `selectTool` (EditorSession.swift:332-352) lives on the session
         // now, with its guards (:334) — the busy flags are session fields
         // (stage-D ticket 34). What stays here: the stroke/warp drags are
-        // app-side canvas drag state, and the adjustment editor is the
-        // port's stand-in for Swift's `levels` sheet. A refused switch (a
-        // failing text apply) leaves the shape drag up, like every
-        // session-side gate.
+        // canvas gesture state (canvas view entity since ticket 39), and the
+        // adjustment editor is the port's stand-in for Swift's `levels`
+        // sheet. A refused switch (a failing text apply) leaves the shape
+        // drag up, like every session-side gate.
+        let dragging = self.canvas_view.read(cx).drag.as_ref();
         if matches!(
-            self.drag,
+            dragging,
             Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
         ) {
             return;
@@ -194,9 +196,15 @@ impl AppState {
             return;
         }
         // A shape drag dies with the switch (Swift's cancelShape :335); it
-        // lives app-side, so dropping it here is the whole cancel.
-        if matches!(self.drag, Some(CanvasDrag::Shape { .. })) {
-            self.drag = None;
+        // lives on the canvas, so dropping it here is the whole cancel.
+        if self
+            .canvas_view
+            .read(cx)
+            .drag
+            .as_ref()
+            .is_some_and(|drag| matches!(drag, CanvasDrag::Shape { .. }))
+        {
+            self.canvas_view.update(cx, |canvas, _| canvas.drag = None);
         }
         self.touch(cx);
     }

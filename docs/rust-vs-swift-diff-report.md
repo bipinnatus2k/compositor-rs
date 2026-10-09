@@ -4,6 +4,41 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-09：废除 AppState 票 39——画布视图实体 `Entity<EditorCanvasView>`）
+
+票 39 落地（裁定全文见 `docs/adr/0003-abolish-appstate-dual-mirror.md`
+裁定 2/4；票内字段归属审计随落地誊写如下）。`EditorCanvasView`
+（`canvas/editor_canvas.rs`）镜像 Swift `CanvasView`（NSView）：
+SwiftUI 壳 + NSView 的 Rust 对应为一个视图实体，手势/指针/键盘状态机
+（`CanvasDrag` 13 变体、`space_saved_tool`、gradient/shape/text_box/
+drop 拖拽态）、inline text 编辑器全态（输入实体、双向绑定、caret 相位）
+与 `canvas_bounds` 全部画布私有；commit/preview/status 管线与帧/缩略图
+缓存留 AppState，画布经 `app: WeakEntity<AppState>` 过渡缝调用
+（40/43 改形）。tab 切换由 `sync_session_observer` 顺路重指画布的
+session 字段（drag 跨 tab 存活至 43 号票的每-tab 重建落地——
+`can_switch` 本就禁止拖拽中切换，行为等价）。实现裁定 46 方法迁移/
+管线留驻清单与六条实现裁定见票 39 落地记录（`.scratch/` 票面）。
+
+**字段归属审计（2026-10-09，逐字段对照 Swift；实现照此执行）**：
+
+| state.rs 字段 | Swift 归属（已核行号） | 去向 |
+|---|---|---|
+| `drag` | CanvasView 私有 plain vars（transformDrag/cropDrag/gradientDrag :82/selectionDragStart/pixelDragStart…） | 画布实体私有（已落地） |
+| `space_saved_tool` | CanvasView `spaceHeld`(:35) | 画布实体私有（已落地） |
+| `gradient_cursor` | CanvasView `gradientDrag: GradientHandle?`(:82) | 画布实体私有（已落地） |
+| `shape_shape`/`shape_rect` | `shapeDraft` 在 session(:241)、拖拽框在 CanvasView | 画布实体私有（已落地）；shapeDraft-on-session 为记录偏差（Rust 以 `CanvasDrag::Shape` 手势族承载同一数据，搬 core 需手势管线手术，量级同票 34，独立成票） |
+| `text_box_rect` | CanvasView `textBoxRect`(:22) | 画布实体私有（已落地） |
+| `drop_point_doc` | ContentView drop 目标 + 事件位置 | 画布实体私有（已落地） |
+| `inline_text_input`/`inline_text_open`/`inline_text_pushed`/`inline_text_caret_phase` | InlineTextEditor NSView（CanvasView 子视图） | 画布实体私有（已落地） |
+| `camera_raw_samples_defringe` | FilterEdit.samplesDefringe(Filters.swift:254) | 暂留 app：Rust 把 FilterEdit 对象折叠成了 `FilterSettings`（:514），FilterEdit 的 UI 旗标无容器可去；为其新建包装层属 FilterEdit 落地票地基，本票不动，记 diff report |
+| `camera_raw_readout` | FilterEdit.cameraRawReadout(Filters.swift:269) | 同上，暂留 app |
+| `preview_base`/`preview`/`preview_base_transform` | Swift **无**泛型画布预览——per-dialog `previewImage(for:)` 在对话框对象内 | 暂留 app；对话框对象收敛（票 14 系）时随 FilterEdit/LevelsEdit 容器归位 |
+| `frame_image*`/`revision` | CanvasView DisplayState/render 缓存 | 暂留 app（原票文「随实体走」作废）——缩略图缓存共享 revision 纪元，跨实体读取比暂留更坏；帧缓存随 40（缩略图→图层列表）、纪元作用域随 37 |
+| `canvas_bounds`（原 AppState.viewport） | CanvasView.bounds | 画布实体私有（已落地；floating_panel 取画布中心改经实体读） |
+
+**测试**：912 全绿 = core 627 + app 175 + 集成 110；断言零改动（机械
+适配为零——测试本就不经 AppState 触及画布）；`boot smoke` 通过。
+
 ## 架构裁定（2026-10-09：废除 AppState 票 38——viewport 进 core session）
 
 `CanvasViewport`（`Rendering/CanvasViewport.swift`）全量移植为 core

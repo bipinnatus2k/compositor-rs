@@ -1,15 +1,25 @@
 //! The canvas viewport: paints the composite, checkerboard, rulers, guides,
 //! grid, selection outline, lasso draft, crop box and transform box; owns all
 //! pointer interaction with the document.
+//!
+//! This is the view entity mirroring Swift's `CanvasView` (ADR 0003 step B,
+//! ticket 39): one `EditorCanvasView` entity per window holds the gesture
+//! state machines and the inline text editor, exactly where the Swift NSView
+//! keeps its plain private vars (EditorCanvas.swift:35-97). The window shell
+//! (`AppState`, the transitional root) keeps the commit/preview/status
+//! pipelines and the frame cache; the canvas reaches them through its
+//! `app: WeakEntity<AppState>` seam until tickets 40/43 reshape it.
 
 use std::sync::Arc;
 
 use gpui_kit::Styled;
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::{
-    App, Bounds, Context, Corners, DispatchPhase, InteractiveElement, IntoElement, KeyDownEvent,
-    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathBuilder, Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, Window, canvas, div,
-    point, px, rgb, rgba, size,
+    App, AppContext, Bounds, Context, Corners, DispatchPhase, Entity, InteractiveElement,
+    IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, Render, RenderImage, ScrollDelta,
+    ScrollWheelEvent, Subscription, WeakEntity, Window, canvas, div, point, px, rgb, rgba, size,
 };
 use gpui_kit::{DragMoveEvent, ExternalPaths};
 
@@ -25,10 +35,78 @@ use compositor_core::tools::brush::{GradientShape, RasterEdit};
 use compositor_core::tools::warp::WarpStroke;
 
 use crate::canvas::inline_text_editor::{
-    inline_text_box, inline_text_box_corners, inline_text_measured_size, inline_text_overflows,
-    inline_text_resize,
+    inline_text_box, inline_text_box_corners, inline_text_key, inline_text_measured_size,
+    inline_text_overflows, inline_text_resize,
 };
-use crate::state::{AppState, CanvasDrag, RULER_SIZE};
+use crate::state::{AppState, RULER_SIZE};
+
+/// What the pointer is currently doing on the canvas. Canvas-private state,
+/// mirroring `CanvasView`'s plain private drag vars (they die with the view;
+/// the per-tab rebuild lands with ticket 43).
+pub(crate) enum CanvasDrag {
+    /// Hand tool or middle-mouse panning. `last` is the previous event
+    /// position: each move translates the session viewport by the delta
+    /// (Swift's incremental `viewport.translate(by:)`).
+    Pan { last: Point<Pixels> },
+    /// A brush-family stroke in progress on the layer captured at
+    /// `begin_stroke` (EditorSession+Brush.swift:130-133 commits to the
+    /// captured layer, never to whatever is active at mouse-up).
+    Stroke(RasterEdit, uuid::Uuid),
+    /// Gradient drag: the edit plus the document-space start point, on the
+    /// captured layer.
+    Gradient(RasterEdit, CGPoint, uuid::Uuid),
+    /// Marquee / freehand lasso drag; the draft lives in the session.
+    MarqueeLasso,
+    /// A Smudge or Liquify stroke working on a document-size copy.
+    Warp(WarpStroke),
+    /// The Shape tool dragging a shape out; the draft rect grows live.
+    Shape { start: CGPoint },
+    /// Move tool drag. `duplicate` is the Option modifier at the press: the
+    /// first drag tick duplicates the layer and drags the copy
+    /// (`duplicatesTransformOnDrag`).
+    MoveLayer {
+        start_origin: compositor_core::transform::LayerTransform,
+        start: CGPoint,
+        duplicate: bool,
+    },
+    /// Crop drag; the drag lives in the session.
+    Crop,
+    /// Guide drag (create from a ruler or move an existing line); the drag
+    /// lives in the session's `guide_drag`.
+    Guide,
+    /// Cmd-drag moving the selected pixels; the lifted raster lives in the
+    /// session's `pixel_move` (`EditorCanvas.pixelDragStart`).
+    PixelMove { start: CGPoint },
+    /// Plain drag moving the selection outline only; the origin lives in the
+    /// session's `selection_move_origin`.
+    SelectionMove { start: CGPoint },
+    /// The Type tool dragging a paragraph box out (`textBoxRect`); the rect
+    /// lives on this view in `text_box_rect`.
+    TextBox { start: CGPoint },
+    /// An inline text editor resize-handle drag (`InlineTextEditor.mouseDown`
+    /// /`mouseDragged`'s resize branch): which handle, where the drag began,
+    /// the transform the box showed when it began and the box size the
+    /// resize divides by; the draft itself lives in the session.
+    TextResize {
+        handle: usize,
+        start: CGPoint,
+        old: compositor_core::transform::LayerTransform,
+        source: CGSize,
+        draft: compositor_core::session::TextDraft,
+    },
+}
+
+/// The canvas-side gesture snapshot the app-side preview pipeline reads
+/// while compositing the displayed frame ([`AppState::composite`]'s drag
+/// branches; borrowed per frame — the drag itself never leaves the canvas
+/// entity, ticket 39's field audit).
+#[derive(Clone, Copy)]
+pub(crate) struct CanvasGesture<'a> {
+    pub drag: &'a Option<CanvasDrag>,
+    pub shape_shape: &'a Option<compositor_core::document::LayerShape>,
+    pub shape_rect: Option<CGRect>,
+    pub gradient_cursor: Option<CGPoint>,
+}
 
 /// `guideHitDistance` (Guides.swift): how close a Move press must land to a
 /// guide to take it, in screen points.
@@ -62,27 +140,194 @@ pub struct CanvasScene {
     pub inline_text_overflow: bool,
 }
 
-impl AppState {
-    pub fn render_canvas(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+/// The canvas view (`CanvasView`): paints the document and owns every
+/// pointer/keyboard gesture with it, plus the inline text editor overlay.
+/// Created by `AppState::new`; its `session` field is re-pointed on tab
+/// changes by `AppState::sync_session_observer` (the per-tab rebuild lands
+/// with ticket 43).
+pub struct EditorCanvasView {
+    /// The active tab's session — the view transform, the document and the
+    /// gesture state machines all read and write it (Swift `CanvasView`
+    /// holds its session reference the same way).
+    pub(crate) session: Entity<EditorSession>,
+    /// The window shell (the transitional root): commit/preview/status
+    /// pipelines and the frame cache stay there (ADR 0003 step B). No
+    /// AppState dependencies beyond what the moved handlers already used.
+    pub(crate) app: WeakEntity<AppState>,
+    /// The gesture in progress (`CanvasView`'s plain private drag vars).
+    pub(crate) drag: Option<CanvasDrag>,
+    /// The tool saved while Space temporarily turns the canvas into the Hand
+    /// tool (`spaceHeld` in EditorCanvas.swift).
+    space_saved_tool: Option<NavigationTool>,
+    /// The gradient tool's drag end, in document coordinates.
+    pub(crate) gradient_cursor: Option<CGPoint>,
+    /// The Shape tool's drag: the shape being placed and its current rect
+    /// (`shapeDraft` lives on the session in Swift; the port carries the
+    /// same data in the `CanvasDrag::Shape` gesture family — recorded
+    /// deviation, ticket 39's field audit).
+    shape_shape: Option<compositor_core::document::LayerShape>,
+    shape_rect: Option<CGRect>,
+    /// The Type tool's in-progress box drag (`textBoxRect`).
+    text_box_rect: Option<CGRect>,
+    /// Where an external file drag hovers, in document coordinates — the
+    /// import lands there on drop (`ImageFileDrop`'s drop point).
+    pub(crate) drop_point_doc: Option<CGPoint>,
+    /// The inline canvas text editor (`InlineTextEditor.swift`): one
+    /// persistent multi-line input, shown as an overlay while a text draft
+    /// is open (see `inline_text`).
+    pub(crate) inline_text_input: Entity<TextareaState>,
+    /// Whether the inline editor is bound to the current draft.
+    pub(crate) inline_text_open: bool,
+    /// The last text pushed into the inline input; keeps the two-way
+    /// binding from echoing the user's own keystrokes back.
+    pub(crate) inline_text_pushed: Option<String>,
+    /// The inline caret's blink phase anchor: any keystroke or caret move
+    /// resets it, so the caret holds solid while the user is working
+    /// (Swift's `caretBlinkTimer` invalidation on text change).
+    pub(crate) inline_text_caret_phase: std::time::Instant,
+    /// The canvas paint area in window coordinates, updated by every frame
+    /// (`CanvasView.bounds`; the document view transform is the session's
+    /// `CanvasViewport`).
+    pub(crate) canvas_bounds: Bounds<Pixels>,
+    /// Subscriptions owned here: the inline editor's two-way binding watches
+    /// the input entity that lives on this view.
+    subscriptions: Vec<Subscription>,
+}
+
+impl EditorCanvasView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // The inline editor's NSTextView counterpart: built here because an
+        // input state needs the window — the same shape `AppState::new` used
+        // when the field lived there (moved with the canvas, ticket 39).
+        let inline_text_input = cx.new(|cx| TextareaState::new(window, cx).default_value(""));
+        let mut canvas = EditorCanvasView {
+            session,
+            app,
+            drag: None,
+            space_saved_tool: None,
+            gradient_cursor: None,
+            shape_shape: None,
+            shape_rect: None,
+            text_box_rect: None,
+            drop_point_doc: None,
+            inline_text_input,
+            inline_text_open: false,
+            inline_text_pushed: None,
+            inline_text_caret_phase: std::time::Instant::now(),
+            canvas_bounds: Bounds::new(Point::new(px(0.), px(0.)), gpui_kit::size(px(0.), px(0.))),
+            subscriptions: Vec::new(),
+        };
+        canvas.subscribe_inline_text(cx);
+        canvas
+    }
+
+    /// The inline editor's two-way binding, input → session: typing writes
+    /// into the draft (`textDidChange`). Mirrors the subscription
+    /// `AppState::subscribe_inputs` used to carry; it moved here because the
+    /// input entity did (ticket 39).
+    fn subscribe_inline_text(&mut self, cx: &mut Context<Self>) {
+        let inline = self.inline_text_input.clone();
+        let subscription = cx.subscribe(
+            &inline,
+            move |this: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
+                if let InputEvent::Change = event {
+                    let text = this.inline_text_input.read(cx).value().to_string();
+                    this.inline_text_changed(&text, cx);
+                }
+            },
+        );
+        self.subscriptions.push(subscription);
+    }
+
+    /// The canvas's route to the app-side repaint epoch (`touch`): the
+    /// frame cache and `revision` stay on AppState (ticket 39's field
+    /// audit), so a gesture that changed the session asks the shell through
+    /// the seam.
+    pub(crate) fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// The active tab's view transform (`CanvasViewport` is `Copy`). Reads
+    /// this view's session directly, mirroring Swift's `session.viewport`
+    /// reads; the app-side twins (`AppState`'s `canvas_viewport` family)
+    /// serve the app callers on the same session entity.
+    pub(crate) fn canvas_viewport(&self, cx: &App) -> CanvasViewport {
+        self.session.read(cx).viewport
+    }
+
+    pub(crate) fn doc_size(&self, cx: &App) -> (f64, f64) {
+        self.session
+            .read(cx)
+            .document
+            .as_ref()
+            .map(|d| (d.width as f64, d.height as f64))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    pub(crate) fn screen_to_doc(&self, cx: &App, x: f32, y: f32) -> CGPoint {
+        let viewport = self.canvas_viewport(cx);
+        let (w, h) = self.doc_size(cx);
+        viewport.document_point(CGPoint::new(x as f64, y as f64), CGSize::new(w, h))
+    }
+
+    /// The document rect in canvas pixels.
+    fn image_rect(&self, cx: &App) -> Bounds<Pixels> {
+        let viewport = self.canvas_viewport(cx);
+        let (w, h) = self.doc_size(cx);
+        let per_pixel = viewport.points_per_pixel();
+        let origin = viewport.view_point(CGPoint::ZERO, CGSize::new(w, h));
+        Bounds::<Pixels>::new(
+            Point::new(px(origin.x as f32), px(origin.y as f32)),
+            gpui_kit::size(px((w * per_pixel) as f32), px((h * per_pixel) as f32)),
+        )
+    }
+}
+
+impl Render for EditorCanvasView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // An empty tab shows the welcome form in place of a canvas (Swift's
         // `if session.document == nil { welcome }`, ContentView.swift:99-110 —
-        // the tab-embedded NewCanvasSheet).
-        if self.current_tab().session.read(cx).document.is_none() {
-            return self.render_welcome(cx);
+        // the tab-embedded NewCanvasSheet). The form is the shell's (its
+        // inputs and flows live there); the canvas renders it exactly where
+        // `render_canvas` used to branch.
+        if self.session.read(cx).document.is_none() {
+            return self
+                .app
+                .update(cx, |app, cx| app.render_welcome(cx))
+                .unwrap_or_else(|_| div().into_any_element());
         }
-        let composite = self.composite(cx);
-        let image = composite
-            .as_ref()
-            .map(|composite| self.frame_image(composite));
+        let gesture = CanvasGesture {
+            drag: &self.drag,
+            shape_shape: &self.shape_shape,
+            shape_rect: self.shape_rect,
+            gradient_cursor: self.gradient_cursor,
+        };
+        let composite = self
+            .app
+            .update(cx, |app, cx| app.composite(gesture, cx))
+            .ok()
+            .flatten();
+        let image = composite.as_ref().and_then(|composite| {
+            self.app
+                .update(cx, |app, _| Some(app.frame_image(composite)))
+                .ok()
+                .flatten()
+        });
         let scene = self.build_scene(image, cx);
         // The inline text editor rides on the canvas while a draft is open
         // (InlineTextEditor.synchronize runs on every display sync in Swift;
         // here the overlay re-renders with the scene, so zoom and pan keep
         // it anchored).
         let inline_overlay = self.render_inline_text_overlay(cx);
-        let app_move = cx.entity().downgrade();
-        let app_up = cx.entity().downgrade();
-        let app_prepaint = cx.entity().downgrade();
+        let canvas_move = cx.entity().downgrade();
+        let canvas_up = cx.entity().downgrade();
+        let canvas_prepaint = cx.entity().downgrade();
+        let app = self.app.clone();
 
         div()
             .id("canvas-area")
@@ -104,7 +349,9 @@ impl AppState {
             ))
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
                 let paths = dropped.paths().to_vec();
-                this.receive_dropped_files(paths, cx);
+                this.app
+                    .update(cx, |app, cx| app.receive_dropped_files(paths, cx))
+                    .ok();
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -120,9 +367,9 @@ impl AppState {
             .child(
                 canvas(
                     move |bounds, _window, cx| {
-                        app_prepaint
-                            .update(cx, |state, cx| {
-                                state.canvas_bounds = bounds;
+                        canvas_prepaint
+                            .update(cx, |this, cx| {
+                                this.canvas_bounds = bounds;
                                 // `syncGeometry` (EditorCanvas.swift:719-728):
                                 // the canvas size lives on the session
                                 // viewport; a change resizes it, which refits
@@ -132,13 +379,11 @@ impl AppState {
                                 if vw <= 10.0 || vh <= 10.0 {
                                     return;
                                 }
-                                let needs_sync =
-                                    state.current_tab().session.read_with(cx, |session, _| {
-                                        session.viewport.view_size
-                                            != CGSize::new(vw as f64, vh as f64)
-                                    });
+                                let needs_sync = this.session.read_with(cx, |session, _| {
+                                    session.viewport.view_size != CGSize::new(vw as f64, vh as f64)
+                                });
                                 if needs_sync {
-                                    state.tab().session.update(cx, |session, _| {
+                                    this.session.update(cx, |session, _| {
                                         let document_size = session.document_size();
                                         session.viewport.resize(
                                             CGSize::new(vw as f64, vh as f64),
@@ -152,8 +397,8 @@ impl AppState {
                     },
                     move |bounds, _prepaint, window, _cx| {
                         paint_scene(&scene, bounds, window);
-                        install_drag_events(&app_move, &app_up, window);
-                        install_key_events(&app_move, window);
+                        install_drag_events(&canvas_move, &canvas_up, &app, window);
+                        install_key_events(&canvas_move, &app, window);
                     },
                 )
                 .absolute()
@@ -162,9 +407,11 @@ impl AppState {
             .children(inline_overlay)
             .into_any_element()
     }
+}
 
+impl EditorCanvasView {
     fn build_scene(&self, image: Option<Arc<RenderImage>>, cx: &App) -> CanvasScene {
-        let session = self.current_tab().session.read(cx);
+        let session = self.session.read(cx);
         let image_rect = self.image_rect(cx);
         // The frame's view transform; `to_screen` mirrors Swift's direct
         // `session.viewport.viewPoint(from:documentSize:)` reads.
@@ -324,25 +571,33 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sheet.is_some() {
+        // The sheet flag and the Camera Raw eyedropper arm are shell state
+        // (ticket 39's field audit); read them through the seam.
+        let (sheet_open, samples_defringe) = self
+            .app
+            .read_with(cx, |app, _| {
+                (app.sheet.is_some(), app.camera_raw_samples_defringe)
+            })
+            .unwrap_or((false, false));
+        if sheet_open {
             // The Camera Raw defringe eyedropper samples through the open
             // sheet instead of touching the tools.
-            if self.camera_raw_samples_defringe {
+            if samples_defringe {
                 let local = self.local_position(event.position);
                 let doc = self.screen_to_doc(cx, local.0, local.1);
-                self.sample_camera_raw_defringe(doc, cx);
+                self.app
+                    .update(cx, |app, cx| app.sample_camera_raw_defringe(doc, cx))
+                    .ok();
             }
             return;
         }
         if event.click_count > 1 {
             // Double click closes a polygonal lasso instead of starting a drag.
-            if self.tab().session.read(cx).tool == NavigationTool::Lasso
-                && self.tab().session.read(cx).lasso_kind == LassoKind::Polygonal
-                && self.tab().session.read(cx).lasso_draft.is_some()
+            if self.session.read(cx).tool == NavigationTool::Lasso
+                && self.session.read(cx).lasso_kind == LassoKind::Polygonal
+                && self.session.read(cx).lasso_draft.is_some()
             {
-                self.tab()
-                    .session
-                    .update(cx, |session, _| session.finish_lasso());
+                self.session.update(cx, |session, _| session.finish_lasso());
                 self.touch(cx);
             }
             return;
@@ -355,7 +610,7 @@ impl AppState {
         // The inline text editor's resize handles take a press before any
         // tool (`InlineTextEditor.hitTest`/`mouseDown`); the editor itself
         // swallows presses inside the overlay, so only these reach us.
-        if self.tab().session.read(cx).text_draft.is_some()
+        if self.session.read(cx).text_draft.is_some()
             && let Some(handle) = self.inline_text_handle_hit(doc, cx)
         {
             self.begin_inline_text_resize(doc, handle, cx);
@@ -367,24 +622,23 @@ impl AppState {
         // corner square is inert. On the canvas itself, only a Move press that
         // lands on a guide takes it — before any layer drag
         // (EditorCanvas.mouseDown's `beginGuideDrag`).
-        if self.tab().session.read(cx).shows_rulers
+        if self.session.read(cx).shows_rulers
             && let Some(axis) = ruler_axis_at(local)
         {
-            self.tab().session.update(cx, |session, _| {
+            self.session.update(cx, |session, _| {
                 session.begin_guide_creation(axis, guide_axis_position(axis, doc))
             });
             self.set_drag(Some(CanvasDrag::Guide), cx);
             self.touch(cx);
             return;
         }
-        if self.tab().session.read(cx).tool == NavigationTool::Move {
+        if self.session.read(cx).tool == NavigationTool::Move {
             // `guideHitDistance` is 5 screen points; the core measures in
             // document pixels.
-            let zoom = self.current_tab().session.read(cx).viewport.zoom();
+            let zoom = self.session.read(cx).viewport.zoom();
             let tolerance = GUIDE_HIT_DISTANCE / zoom.max(0.0001);
-            if let Some(guide_id) = self.tab().session.read(cx).hit_guide(doc, tolerance) {
-                self.tab()
-                    .session
+            if let Some(guide_id) = self.session.read(cx).hit_guide(doc, tolerance) {
+                self.session
                     .update(cx, |session, _| session.begin_guide_move(guide_id));
                 self.set_drag(Some(CanvasDrag::Guide), cx);
                 self.touch(cx);
@@ -392,7 +646,7 @@ impl AppState {
             }
         }
 
-        match self.tab().session.read(cx).tool {
+        match self.session.read(cx).tool {
             NavigationTool::Hand => {
                 self.set_drag(
                     Some(CanvasDrag::Pan {
@@ -411,11 +665,10 @@ impl AppState {
             NavigationTool::Marquee | NavigationTool::Lasso => {
                 // The polygonal lasso accumulates one point per click; Enter
                 // (or double click) closes the outline.
-                let polygonal = self.tab().session.read(cx).tool == NavigationTool::Lasso
-                    && self.tab().session.read(cx).lasso_kind == LassoKind::Polygonal;
-                if polygonal && self.tab().session.read(cx).lasso_draft.is_some() {
-                    self.tab()
-                        .session
+                let polygonal = self.session.read(cx).tool == NavigationTool::Lasso
+                    && self.session.read(cx).lasso_kind == LassoKind::Polygonal;
+                if polygonal && self.session.read(cx).lasso_draft.is_some() {
+                    self.session
                         .update(cx, |session, _| session.extend_lasso(doc));
                     self.touch(cx);
                     return;
@@ -426,7 +679,6 @@ impl AppState {
                 // (EditorCanvas.lassoMouseDown).
                 let ctrl = event.modifiers.control;
                 let inside = self
-                    .tab()
                     .session
                     .read(cx)
                     .selection()
@@ -434,7 +686,6 @@ impl AppState {
                     .unwrap_or(false);
                 if ctrl && inside {
                     if self
-                        .tab()
                         .session
                         .update(cx, |session, _| session.begin_pixel_move(alt))
                     {
@@ -448,7 +699,6 @@ impl AppState {
                     && !alt
                     && inside
                     && self
-                        .tab()
                         .session
                         .update(cx, |session, _| session.begin_selection_move())
                 {
@@ -456,24 +706,22 @@ impl AppState {
                     self.touch(cx);
                     return;
                 }
-                let mode = self.tab().session.read(cx).selection_mode(shift, alt);
-                self.tab()
-                    .session
+                let mode = self.session.read(cx).selection_mode(shift, alt);
+                self.session
                     .update(cx, |session, _| session.begin_lasso(doc, mode));
                 self.set_drag(Some(CanvasDrag::MarqueeLasso), cx);
             }
             NavigationTool::Wand => {
-                let mode = self.tab().session.read(cx).selection_mode(shift, alt);
-                self.tab()
-                    .session
+                let mode = self.session.read(cx).selection_mode(shift, alt);
+                self.session
                     .update(cx, |session, _| session.magic_wand(doc, mode));
             }
             NavigationTool::Brush
             | NavigationTool::SpotHealing
             | NavigationTool::CloneStamp
             | NavigationTool::Blur => {
-                if self.tab().session.read(cx).tool == NavigationTool::Blur {
-                    match self.tab().session.read(cx).blur_mode {
+                if self.session.read(cx).tool == NavigationTool::Blur {
+                    match self.session.read(cx).blur_mode {
                         BlurToolMode::Smudge | BlurToolMode::Liquify => {
                             self.begin_warp(doc, cx);
                         }
@@ -495,11 +743,11 @@ impl AppState {
                 self.begin_crop(doc, cx);
             }
             NavigationTool::Eyedropper => {
-                if let Some(document) = self.tab().session.read(cx).document.as_ref()
+                if let Some(document) = self.session.read(cx).document.as_ref()
                     && let Some(color) =
                         compositor_core::render::sample_composite_color(document, doc)
                 {
-                    self.tab().session.update(cx, |session, _| {
+                    self.session.update(cx, |session, _| {
                         session.brush_settings.red = color.red;
                         session.brush_settings.green = color.green;
                         session.brush_settings.blue = color.blue;
@@ -518,19 +766,38 @@ impl AppState {
         self.touch(cx);
     }
 
+    /// The status line lives on the shell (ticket 39's split): gestures
+    /// that report through it route via the seam.
+    fn set_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.set_status(message, cx))
+            .ok();
+    }
+
     pub fn canvas_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.sheet.is_some() {
-            return;
+    ) -> bool {
+        // The sheet flag is shell state; a drag ticks nothing while a sheet
+        // is up, exactly as before (read through the seam).
+        let sheet_open = self
+            .app
+            .read_with(cx, |app, _| app.sheet.is_some())
+            .unwrap_or(false);
+        if sheet_open {
+            return false;
         }
         let local = self.local_position(event.position);
         let doc = self.screen_to_doc(cx, local.0, local.1);
         let shift = event.modifiers.shift;
         let alt = event.modifiers.alt;
+        // The Move-layer drag pushes its preview into the inspector's fields
+        // (the fields are shell state and the sync needs the window), so the
+        // tick is reported to the window listener which runs it (ticket 39's
+        // seam; the sync ran inside this method before the split).
+        let mut sync_fields = false;
 
         // Swift pans incrementally (`viewport.translate(by:)`,
         // EditorCanvas.swift:1616): each move applies the delta since the
@@ -544,7 +811,7 @@ impl AppState {
             _ => None,
         };
         if let Some((dx, dy)) = pan_delta {
-            self.tab().session.update(cx, |session, _| {
+            self.session.update(cx, |session, _| {
                 session.viewport.translate(CGSize::new(dx, dy))
             });
             if let Some(CanvasDrag::Pan { last }) = self.drag.as_mut() {
@@ -561,14 +828,15 @@ impl AppState {
                 stroke.append(doc);
             }
             Some(CanvasDrag::Shape { start }) => {
-                let rect = shape_drag_rect(
-                    self.workspace.current().session.read(cx).shape_kind,
-                    *start,
-                    doc,
-                    shift,
-                    alt,
-                );
-                let shape = self.build_shape_for_drag(rect, cx);
+                let rect =
+                    shape_drag_rect(self.session.read(cx).shape_kind, *start, doc, shift, alt);
+                let shape = match self
+                    .app
+                    .update(cx, |app, cx| app.build_shape_for_drag(rect, cx))
+                {
+                    Ok(shape) => shape,
+                    Err(_) => return false,
+                };
                 self.shape_rect = Some(rect);
                 self.shape_shape = Some(shape);
             }
@@ -576,21 +844,12 @@ impl AppState {
                 self.gradient_cursor = Some(doc);
             }
             Some(CanvasDrag::MarqueeLasso) => {
-                let kind = self
-                    .workspace
-                    .current()
-                    .session
-                    .read(cx)
-                    .lasso_draft
-                    .as_ref()
-                    .map(|d| d.kind);
+                let kind = self.session.read(cx).lasso_draft.as_ref().map(|d| d.kind);
                 if matches!(kind, Some(LassoKind::Rectangle) | Some(LassoKind::Ellipse)) {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.drag_marquee(doc, shift, false));
                 } else {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.extend_lasso(doc));
                 }
             }
@@ -615,8 +874,7 @@ impl AppState {
                     draft.style.box_size = Some(resized.box_size);
                     draft.origin = resized.transform.origin;
                     draft.transform = Some(resized.transform);
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.text_draft = Some(draft));
                 }
             }
@@ -638,8 +896,7 @@ impl AppState {
                     {
                         *flag = false;
                     }
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.begin_duplicate_transform());
                 }
                 let delta = CGPoint::new(doc.x - start.x, doc.y - start.y);
@@ -653,7 +910,7 @@ impl AppState {
                 // pixels; Swift divides by pointsPerPixel, so it is exact
                 // only at zoom 1 (deviation recorded in the diff report).
                 let moving: Vec<uuid::Uuid> = {
-                    let session = self.workspace.current().session.read(cx);
+                    let session = self.session.read(cx);
                     session
                         .transform_edit
                         .as_ref()
@@ -666,81 +923,89 @@ impl AppState {
                 let value = if event.modifiers.control {
                     value
                 } else {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.snapped_move(value, &moving, 10.0))
                 };
-                self.tab()
-                    .session
+                self.session
                     .update(cx, |session, _| session.preview_transform(value));
                 // The inspector's fields follow the drag live
                 // (TransformInspector's binding to editedTransform).
-                self.sync_transform_inputs(window, cx);
+                sync_fields = true;
             }
             Some(CanvasDrag::PixelMove { start }) => {
                 let start = *start;
-                self.tab().session.update(cx, |session, _| {
+                self.session.update(cx, |session, _| {
                     session.drag_pixel_move(CGSize::new(doc.x - start.x, doc.y - start.y))
                 });
             }
             Some(CanvasDrag::SelectionMove { start }) => {
                 let start = *start;
-                self.tab().session.update(cx, |session, _| {
+                self.session.update(cx, |session, _| {
                     session.move_selection_outline(CGSize::new(doc.x - start.x, doc.y - start.y))
                 });
             }
             Some(CanvasDrag::Crop) => {
-                let ratio = self.tab().session.read(cx).crop_ratio();
-                self.tab()
-                    .session
+                let ratio = self.session.read(cx).crop_ratio();
+                self.session
                     .update(cx, |session, _| session.drag_crop(doc, ratio, false));
             }
             Some(CanvasDrag::Guide) => {
                 // The guide follows the pointer's document coordinate on its
                 // own axis (EditorCanvas.mouseDragged's guideDragging branch).
-                if let Some(drag) = self.tab().session.read(cx).guide_drag.as_ref() {
+                if let Some(drag) = self.session.read(cx).guide_drag.as_ref() {
                     let axis = drag.axis;
-                    self.tab().session.update(cx, |session, _| {
+                    self.session.update(cx, |session, _| {
                         session.move_guide_drag(guide_axis_position(axis, doc))
                     });
                 }
             }
-            None => return,
+            None => return false,
         }
         self.touch(cx);
+        sync_fields
     }
 
+    /// Returns whether the shell's transform fields need their follow-up
+    /// sync (`sync_transform_inputs` after a Move-layer drag; the fields and
+    /// the window the sync needs live on the shell, so the window listener
+    /// runs it — ticket 39's seam).
     pub fn canvas_mouse_up(
         &mut self,
         event: &MouseUpEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let drag = self.drag.take();
-        self.workspace
-            .current_mut()
-            .session
+        self.session
             .update(cx, |session, _| session.has_brush_stroke = false);
+        let mut sync_fields = false;
         if let Some(drag) = drag {
             match drag {
                 CanvasDrag::Stroke(mut edit, id) => {
                     edit.flush();
-                    self.commit_stroke(edit, id, cx);
+                    self.app
+                        .update(cx, |app, cx| app.commit_stroke(edit, id, cx))
+                        .ok();
                 }
                 CanvasDrag::Gradient(edit, start, id) => {
                     let local = self.local_position(event.position);
-                    self.gradient_cursor = Some(self.screen_to_doc(cx, local.0, local.1));
-                    let result = self.gradient_result(&edit, start, cx);
-                    self.commit_pixels(
-                        compositor_core::raster::ImportedImage::new(result, String::new()),
-                        EditTarget {
-                            layer_id: id,
-                            is_mask: edit.is_mask,
-                        },
-                        edit.paint_transform,
-                        "Gradient",
-                        cx,
-                    );
+                    let end = self.screen_to_doc(cx, local.0, local.1);
+                    self.gradient_cursor = Some(end);
+                    self.app
+                        .update(cx, |app, cx| {
+                            let result = app.gradient_result(&edit, start, Some(end), cx);
+                            app.commit_pixels(
+                                compositor_core::raster::ImportedImage::new(result, String::new()),
+                                EditTarget {
+                                    layer_id: id,
+                                    is_mask: edit.is_mask,
+                                },
+                                edit.paint_transform,
+                                "Gradient",
+                                cx,
+                            );
+                        })
+                        .ok();
                 }
                 CanvasDrag::Warp(stroke) => {
                     self.finish_warp(stroke, cx);
@@ -749,39 +1014,31 @@ impl AppState {
                     self.finish_shape(cx);
                 }
                 CanvasDrag::MarqueeLasso => {
-                    self.tab()
-                        .session
-                        .update(cx, |session, _| session.finish_lasso());
+                    self.session.update(cx, |session, _| session.finish_lasso());
                 }
                 CanvasDrag::PixelMove { .. } => {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.end_pixel_move());
                 }
                 CanvasDrag::SelectionMove { .. } => {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.end_selection_move());
                 }
                 CanvasDrag::Crop => {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.end_crop_drag());
                 }
                 CanvasDrag::MoveLayer { .. } => {
-                    self.tab()
-                        .session
+                    self.session
                         .update(cx, |session, _| session.commit_transform());
-                    self.sync_transform_inputs(window, cx);
+                    sync_fields = true;
                 }
                 CanvasDrag::Guide => {
                     // Releasing on a ruler cancels a new guide or deletes an
                     // existing one (`finishGuideDrag(delete:)`).
                     let local = self.local_position(event.position);
-                    let delete =
-                        guide_release_deletes(self.tab().session.read(cx).shows_rulers, local);
-                    self.tab()
-                        .session
+                    let delete = guide_release_deletes(self.session.read(cx).shows_rulers, local);
+                    self.session
                         .update(cx, |session, _| session.finish_guide_drag(delete));
                 }
                 CanvasDrag::Pan { .. } => {}
@@ -799,6 +1056,7 @@ impl AppState {
         if self.drag.is_none() && self.text_box_rect.is_some() {
             self.type_mouse_up(window, cx);
         }
+        sync_fields
     }
 
     pub fn canvas_scroll(
@@ -807,7 +1065,11 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sheet.is_some() {
+        let sheet_open = self
+            .app
+            .read_with(cx, |app, _| app.sheet.is_some())
+            .unwrap_or(false);
+        if sheet_open {
             return;
         }
         let local = self.local_position(event.position);
@@ -829,6 +1091,16 @@ impl AppState {
         }
     }
 
+    /// Zoom by a factor with the document point under `screen` pinned
+    /// (`session.zoom(to:anchor:)`, EditorSession.swift:913-916).
+    fn zoom_at(&mut self, screen: (f32, f32), factor: f64, cx: &mut Context<Self>) {
+        let current = self.session.read(cx).viewport.zoom();
+        let anchor = CGPoint::new(screen.0 as f64, screen.1 as f64);
+        self.session.update(cx, |session, _| {
+            session.zoom(current * factor, Some(anchor))
+        });
+    }
+
     /// Starts/ends a canvas drag, keeping the tab's `has_brush_stroke`
     /// busy flag in step (Swift keeps `brushStroke`/`warpStroke` on the
     /// session; since stage-D ticket 34 the flag itself is a session
@@ -836,18 +1108,15 @@ impl AppState {
     /// session guard).
     pub(crate) fn set_drag(&mut self, drag: Option<CanvasDrag>, cx: &mut Context<Self>) {
         self.drag = drag;
-        self.workspace
-            .current_mut()
-            .session
-            .update(cx, |session, _| {
-                session.has_brush_stroke = matches!(
-                    self.drag,
-                    Some(CanvasDrag::Stroke(..))
-                        | Some(CanvasDrag::Warp(_))
-                        | Some(CanvasDrag::Gradient(..))
-                        | Some(CanvasDrag::Shape { .. })
-                );
-            });
+        self.session.update(cx, |session, _| {
+            session.has_brush_stroke = matches!(
+                self.drag,
+                Some(CanvasDrag::Stroke(..))
+                    | Some(CanvasDrag::Warp(_))
+                    | Some(CanvasDrag::Gradient(..))
+                    | Some(CanvasDrag::Shape { .. })
+            );
+        });
     }
 
     pub(crate) fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
@@ -860,10 +1129,10 @@ impl AppState {
     // MARK: Strokes
 
     fn begin_stroke(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.read(cx).document.clone() else {
+        let Some(document) = self.session.read(cx).document.clone() else {
             return;
         };
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
+        let Some(id) = self.session.read(cx).active_layer_id else {
             return;
         };
         let Some(layer) = document.layer(id) else {
@@ -872,10 +1141,10 @@ impl AppState {
         // canPaint (EditorSession+Brush.swift:5-12) splits into the surface
         // rules and the state guards, both ahead of everything else —
         // Swift's guard runs before the clone-source handling too.
-        let Some(target) = paint_target(self.tab().session.read(cx), &document, layer) else {
+        let Some(target) = paint_target(self.session.read(cx), &document, layer) else {
             return;
         };
-        if !can_paint(self.tab().session.read(cx), &document) {
+        if !can_paint(self.session.read(cx), &document) {
             return;
         }
         let mask_target = target.is_mask;
@@ -883,17 +1152,16 @@ impl AppState {
         // nothing to do on a mask (EditorSession+Brush.swift:31).
         if mask_target
             && matches!(
-                self.tab().session.read(cx).tool,
+                self.session.read(cx).tool,
                 NavigationTool::SpotHealing | NavigationTool::CloneStamp
             )
         {
             return;
         }
         // Clone Stamp: option-click sets the source; strokes copy from it.
-        if self.tab().session.read(cx).tool == NavigationTool::CloneStamp {
+        if self.session.read(cx).tool == NavigationTool::CloneStamp {
             if alt {
-                self.tab()
-                    .session
+                self.session
                     .update(cx, |session, _| session.clone_source = Some(doc));
                 self.set_status(
                     format!("Clone source set at {:.0}, {:.0}", doc.x, doc.y),
@@ -901,31 +1169,25 @@ impl AppState {
                 );
                 return;
             }
-            if self.tab().session.read(cx).clone_source.is_none() {
+            if self.session.read(cx).clone_source.is_none() {
                 self.set_status("Option-click to set a clone source first", cx);
                 return;
             }
         }
-        let mut settings = self.tab().session.read(cx).brush_settings;
-        settings.erasing = self.tab().session.read(cx).brush_mode == BrushToolMode::Erase;
-        settings.healing = self.tab().session.read(cx).tool == NavigationTool::SpotHealing;
+        let mut settings = self.session.read(cx).brush_settings;
+        settings.erasing = self.session.read(cx).brush_mode == BrushToolMode::Erase;
+        settings.healing = self.session.read(cx).tool == NavigationTool::SpotHealing;
         // Smoothing trails the pointer on a string of `smoothing` screen
         // points — in document pixels the radius divides by the zoom. Only
         // the Brush tool smooths (EditorSession+Brush.swift:78).
-        if self.tab().session.read(cx).tool == NavigationTool::Brush {
-            settings.smoothing /= self
-                .current_tab()
-                .session
-                .read(cx)
-                .viewport
-                .zoom()
-                .max(0.0001);
+        if self.session.read(cx).tool == NavigationTool::Brush {
+            settings.smoothing /= self.session.read(cx).viewport.zoom().max(0.0001);
         } else {
             settings.smoothing = 0.0;
         }
         // A mask stroke paints white (reveal) or black (hide).
         if mask_target {
-            let v = if self.tab().session.read(cx).mask_paint_white {
+            let v = if self.session.read(cx).mask_paint_white {
                 1.0
             } else {
                 0.0
@@ -948,15 +1210,14 @@ impl AppState {
         // — `cloneStrokeOffset` plus the `cloneOffset = offset` fixup done only
         // once the sample succeeded). This used to recompute source-minus-brush
         // every stroke, which made aligned stamping drift.
-        if self.tab().session.read(cx).tool == NavigationTool::CloneStamp
-            && let Some(offset) = self.tab().session.read(cx).clone_stroke_offset(doc)
+        if self.session.read(cx).tool == NavigationTool::CloneStamp
+            && let Some(offset) = self.session.read(cx).clone_stroke_offset(doc)
             && let Some(sample) = self.sample_for_clone(cx)
         {
-            if self.tab().session.read(cx).clone_settings.aligned
-                && self.tab().session.read(cx).clone_offset.is_none()
+            if self.session.read(cx).clone_settings.aligned
+                && self.session.read(cx).clone_offset.is_none()
             {
-                self.tab()
-                    .session
+                self.session
                     .update(cx, |session, _| session.clone_offset = Some(offset));
             }
             edit.clone = Some((sample, offset));
@@ -967,13 +1228,11 @@ impl AppState {
         // in place through the tip (BlurTool.swift:8-40,
         // EditorSession+Brush.swift:42-46). This used to sample the layer even
         // on a mask target, stamping layer pixels into the mask.
-        if self.tab().session.read(cx).tool == NavigationTool::Blur {
-            let displayed = self.tab().session.read(cx).displayed_transform(layer);
+        if self.session.read(cx).tool == NavigationTool::Blur {
+            let displayed = self.session.read(cx).displayed_transform(layer);
             if let Some(sample) = blur_sample(&document, layer, &displayed, mask_target) {
-                let blurred = blur_sample_softened(
-                    &sample,
-                    self.tab().session.read(cx).brush_settings.diameter,
-                );
+                let blurred =
+                    blur_sample_softened(&sample, self.session.read(cx).brush_settings.diameter);
                 edit.clone = Some((blurred, CGSize::ZERO));
             }
         }
@@ -983,7 +1242,7 @@ impl AppState {
 
     /// What the Clone Stamp samples: the composite or the active layer.
     fn sample_for_clone(&self, cx: &App) -> Option<Bitmap> {
-        let session = self.current_tab().session.read(cx);
+        let session = self.session.read(cx);
         let document = session.document.as_ref()?;
         if session.clone_settings.sample_all_layers {
             return Some(compositor_core::render::draw_live_composite(document));
@@ -1219,89 +1478,6 @@ impl AppState {
         self.commit_pixels(snapshot, target, transform, name, cx);
     }
 
-    // MARK: Smudge / Liquify
-
-    /// `beginWarp`: the stroke works on the active layer as the canvas shows
-    /// it, at document size.
-    fn begin_warp(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.read(cx).document.clone() else {
-            return;
-        };
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
-            return;
-        };
-        let Some(layer) = document.layer(id) else {
-            return;
-        };
-        let Some(image) = layer.asset.as_ref().map(|a| a.image.as_ref().clone()) else {
-            return;
-        };
-        let mut surface = Bitmap::new(document.width.max(1), document.height.max(1));
-        compositor_core::render::draw_layer_pixels(&image, &layer.transform, &mut surface);
-        let mut stroke = WarpStroke::new(
-            surface,
-            self.tab().session.read(cx).blur_mode,
-            &self.tab().session.read(cx).brush_settings,
-        );
-        stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
-        stroke.layer_transform = layer.transform;
-        stroke.append(doc);
-        self.set_drag(Some(CanvasDrag::Warp(stroke)), cx);
-    }
-
-    /// `finishWarp`: paints the finished result into the layer's own pixels
-    /// along the stroke, as one undo step.
-    fn finish_warp(&mut self, stroke: WarpStroke, cx: &mut Context<Self>) {
-        let name = match stroke.mode {
-            BlurToolMode::Smudge => "Smudge",
-            BlurToolMode::Liquify => "Liquify",
-            BlurToolMode::Blur => "Blur",
-        };
-        let Some(document) = self.tab().session.read(cx).document.clone() else {
-            return;
-        };
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
-            return;
-        };
-        let Some(layer) = document.layer(id) else {
-            return;
-        };
-        // The stroke captured the layer it started on; if it changed under
-        // the warp, the result is dropped (finishWarp's identity guard).
-        if stroke.layer_asset.as_deref() != layer.asset.as_ref().map(|a| a.image.as_ref())
-            || stroke.layer_transform != layer.transform
-        {
-            return;
-        }
-        let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
-        let selection_clip = document.selection.as_ref().map(|s| s.clip(document.size()));
-        let diameter = stroke.diameter;
-        let points = stroke.points.clone();
-        let result = stroke.into_image();
-        if let Some((snapshot, transform, _)) = compositor_core::tools::warp::finish_warp_into_layer(
-            &result,
-            &points,
-            diameter,
-            source,
-            layer.transform,
-            document.size(),
-            name,
-            selection_clip,
-        ) {
-            // The warp always targets the layer it started on.
-            self.commit_pixels(
-                snapshot,
-                EditTarget {
-                    layer_id: id,
-                    is_mask: false,
-                },
-                transform,
-                name,
-                cx,
-            );
-        }
-    }
-
     // MARK: Shape
 
     /// The shape the current drag places, from the tool's settings.
@@ -1324,30 +1500,6 @@ impl AppState {
             start: CGPoint::ZERO,
             end: CGPoint::new(1.0, 1.0),
         }
-    }
-
-    fn begin_shape(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        self.set_drag(Some(CanvasDrag::Shape { start: doc }), cx);
-        self.shape_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
-        self.shape_shape = Some(self.build_shape_for_drag(CGRect::new(doc.x, doc.y, 0.0, 0.0), cx));
-    }
-
-    /// `finishShape`: one undo step; a click without a drag makes nothing.
-    fn finish_shape(&mut self, cx: &mut Context<Self>) {
-        self.shape_shape = None;
-        let Some(rect) = self.shape_rect.take() else {
-            return;
-        };
-        if rect.width() < 1.0 || rect.height() < 1.0 {
-            return;
-        }
-        let kind = self.tab().session.read(cx).shape_kind;
-        let shape = self.build_shape_for_drag(rect, cx);
-        self.tab().session.update(cx, |session, _| {
-            let name = session.next_shape_name(kind);
-            session.add_shape_layer(shape, rect, name);
-        });
-        self.touch(cx);
     }
 
     /// Stores new pixels into the active layer (or its mask, when the stroke
@@ -1408,167 +1560,6 @@ impl AppState {
             name,
             cx,
         );
-    }
-
-    // MARK: Gradient
-
-    fn begin_gradient(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.read(cx).document.clone() else {
-            return;
-        };
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
-            return;
-        };
-        let Some(layer) = document.layer(id) else {
-            return;
-        };
-        // Gradients land on the same surface under the same canPaint gate
-        // as a brush stroke (Gradient.swift:36-38, EditorSession+Brush.swift:
-        // 5-12) — a drag that would refuse to paint never opens a draft.
-        let Some(target) = paint_target(self.tab().session.read(cx), &document, layer) else {
-            return;
-        };
-        if !can_paint(self.tab().session.read(cx), &document) {
-            return;
-        }
-        let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
-        let edit = RasterEdit::new(
-            target.source,
-            target.base_transform,
-            target.is_mask,
-            self.tab().session.read(cx).brush_settings,
-            CGSize::new(document.width as f64, document.height as f64),
-            clip,
-        );
-        self.gradient_cursor = Some(doc);
-        self.set_drag(Some(CanvasDrag::Gradient(edit, doc, id)), cx);
-    }
-
-    // MARK: Move
-
-    fn begin_move(&mut self, doc: CGPoint, command: bool, option: bool, cx: &mut Context<Self>) {
-        // A picked layer becomes the transform target before the drag starts.
-        if self.tab().session.read(cx).transform_edit.is_none() {
-            let active_id = self.tab().session.read(cx).active_layer_id;
-            let auto_select = self.tab().session.read(cx).transform_auto_select;
-            if let Some(document) = self.tab().session.read(cx).document.as_ref()
-                && let Some((id, picked)) =
-                    transform_press_layer(document, active_id, auto_select, command, true, doc)
-                && picked
-            {
-                self.tab()
-                    .session
-                    .update(cx, |session, _| session.select_layer(Some(id)));
-            }
-        }
-        if self.tab().session.read(cx).transform_edit.is_none() {
-            if self.tab().session.read(cx).can_transform() {
-                // The drag begins a transient transform (persistent false,
-                // EditorCanvas.swift:2129).
-                self.tab()
-                    .session
-                    .update(cx, |session, _| session.begin_transform_persistent(false));
-            } else {
-                return;
-            }
-        }
-        let Some(draft) = self
-            .tab()
-            .session
-            .read(cx)
-            .transform_edit
-            .as_ref()
-            .map(|edit| edit.draft)
-        else {
-            return;
-        };
-        self.set_drag(
-            Some(CanvasDrag::MoveLayer {
-                start_origin: draft,
-                start: doc,
-                // A Move drag duplicates when Option is held
-                // (duplicatesTransformOnDrag, EditorCanvas.swift:2127).
-                duplicate: option,
-            }),
-            cx,
-        );
-        self.touch(cx);
-    }
-
-    // MARK: Crop
-
-    fn begin_crop(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
-        let mode = if let Some(rect) = self.tab().session.read(cx).crop_rect {
-            match handle_at(rect, doc) {
-                Some(index) => CropDragMode::Resize(index),
-                None if rect.contains_point(doc) => CropDragMode::Move,
-                None => CropDragMode::Create,
-            }
-        } else {
-            CropDragMode::Create
-        };
-        self.tab()
-            .session
-            .update(cx, |session, _| session.begin_crop_drag(doc, mode));
-        self.set_drag(Some(CanvasDrag::Crop), cx);
-        self.touch(cx);
-    }
-
-    // MARK: Type
-
-    /// The Type tool's press (`beginTextGesture`): a press on a visible text
-    /// layer edits it inline; anywhere else the press anchors a text box
-    /// drag, and the release decides between point text and a paragraph box.
-    /// Any open draft commits first, so clicking away applies the text
-    /// (empty drafts are a quiet no-op, as in Swift).
-    fn type_mouse_down(&mut self, doc: CGPoint, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab().session.read(cx).document.is_none() {
-            return;
-        }
-        if !self
-            .tab()
-            .session
-            .update(cx, |session, _| session.finish_text())
-        {
-            self.touch(cx);
-            return;
-        }
-        self.sync_inline_text(window, cx);
-        let document = self.tab().session.read(cx).document.clone().unwrap();
-        let visible = document.effective_visible_ids();
-        if let Some(layer) = document.layers.iter().rev().find(|l| {
-            visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(doc)
-        }) {
-            let id = layer.id;
-            self.tab().session.update(cx, |session, _| {
-                session.select_layer(Some(id));
-                session.edit_active_text();
-            });
-            self.sync_inline_text(window, cx);
-            self.touch(cx);
-            return;
-        }
-        self.text_box_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
-        self.set_drag(Some(CanvasDrag::TextBox { start: doc }), cx);
-    }
-
-    /// The Type tool's release (`finishTextGesture`): a click without a drag
-    /// lays point text at the click; a drag sets the paragraph bounds.
-    fn type_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rect) = self.text_box_rect.take() else {
-            return;
-        };
-        if rect.width() < 4.0 && rect.height() < 4.0 {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.begin_text(rect.origin, true));
-        } else {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.begin_text_in(rect));
-        }
-        self.sync_inline_text(window, cx);
-        self.touch(cx);
     }
 
     // MARK: Keys
@@ -1652,8 +1643,13 @@ impl AppState {
             self.touch(cx);
             return;
         }
-        // The Type tool's box drag preview dies with the gesture.
-        if self.text_box_rect.take().is_some() {
+        // The Type tool's box drag preview dies with the gesture (the box
+        // rect is canvas state since ticket 39).
+        if self
+            .canvas_view
+            .update(cx, |canvas, _| canvas.text_box_rect.take())
+            .is_some()
+        {
             self.touch(cx);
             return;
         }
@@ -1727,6 +1723,450 @@ impl AppState {
         {
             self.rename_input = None;
             self.touch(cx);
+        }
+    }
+}
+
+impl EditorCanvasView {
+    // MARK: Smudge / Liquify
+
+    /// `beginWarp`: the stroke works on the active layer as the canvas shows
+    /// it, at document size.
+    fn begin_warp(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+        let Some(document) = self.session.read(cx).document.clone() else {
+            return;
+        };
+        let Some(id) = self.session.read(cx).active_layer_id else {
+            return;
+        };
+        let Some(layer) = document.layer(id) else {
+            return;
+        };
+        let Some(image) = layer.asset.as_ref().map(|a| a.image.as_ref().clone()) else {
+            return;
+        };
+        let mut surface = Bitmap::new(document.width.max(1), document.height.max(1));
+        compositor_core::render::draw_layer_pixels(&image, &layer.transform, &mut surface);
+        let mut stroke = WarpStroke::new(
+            surface,
+            self.session.read(cx).blur_mode,
+            &self.session.read(cx).brush_settings,
+        );
+        stroke.layer_asset = layer.asset.as_ref().map(|a| a.image.clone());
+        stroke.layer_transform = layer.transform;
+        stroke.append(doc);
+        self.set_drag(Some(CanvasDrag::Warp(stroke)), cx);
+    }
+
+    /// `finishWarp`: paints the finished result into the layer's own pixels
+    /// along the stroke, as one undo step. The commit itself is shell-side
+    /// (`commit_pixels`, ticket 39's split).
+    fn finish_warp(&mut self, stroke: WarpStroke, cx: &mut Context<Self>) {
+        let name = match stroke.mode {
+            BlurToolMode::Smudge => "Smudge",
+            BlurToolMode::Liquify => "Liquify",
+            BlurToolMode::Blur => "Blur",
+        };
+        let Some(document) = self.session.read(cx).document.clone() else {
+            return;
+        };
+        let Some(id) = self.session.read(cx).active_layer_id else {
+            return;
+        };
+        let Some(layer) = document.layer(id) else {
+            return;
+        };
+        // The stroke captured the layer it started on; if it changed under
+        // the warp, the result is dropped (finishWarp's identity guard).
+        if stroke.layer_asset.as_deref() != layer.asset.as_ref().map(|a| a.image.as_ref())
+            || stroke.layer_transform != layer.transform
+        {
+            return;
+        }
+        let source = layer.asset.as_ref().map(|a| a.image.as_ref().clone());
+        let selection_clip = document.selection.as_ref().map(|s| s.clip(document.size()));
+        let diameter = stroke.diameter;
+        let points = stroke.points.clone();
+        let result = stroke.into_image();
+        if let Some((snapshot, transform, _)) = compositor_core::tools::warp::finish_warp_into_layer(
+            &result,
+            &points,
+            diameter,
+            source,
+            layer.transform,
+            document.size(),
+            name,
+            selection_clip,
+        ) {
+            // The warp always targets the layer it started on.
+            self.app
+                .update(cx, |app, cx| {
+                    app.commit_pixels(
+                        snapshot,
+                        EditTarget {
+                            layer_id: id,
+                            is_mask: false,
+                        },
+                        transform,
+                        name,
+                        cx,
+                    );
+                })
+                .ok();
+        }
+    }
+
+    // MARK: Shape
+
+    fn begin_shape(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+        self.set_drag(Some(CanvasDrag::Shape { start: doc }), cx);
+        self.shape_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
+        // The shape settings are session state; the builder is shell-side
+        // (the preview pipeline, ticket 39's split).
+        if let Ok(shape) = self.app.update(cx, |app, cx| {
+            app.build_shape_for_drag(CGRect::new(doc.x, doc.y, 0.0, 0.0), cx)
+        }) {
+            self.shape_shape = Some(shape);
+        }
+    }
+
+    /// `finishShape`: one undo step; a click without a drag makes nothing.
+    fn finish_shape(&mut self, cx: &mut Context<Self>) {
+        self.shape_shape = None;
+        let Some(rect) = self.shape_rect.take() else {
+            return;
+        };
+        if rect.width() < 1.0 || rect.height() < 1.0 {
+            return;
+        }
+        let kind = self.session.read(cx).shape_kind;
+        let Ok(shape) = self
+            .app
+            .update(cx, |app, cx| app.build_shape_for_drag(rect, cx))
+        else {
+            return;
+        };
+        self.session.update(cx, |session, _| {
+            let name = session.next_shape_name(kind);
+            session.add_shape_layer(shape, rect, name);
+        });
+        self.touch(cx);
+    }
+
+    // MARK: Gradient
+
+    fn begin_gradient(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+        let Some(document) = self.session.read(cx).document.clone() else {
+            return;
+        };
+        let Some(id) = self.session.read(cx).active_layer_id else {
+            return;
+        };
+        let Some(layer) = document.layer(id) else {
+            return;
+        };
+        // Gradients land on the same surface under the same canPaint gate
+        // as a brush stroke (Gradient.swift:36-38, EditorSession+Brush.swift:
+        // 5-12) — a drag that would refuse to paint never opens a draft.
+        let Some(target) = paint_target(self.session.read(cx), &document, layer) else {
+            return;
+        };
+        if !can_paint(self.session.read(cx), &document) {
+            return;
+        }
+        let clip = document.selection.as_ref().map(|s| s.clip(document.size()));
+        let edit = RasterEdit::new(
+            target.source,
+            target.base_transform,
+            target.is_mask,
+            self.session.read(cx).brush_settings,
+            CGSize::new(document.width as f64, document.height as f64),
+            clip,
+        );
+        self.gradient_cursor = Some(doc);
+        self.set_drag(Some(CanvasDrag::Gradient(edit, doc, id)), cx);
+    }
+
+    // MARK: Move
+
+    fn begin_move(&mut self, doc: CGPoint, command: bool, option: bool, cx: &mut Context<Self>) {
+        // A picked layer becomes the transform target before the drag starts.
+        if self.session.read(cx).transform_edit.is_none() {
+            let active_id = self.session.read(cx).active_layer_id;
+            let auto_select = self.session.read(cx).transform_auto_select;
+            if let Some(document) = self.session.read(cx).document.as_ref()
+                && let Some((id, picked)) =
+                    transform_press_layer(document, active_id, auto_select, command, true, doc)
+                && picked
+            {
+                self.session
+                    .update(cx, |session, _| session.select_layer(Some(id)));
+            }
+        }
+        if self.session.read(cx).transform_edit.is_none() {
+            if self.session.read(cx).can_transform() {
+                // The drag begins a transient transform (persistent false,
+                // EditorCanvas.swift:2129).
+                self.session
+                    .update(cx, |session, _| session.begin_transform_persistent(false));
+            } else {
+                return;
+            }
+        }
+        let Some(draft) = self
+            .session
+            .read(cx)
+            .transform_edit
+            .as_ref()
+            .map(|edit| edit.draft)
+        else {
+            return;
+        };
+        self.set_drag(
+            Some(CanvasDrag::MoveLayer {
+                start_origin: draft,
+                start: doc,
+                // A Move drag duplicates when Option is held
+                // (duplicatesTransformOnDrag, EditorCanvas.swift:2127).
+                duplicate: option,
+            }),
+            cx,
+        );
+        self.touch(cx);
+    }
+
+    // MARK: Crop
+
+    fn begin_crop(&mut self, doc: CGPoint, cx: &mut Context<Self>) {
+        let mode = if let Some(rect) = self.session.read(cx).crop_rect {
+            match handle_at(rect, doc) {
+                Some(index) => CropDragMode::Resize(index),
+                None if rect.contains_point(doc) => CropDragMode::Move,
+                None => CropDragMode::Create,
+            }
+        } else {
+            CropDragMode::Create
+        };
+        self.session
+            .update(cx, |session, _| session.begin_crop_drag(doc, mode));
+        self.set_drag(Some(CanvasDrag::Crop), cx);
+        self.touch(cx);
+    }
+
+    // MARK: Type
+
+    /// The Type tool's press (`beginTextGesture`): a press on a visible text
+    /// layer edits it inline; anywhere else the press anchors a text box
+    /// drag, and the release decides between point text and a paragraph box.
+    /// Any open draft commits first, so clicking away applies the text
+    /// (empty drafts are a quiet no-op, as in Swift).
+    fn type_mouse_down(&mut self, doc: CGPoint, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).document.is_none() {
+            return;
+        }
+        if !self.session.update(cx, |session, _| session.finish_text()) {
+            self.touch(cx);
+            return;
+        }
+        self.sync_inline_text(window, cx);
+        let document = self.session.read(cx).document.clone().unwrap();
+        let visible = document.effective_visible_ids();
+        if let Some(layer) = document.layers.iter().rev().find(|l| {
+            visible.contains(&l.id) && l.live_text().is_some() && l.transform.contains(doc)
+        }) {
+            let id = layer.id;
+            self.session.update(cx, |session, _| {
+                session.select_layer(Some(id));
+                session.edit_active_text();
+            });
+            self.sync_inline_text(window, cx);
+            self.touch(cx);
+            return;
+        }
+        self.text_box_rect = Some(CGRect::new(doc.x, doc.y, 0.0, 0.0));
+        self.set_drag(Some(CanvasDrag::TextBox { start: doc }), cx);
+    }
+
+    /// The Type tool's release (`finishTextGesture`): a click without a drag
+    /// lays point text at the click; a drag sets the paragraph bounds.
+    fn type_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rect) = self.text_box_rect.take() else {
+            return;
+        };
+        if rect.width() < 4.0 && rect.height() < 4.0 {
+            self.session
+                .update(cx, |session, _| session.begin_text(rect.origin, true));
+        } else {
+            self.session
+                .update(cx, |session, _| session.begin_text_in(rect));
+        }
+        self.sync_inline_text(window, cx);
+        self.touch(cx);
+    }
+
+    // MARK: Keys
+
+    /// Space keyDown: the canvas pans until the key comes back up
+    /// (EditorCanvas.swift:1825).
+    fn space_down(&mut self, cx: &mut Context<Self>) {
+        if self.space_saved_tool.is_some() {
+            return;
+        }
+        let (has_document, has_draft, tool) = {
+            let session = self.session.read(cx);
+            (
+                session.document.is_some(),
+                session.text_draft.is_some(),
+                session.tool,
+            )
+        };
+        if !has_document || has_draft {
+            return;
+        }
+        self.space_saved_tool = Some(tool);
+        self.session
+            .update(cx, |session, _| session.tool = NavigationTool::Hand);
+        self.touch(cx);
+    }
+
+    /// Space keyUp: the saved tool comes back (EditorCanvas.swift:1866).
+    fn space_up(&mut self, cx: &mut Context<Self>) {
+        if let Some(tool) = self.space_saved_tool.take() {
+            self.session.update(cx, |session, _| session.tool = tool);
+            self.touch(cx);
+        }
+    }
+
+    /// The raw canvas keys: Space hold-to-pan, opacity digits, Option-arrow
+    /// text spacing and ⌘Return (`EditorCanvas.keyDown`). Runs on the bubble
+    /// phase; keys that mean something here don't reach the action system.
+    /// The keys that route into shell-side pipelines (the text-style edits,
+    /// the tool sliders' opacity digits) do so through the seam; the digit
+    /// arm needs the window for the slider writes, so it is reported back to
+    /// the window listener, which runs `AppState::opacity_digit`.
+    pub fn canvas_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<i32> {
+        let key = event.keystroke.key.as_str();
+        let modifiers = &event.keystroke.modifiers;
+        let bare = !(modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift);
+        // While the inline canvas text editor owns the keyboard, its keys
+        // route first (`CanvasTextView.keyDown`): ⌘Return finishes, Escape
+        // cancels, Option-arrows step the spacing, everything else types.
+        // The Option-arrows normally arrive as actions instead —
+        // `keys::inline_text_bindings` binds them above the text system's
+        // own alt-arrow bindings and the overlay div's handlers consume
+        // them — so this gate's spacing arms are a fallback that only fires
+        // when no binding matched (they can never double-step: a consumed
+        // keystroke never reaches this listener).
+        if self.inline_text_focused(window, cx) {
+            use crate::canvas::inline_text_editor::InlineTextKey;
+            if let Some(action) = inline_text_key(
+                key,
+                modifiers.control,
+                modifiers.alt,
+                modifiers.platform,
+                modifiers.shift,
+            ) {
+                match action {
+                    InlineTextKey::Finish => self.commit_inline_text(cx),
+                    InlineTextKey::Cancel => self.cancel_inline_text(cx),
+                    InlineTextKey::Tracking(delta) => {
+                        self.app
+                            .update(cx, |app, cx| app.adjust_text_tracking(delta, cx))
+                            .ok();
+                    }
+                    InlineTextKey::Leading(down, step) => {
+                        self.app
+                            .update(cx, |app, cx| app.adjust_text_leading(down, step, cx))
+                            .ok();
+                    }
+                }
+            }
+            cx.stop_propagation();
+            return None;
+        }
+        // `AppState::canvas_keys_active`'s two conjuncts, evaluated here:
+        // the sheet flag is shell state; the focused-input check reads the
+        // window (the gate itself stays shell-side for the hotkey wrapper).
+        let sheet_open = self
+            .app
+            .read_with(cx, |app, _| app.sheet.is_some())
+            .unwrap_or(false);
+        if sheet_open || window.has_focused_input(cx) {
+            return None;
+        }
+        // ⌘Return finishes the text draft (⌘ maps to Ctrl on Windows).
+        if modifiers.control && !modifiers.alt && key == "enter" {
+            self.app.update(cx, |app, cx| app.finish_text_edit(cx)).ok();
+            cx.stop_propagation();
+            return None;
+        }
+        // Space holds the Hand tool; a text draft keeps typing into the box.
+        if key == "space" && bare && self.session.read(cx).text_draft.is_none() {
+            self.space_down(cx);
+            cx.stop_propagation();
+            return None;
+        }
+        // Option with the arrows sets the text's spacing: left and right the
+        // tracking, up and down the leading; Shift makes each step ten.
+        if modifiers.alt && !modifiers.control && !modifiers.platform {
+            let step = if modifiers.shift { 10.0 } else { 1.0 };
+            match key {
+                "left" => {
+                    self.app
+                        .update(cx, |app, cx| app.adjust_text_tracking(-step, cx))
+                        .ok();
+                    cx.stop_propagation();
+                    return None;
+                }
+                "right" => {
+                    self.app
+                        .update(cx, |app, cx| app.adjust_text_tracking(step, cx))
+                        .ok();
+                    cx.stop_propagation();
+                    return None;
+                }
+                "up" => {
+                    self.app
+                        .update(cx, |app, cx| app.adjust_text_leading(false, step, cx))
+                        .ok();
+                    cx.stop_propagation();
+                    return None;
+                }
+                "down" => {
+                    self.app
+                        .update(cx, |app, cx| app.adjust_text_leading(true, step, cx))
+                        .ok();
+                    cx.stop_propagation();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        // Number keys set opacity when the tool uses it (usesOpacityKeys).
+        if bare
+            && let Ok(digit) = key.parse::<i32>()
+            && (0..=9).contains(&digit)
+        {
+            cx.stop_propagation();
+            return Some(digit);
+        }
+        None
+    }
+
+    /// The raw canvas key releases: Space gives the saved tool back.
+    pub fn canvas_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "space" {
+            self.space_up(cx);
         }
     }
 }
@@ -2370,27 +2810,46 @@ fn nice_tick(rough: f64) -> f64 {
 
 /// Registers the window-level listeners that continue an in-progress drag
 /// when the pointer leaves the canvas. Called during paint; listeners are
-/// re-registered every frame.
+/// re-registered every frame. The gesture runs on the canvas entity; when a
+/// Move-layer tick (or its release commit) needs the shell's transform-field
+/// sync, the canvas reports it and this listener runs the shell side — the
+/// sync needs the window, which only the listener owns during dispatch
+/// (ticket 39's seam; the call used to sit inside `canvas_mouse_move`).
 fn install_drag_events(
-    app_move: &gpui_kit::WeakEntity<AppState>,
-    app_up: &gpui_kit::WeakEntity<AppState>,
+    canvas_move: &gpui_kit::WeakEntity<EditorCanvasView>,
+    canvas_up: &gpui_kit::WeakEntity<EditorCanvasView>,
+    app: &gpui_kit::WeakEntity<AppState>,
     window: &mut Window,
 ) {
-    let app_move = app_move.clone();
-    let app_up = app_up.clone();
+    let canvas_move = canvas_move.clone();
+    let canvas_up = canvas_up.clone();
+    let app_move_sync = app.clone();
+    let app_up_sync = app.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
-        app_move
-            .update(cx, |state, cx| {
-                if state.drag.is_some() {
-                    state.canvas_mouse_move(event, window, cx);
+        let sync_fields = canvas_move
+            .update(cx, |canvas, cx| {
+                if canvas.drag.is_some() {
+                    canvas.canvas_mouse_move(event, window, cx)
+                } else {
+                    false
                 }
             })
-            .ok();
+            .unwrap_or(false);
+        if sync_fields {
+            app_move_sync
+                .update(cx, |app, cx| app.sync_transform_inputs(window, cx))
+                .ok();
+        }
     });
     window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
-        app_up
-            .update(cx, |state, cx| state.canvas_mouse_up(event, window, cx))
-            .ok();
+        let sync_fields = canvas_up
+            .update(cx, |canvas, cx| canvas.canvas_mouse_up(event, window, cx))
+            .unwrap_or(false);
+        if sync_fields {
+            app_up_sync
+                .update(cx, |app, cx| app.sync_transform_inputs(window, cx))
+                .ok();
+        }
     });
 }
 
@@ -2398,24 +2857,38 @@ fn install_drag_events(
 /// system can't express: Space's hold-to-pan (needs keyUp), the opacity
 /// digits, Option-arrow text spacing and ⌘Return finishing text
 /// (`EditorCanvas.keyDown`/`keyUp`). Listeners run each frame, so they must
-/// be re-registered during paint like the drag events above.
-fn install_key_events(app: &gpui_kit::WeakEntity<AppState>, window: &mut Window) {
-    let app_down = app.clone();
+/// be re-registered during paint like the drag events above. The canvas
+/// state machine routes everything it owns; the opacity digit is reported
+/// back so the listener runs the shell-side `opacity_digit` (the tool
+/// sliders are shell state and the write needs the window — ticket 39's
+/// seam; the call used to sit inside `canvas_key_down`).
+fn install_key_events(
+    canvas: &gpui_kit::WeakEntity<EditorCanvasView>,
+    app: &gpui_kit::WeakEntity<AppState>,
+    window: &mut Window,
+) {
+    let canvas_down = canvas.clone();
+    let app_digit = app.clone();
     window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble {
             return;
         }
-        app_down
-            .update(cx, |state, cx| state.canvas_key_down(event, window, cx))
-            .ok();
+        let digit = canvas_down
+            .update(cx, |canvas, cx| canvas.canvas_key_down(event, window, cx))
+            .unwrap_or(None);
+        if let Some(digit) = digit {
+            app_digit
+                .update(cx, |app, cx| app.opacity_digit(digit, window, cx))
+                .ok();
+        }
     });
-    let app_up = app.clone();
+    let canvas_up = canvas.clone();
     window.on_key_event(move |event: &KeyUpEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble {
             return;
         }
-        app_up
-            .update(cx, |state, cx| state.canvas_key_up(event, window, cx))
+        canvas_up
+            .update(cx, |canvas, cx| canvas.canvas_key_up(event, window, cx))
             .ok();
     });
 }

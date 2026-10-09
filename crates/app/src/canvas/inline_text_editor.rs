@@ -76,7 +76,7 @@ use compositor_core::document::LayerTextStyle;
 use compositor_core::geometry::{CGPoint, CGSize};
 use compositor_core::transform::{HANDLES, LayerTransform};
 
-use crate::state::{AppState, CanvasDrag};
+use crate::canvas::editor_canvas::{CanvasDrag, EditorCanvasView};
 
 /// The overlay input's cap, mirroring Swift's
 /// `shouldChangeTextIn` guard (100,000 characters).
@@ -469,26 +469,23 @@ pub fn inline_text_key(
     }
 }
 
-impl AppState {
+/// The inline editor's methods live on the canvas view (ticket 39): Swift's
+/// `InlineTextEditor` is a child NSView of `CanvasView`, and the port's
+/// overlay state (the input entity, the two-way binding bookkeeping, the
+/// caret phase) is canvas state. The methods that report through shell-side
+/// pipelines (the text-style edits) route through the canvas's `app` seam.
+impl EditorCanvasView {
     /// The draft's layer raster width (`layer?.asset.image.width`), 0 when
     /// the draft has no layer or asset yet — the scale point-text growth
     /// measures against.
-    pub fn inline_text_asset_width(
+    pub(crate) fn inline_text_asset_width(
         &self,
         draft: &compositor_core::session::TextDraft,
         cx: &gpui_kit::App,
     ) -> f64 {
         draft
             .layer_id
-            .and_then(|id| {
-                self.current_tab()
-                    .session
-                    .read(cx)
-                    .document
-                    .as_ref()?
-                    .layer(id)
-                    .cloned()
-            })
+            .and_then(|id| self.session.read(cx).document.as_ref()?.layer(id).cloned())
             .and_then(|layer| layer.asset)
             .map(|asset| asset.image.width as f64)
             .unwrap_or(0.0)
@@ -497,7 +494,7 @@ impl AppState {
     /// The editor's shown geometry for a draft (`synchronize`): the logical
     /// size the text lays out at and the transform displayed — for point text
     /// on a layer, the growth-compensated one (`inline_text_shown_transform`).
-    pub fn inline_text_shown(
+    fn inline_text_shown(
         &self,
         draft: &compositor_core::session::TextDraft,
         cx: &gpui_kit::App,
@@ -516,8 +513,8 @@ impl AppState {
     }
 
     /// Whether the inline editor's input currently owns the keyboard.
-    pub fn inline_text_focused(&self, window: &mut Window, cx: &gpui_kit::App) -> bool {
-        self.current_tab().session.read(cx).text_draft.is_some()
+    pub(crate) fn inline_text_focused(&self, window: &mut Window, cx: &gpui_kit::App) -> bool {
+        self.session.read(cx).text_draft.is_some()
             && self
                 .inline_text_input
                 .read(cx)
@@ -530,8 +527,8 @@ impl AppState {
     /// externally changed style (the Type header, color picker) refreshes
     /// the text (`synchronize`'s `shownStyle != style` half). `set_value`
     /// emits no events, so this never loops into `inline_text_changed`.
-    pub fn sync_inline_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.tab().session.read(cx).text_draft.clone() else {
+    pub(crate) fn sync_inline_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.session.read(cx).text_draft.clone() else {
             self.inline_text_open = false;
             self.inline_text_pushed = None;
             return;
@@ -564,10 +561,10 @@ impl AppState {
 
     /// Two-way binding, input → session: the text as typed becomes the
     /// draft's content and the canvas re-renders (`textDidChange`).
-    pub fn inline_text_changed(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub(crate) fn inline_text_changed(&mut self, text: &str, cx: &mut Context<Self>) {
         self.inline_text_pushed = Some(text.to_string());
         self.inline_text_caret_phase = std::time::Instant::now();
-        let changed = self.tab().session.update(cx, |session, _| {
+        let changed = self.session.update(cx, |session, _| {
             let Some(draft) = session.text_draft.as_mut() else {
                 return false;
             };
@@ -593,11 +590,9 @@ impl AppState {
     }
 
     /// ⌘Return in the inline editor (`finishText`).
-    pub fn commit_inline_text(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.read(cx).text_draft.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_text());
+    pub(crate) fn commit_inline_text(&mut self, cx: &mut Context<Self>) {
+        if self.session.read(cx).text_draft.is_some() {
+            self.session.update(cx, |session, _| session.finish_text());
             self.inline_text_open = false;
             self.touch(cx);
         }
@@ -629,7 +624,7 @@ impl AppState {
 
     /// The inline caret paints on the first half of the blink cycle and on
     /// every keystroke (the phase resets with each change).
-    pub fn inline_text_caret_visible(&self) -> bool {
+    fn inline_text_caret_visible(&self) -> bool {
         if !self.inline_text_open {
             return false;
         }
@@ -638,11 +633,9 @@ impl AppState {
 
     /// Escape in the inline editor (`cancelText`): the draft is dropped and
     /// the layer keeps whatever it had.
-    pub fn cancel_inline_text(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.read(cx).text_draft.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.cancel_text());
+    pub(crate) fn cancel_inline_text(&mut self, cx: &mut Context<Self>) {
+        if self.session.read(cx).text_draft.is_some() {
+            self.session.update(cx, |session, _| session.cancel_text());
             self.inline_text_open = false;
             self.touch(cx);
         }
@@ -652,8 +645,8 @@ impl AppState {
     /// axis-aligned bounds of the (possibly rotated) frame — gpui has no
     /// element-level rotation, so the text itself stays upright (see the
     /// module note on `render_inline_text_overlay`).
-    pub fn inline_text_overlay(&self, cx: &gpui_kit::App) -> Option<InlineTextOverlay> {
-        let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
+    fn inline_text_overlay(&self, cx: &gpui_kit::App) -> Option<InlineTextOverlay> {
+        let draft = self.session.read(cx).text_draft.as_ref()?;
         let measured = inline_text_measured_size(&draft.style);
         let logical = draft.style.box_size.unwrap_or(measured);
         let viewport = self.canvas_viewport(cx);
@@ -726,7 +719,7 @@ impl AppState {
     /// div stop propagating so the canvas never sees them as Type-tool
     /// clicks, except on a resize handle, which starts a resize drag
     /// (`InlineTextEditor.mouseDown`'s resize branch).
-    pub fn render_inline_text_overlay(
+    pub(crate) fn render_inline_text_overlay(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
@@ -735,7 +728,7 @@ impl AppState {
         let on_press = cx.listener(|this, event: &gpui_kit::MouseDownEvent, _window, cx| {
             let local = this.local_position(event.position);
             let doc = this.screen_to_doc(cx, local.0, local.1);
-            if this.tab().session.read(cx).text_draft.is_some()
+            if this.session.read(cx).text_draft.is_some()
                 && let Some(handle) = this.inline_text_handle_hit(doc, cx)
             {
                 this.begin_inline_text_resize(doc, handle, cx);
@@ -823,8 +816,9 @@ impl AppState {
     }
 
     /// Option-left tightens the tracking by one step; Shift makes ten
-    /// (`CanvasTextView.keyDown`, InlineTextEditor.swift:18-19).
-    pub fn on_inline_tracking_tighten(
+    /// (`CanvasTextView.keyDown`, InlineTextEditor.swift:18-19). The text
+    /// style itself is shell-side (`AppState::adjust_text_tracking`).
+    pub(crate) fn on_inline_tracking_tighten(
         &mut self,
         _: &crate::keys::InlineTextTrackingTighten,
         _window: &mut Window,
@@ -835,7 +829,7 @@ impl AppState {
     }
 
     /// Option-right loosens the tracking by one step; Shift makes ten.
-    pub fn on_inline_tracking_loosen(
+    pub(crate) fn on_inline_tracking_loosen(
         &mut self,
         _: &crate::keys::InlineTextTrackingLoosen,
         _window: &mut Window,
@@ -846,7 +840,7 @@ impl AppState {
     }
 
     /// Shift-Option-left tightens the tracking by ten.
-    pub fn on_inline_tracking_tighten_more(
+    pub(crate) fn on_inline_tracking_tighten_more(
         &mut self,
         _: &crate::keys::InlineTextTrackingTightenMore,
         _window: &mut Window,
@@ -857,7 +851,7 @@ impl AppState {
     }
 
     /// Shift-Option-right loosens the tracking by ten.
-    pub fn on_inline_tracking_loosen_more(
+    pub(crate) fn on_inline_tracking_loosen_more(
         &mut self,
         _: &crate::keys::InlineTextTrackingLoosenMore,
         _window: &mut Window,
@@ -869,7 +863,7 @@ impl AppState {
 
     /// Option-up closes the leading by one step; Shift makes ten
     /// (`adjust_text_leading`'s `down = false`).
-    pub fn on_inline_leading_tighten(
+    pub(crate) fn on_inline_leading_tighten(
         &mut self,
         _: &crate::keys::InlineTextLeadingTighten,
         _window: &mut Window,
@@ -880,7 +874,7 @@ impl AppState {
     }
 
     /// Option-down opens the leading by one step; Shift makes ten.
-    pub fn on_inline_leading_loosen(
+    pub(crate) fn on_inline_leading_loosen(
         &mut self,
         _: &crate::keys::InlineTextLeadingLoosen,
         _window: &mut Window,
@@ -891,7 +885,7 @@ impl AppState {
     }
 
     /// Shift-Option-up closes the leading by ten.
-    pub fn on_inline_leading_tighten_more(
+    pub(crate) fn on_inline_leading_tighten_more(
         &mut self,
         _: &crate::keys::InlineTextLeadingTightenMore,
         _window: &mut Window,
@@ -902,7 +896,7 @@ impl AppState {
     }
 
     /// Shift-Option-down opens the leading by ten.
-    pub fn on_inline_leading_loosen_more(
+    pub(crate) fn on_inline_leading_loosen_more(
         &mut self,
         _: &crate::keys::InlineTextLeadingLoosenMore,
         _window: &mut Window,
@@ -912,12 +906,26 @@ impl AppState {
         cx.stop_propagation();
     }
 
+    /// The tracking step, routed to the shell's text-style edit.
+    fn adjust_text_tracking(&mut self, delta: f64, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.adjust_text_tracking(delta, cx))
+            .ok();
+    }
+
+    /// The leading step, routed to the shell's text-style edit.
+    fn adjust_text_leading(&mut self, down: bool, step: f64, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.adjust_text_leading(down, step, cx))
+            .ok();
+    }
+
     /// Which resize handle a press at `doc` lands on, if a draft is open
     /// (`InlineTextEditor.hitTest`/`handle(at:)`). The editor is hit-tested
     /// against what is on screen, so point text that has grown while typing
     /// uses its shown transform, not the draft's stale one.
-    pub fn inline_text_handle_hit(&self, doc: CGPoint, cx: &gpui_kit::App) -> Option<usize> {
-        let draft = self.current_tab().session.read(cx).text_draft.as_ref()?;
+    pub(crate) fn inline_text_handle_hit(&self, doc: CGPoint, cx: &gpui_kit::App) -> Option<usize> {
+        let draft = self.session.read(cx).text_draft.as_ref()?;
         let (logical, transform) = self.inline_text_shown(draft, cx);
         let per_pixel = self.canvas_viewport(cx).points_per_pixel();
         let handle_size = inline_text_handle_size(&transform, logical, per_pixel);
@@ -932,13 +940,13 @@ impl AppState {
     /// becomes a box of the size it has right now, which then holds and
     /// wraps the text — its scale and rotation are whatever the draft
     /// already carried.
-    pub fn begin_inline_text_resize(
+    pub(crate) fn begin_inline_text_resize(
         &mut self,
         doc: CGPoint,
         handle: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut draft) = self.current_tab().session.read(cx).text_draft.clone() else {
+        let Some(mut draft) = self.session.read(cx).text_draft.clone() else {
             return;
         };
         let (measured, transform) = self.inline_text_shown(&draft, cx);
@@ -946,8 +954,7 @@ impl AppState {
             draft.style.box_size = Some(measured);
             draft.transform = Some(transform);
             draft.origin = transform.origin;
-            self.tab()
-                .session
+            self.session
                 .update(cx, |session, _| session.text_draft = Some(draft.clone()));
         }
         let source = draft.style.box_size.unwrap_or(measured);

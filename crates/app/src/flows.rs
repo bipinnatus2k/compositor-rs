@@ -30,7 +30,10 @@ impl AppState {
         if paths.is_empty() {
             return;
         }
-        let at = self.drop_point_doc.take();
+        // The drop point is canvas gesture state (ticket 39).
+        let at = self
+            .canvas_view
+            .update(cx, |canvas, _| canvas.drop_point_doc.take());
         let destination = self.workspace.selected_id();
         let failures = self.workspace.receive(&paths, Some(destination), at, cx);
         self.sync_session_observer(cx);
