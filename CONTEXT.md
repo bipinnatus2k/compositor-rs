@@ -27,6 +27,9 @@ _Avoid_: undo stack（代码命名中）
 **ProjectWorkspace**:
 多项目签页的工作区（标签条 + 浮动面板的宿主）。对应原版 `ProjectWorkspace` / `ProjectController`。
 
+**模态锁定**:
+模态对话框或浮动面板打开、或文档忙碌时，该文档被锁定：不可关闭、不可切换签页；平移与缩放不受限。对应原版 `canSwitch` 与 `canStartProjectOperation` 的合取语义。
+
 ### 几何与坐标
 
 **Document space**:
