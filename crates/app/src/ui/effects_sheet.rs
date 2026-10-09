@@ -1,50 +1,78 @@
-//! Port of the Effects sheet (`EffectsSheet.swift`) as the floating
-//! panel: open/OK/Cancel actions, the panel body and the stroke
-//! segment / effect swatch helpers.
+//! Port of the Effects sheet (`EffectsSheet.swift`) as its own view entity
+//! (ADR 0003 step D, ticket 41): which effect is being edited, its sliders
+//! and Stroke's Outside/Inside position — the sheet view's edit state —
+//! rendered with the body and footer; every slider change is a committed
+//! undo step on the panel's own session, and the shell's status/epoch ride
+//! the seam.
 
 use std::rc::Rc;
 
 use gpui_kit::component::button::Button;
-use gpui_kit::component::slider::Slider;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, px,
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    px,
 };
 
 use compositor_core::effects::LayerEffectKind;
+use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::SheetRow;
 use crate::state::AppState;
-use crate::ui::floating_panel::EffectsPanelState;
-use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::sheets::SliderRole;
-use crate::ui::{AppCallback, ClickHandler, app_on, app_on_click, text_label};
+use crate::ui::floating_panel::{
+    PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on, panel_on_click,
+};
+use crate::ui::sheets::panel_value;
+use crate::ui::{ClickHandler, text_label};
 
-impl AppState {
-    /// `session.effectsEditing` → effectsPanel, title = the effect's name
-    /// (`ContentView.swift:217-224`). The caller (`add_effect`) has already
-    /// started the editing session.
-    pub fn open_effects_panel(&mut self, cx: &mut Context<Self>) {
+/// The Effects panel as its own view entity (Swift `EffectsSheet`'s edit
+/// state; ticket 41). Created by `AppState::open_effects_panel`, dropped on
+/// close; its session can never go stale (tab switches are blocked while
+/// any panel is open).
+pub struct EffectsPanelView {
+    /// The session the panel opened on: the edited effect's readouts and
+    /// every slider write go through it (one undo step per change, as
+    /// Swift's changeEffects does).
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the commit/cancel flows
+    /// and the repaint epoch stay there.
+    app: WeakEntity<AppState>,
+    /// Which effect is being edited (an index into `LayerEffectKind::ALL`).
+    kind_index: usize,
+    /// The edited effect's sliders.
+    sliders: Vec<Entity<SliderState>>,
+    /// Stroke's Outside/Inside position.
+    inside: bool,
+    subscriptions: Vec<Subscription>,
+}
+
+impl EffectsPanelView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // No preview capture: every slider change is committed to the layer's
         // effects right away (one undo step per change, as Swift's
         // changeEffects does).
-        let editing = self.tab().session.read(cx).editing_effects();
-        let kind = self
-            .tab()
-            .session
+        let editing = session.read(cx).editing_effects();
+        let kind = session
             .read(cx)
             .effects_editing
             .map(|editing| editing.kind)
             .unwrap_or(LayerEffectKind::Stroke);
+        let mut panel = EffectsPanelView {
+            session,
+            app,
+            kind_index: 0,
+            sliders: Vec::new(),
+            inside: false,
+            subscriptions: Vec::new(),
+        };
         let mut slider = |min: f64, max: f64, value: f64, index: usize| {
-            self.make_slider(
-                min as f32,
-                max as f32,
-                value as f32,
-                SliderRole::Effect(index),
-                cx,
-            )
+            panel.make_slider(min as f32, max as f32, value as f32, index, cx)
         };
         // Slider thumb ranges are the EffectsSheet's visible ranges; the
         // core `isValid` guard bounds every stored value.
@@ -157,100 +185,191 @@ impl AppState {
                 ),
             ],
         };
-        let kind_index = LayerEffectKind::ALL
+        panel.sliders = sliders;
+        panel.kind_index = LayerEffectKind::ALL
             .iter()
             .position(|candidate| *candidate == kind)
             .unwrap_or(0);
         // Stroke's Outside/Inside position rides in `inside`.
-        let inside = editing.stroke.map(|stroke| stroke.inside).unwrap_or(false);
-        self.panel_widgets.effects = Some(EffectsPanelState {
-            kind_index,
-            sliders,
-            inside,
+        panel.inside = editing.stroke.map(|stroke| stroke.inside).unwrap_or(false);
+        panel
+    }
+
+    /// Creates one of the panel's sliders. Every slider funnels its changes
+    /// into [`Self::apply_sliders`] — the write-back reads all sliders at
+    /// once (EffectsSheet.swift's per-kind `changeEffects` closures), so the
+    /// index only tags the slider as an effects one.
+    fn make_slider(
+        &mut self,
+        min: f32,
+        max: f32,
+        value: f32,
+        _index: usize,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let state = cx.new(|_| {
+            crate::state::slider(min, max, if max - min > 12.0 { 1.0 } else { 0.1 }, value)
         });
-        self.panels.show(
-            panel_names::EFFECTS_PANEL,
-            kind.label(),
-            PanelPlacement::Automatic,
-        );
-        self.sync_panel_guard();
+        let subscription = cx.subscribe(&state, |this, _slider, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+            };
+            this.slider_changed(value, cx);
+        });
+        self.subscriptions.push(subscription);
+        state
+    }
+
+    /// A slider moved: the values land on the bound layer's effect — a real
+    /// undo step per change through `changeEffects`, which is what makes the
+    /// canvas preview live (`apply_effects_sliders`, moved with the panel).
+    fn slider_changed(&mut self, _value: f32, cx: &mut Context<Self>) {
+        self.apply_sliders(cx);
+        // The old dispatcher's tail landed on top of `apply_effects_sliders`'s
+        // own touch: the double bump is the exact old shape.
         self.touch(cx);
     }
 
-    /// `finishEffectsEditing(commit: false)` (`EffectsSheet.swift:20`).
-    pub fn cancel_effects_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.close(panel_names::EFFECTS_PANEL) {
-            return;
-        }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.finish_effects_editing(false));
-        self.panel_widgets.effects = None;
-        self.sync_panel_guard();
+    fn apply_sliders(&mut self, cx: &mut Context<Self>) {
+        let cx_app: &gpui_kit::App = cx;
+        let kind = self.edited_kind();
+        let values: Vec<f64> = (0..self.sliders.len())
+            .map(|index| panel_value(&self.sliders, cx_app, index) as f64)
+            .collect();
+        let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
+        self.session.update(cx, move |session, _| {
+            session.change_effects(move |effects| match kind {
+                LayerEffectKind::Stroke => {
+                    if let Some(stroke) = effects.stroke.as_mut() {
+                        stroke.size = value(0);
+                        stroke.opacity = value(1) / 100.0;
+                    }
+                }
+                LayerEffectKind::Shadow => {
+                    if let Some(shadow) = effects.shadow.as_mut() {
+                        shadow.opacity = value(0) / 100.0;
+                        shadow.angle = value(1);
+                        shadow.distance = value(2);
+                        shadow.blur = value(3);
+                    }
+                }
+                LayerEffectKind::ColorOverlay => {
+                    if let Some(overlay) = effects.color_overlay.as_mut() {
+                        overlay.opacity = value(0) / 100.0;
+                    }
+                }
+                LayerEffectKind::InnerShadow => {
+                    if let Some(inner) = effects.inner_shadow.as_mut() {
+                        inner.opacity = value(0) / 100.0;
+                        inner.angle = value(1);
+                        inner.distance = value(2);
+                        inner.blur = value(3);
+                    }
+                }
+                LayerEffectKind::OuterGlow => {
+                    if let Some(glow) = effects.outer_glow.as_mut() {
+                        glow.size = value(0);
+                        glow.opacity = value(1) / 100.0;
+                    }
+                }
+                LayerEffectKind::InnerGlow => {
+                    if let Some(glow) = effects.inner_glow.as_mut() {
+                        glow.size = value(0);
+                        glow.opacity = value(1) / 100.0;
+                    }
+                }
+            });
+        });
         self.touch(cx);
     }
 
-    /// `finishEffectsEditing(commit: true)` (`EffectsSheet.swift:22`): every
-    /// change was already a committed undo step; OK just ends the session.
-    pub fn confirm_effects_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.is_visible(panel_names::EFFECTS_PANEL) {
-            return;
-        }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.finish_effects_editing(true));
-        self.panel_widgets.effects = None;
-        self.panels.close(panel_names::EFFECTS_PANEL);
-        self.sync_panel_guard();
-        self.touch(cx);
-    }
-
-    /// `EffectsSheet`'s body: the edited effect's controls. Stroke's Position
-    /// is the segmented Outside/Inside picker (`EffectsSheet.swift:37-42`),
-    /// rendered in the title row like Swift's headline row.
-    pub(crate) fn effects_panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let app = cx.entity().downgrade();
-        let Some(panel) = self.panel_widgets.effects.as_ref() else {
-            return gpui_kit::div().into_any_element();
-        };
-        let kind = LayerEffectKind::ALL
-            .get(panel.kind_index)
+    fn edited_kind(&self) -> LayerEffectKind {
+        LayerEffectKind::ALL
+            .get(self.kind_index)
             .copied()
-            .unwrap_or(LayerEffectKind::Stroke);
-        let inside = panel.inside;
-        let sliders = panel.sliders.clone();
-        let color = self.tab().session.read(cx).editing_effects().color(kind);
-        let title_row = |_cx: &mut Context<Self>| {
-            let mut row = gpui_kit::div()
+            .unwrap_or(LayerEffectKind::Stroke)
+    }
+
+    /// Stroke's Outside/Inside change goes through the session like every
+    /// slider, so the canvas and the undo trail follow (`EffectsSheet.swift`'s
+    /// picker).
+    fn set_stroke_inside(&mut self, inside: bool, cx: &mut Context<Self>) {
+        self.session.update(cx, |session, _| {
+            session.change_effects(|effects| {
+                if let Some(stroke) = effects.stroke.as_mut() {
+                    stroke.inside = inside;
+                }
+            })
+        });
+        self.inside = inside;
+        self.touch(cx);
+    }
+
+    /// The color swatch's click: opens the color picker on the effect's
+    /// color (EffectsSheet.swift's `openEffectColorPicker`; guards and state
+    /// live on the core session in `color_picker.rs`). Nothing is written
+    /// into the layer until the picker closes.
+    fn open_color_picker(&mut self, kind: LayerEffectKind, cx: &mut Context<Self>) {
+        self.session
+            .update(cx, |session, _| session.open_effect_color_picker(kind));
+        self.touch(cx);
+    }
+
+    /// The panel's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on the shell (ticket 39's field audit).
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// The panel's commit/cancel routes: the footer's OK/Cancel are
+    /// panel-entity callbacks that reach the shell's pipelines through the
+    /// seam (ticket 41's ruling 4).
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.cancel_effects_panel(cx))
+            .ok();
+    }
+
+    fn confirm(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.confirm_effects_panel(cx))
+            .ok();
+    }
+}
+
+impl Render for EffectsPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let kind = self.edited_kind();
+        let inside = self.inside;
+        let sliders = self.sliders.clone();
+        let color = self.session.read(cx).editing_effects().color(kind);
+        let mut body = gpui_kit::div().flex().flex_col().gap_1().child(
+            // Stroke's Position is the segmented Outside/Inside picker
+            // (`EffectsSheet.swift:37-42`), rendered in the title row like
+            // Swift's headline row.
+            gpui_kit::div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
                 .child(text_label(kind.label(), false).text_size(px(13.0)))
-                .child(gpui_kit::div().flex_1());
-            if kind == LayerEffectKind::Stroke {
-                row = row.child(
+                .child(gpui_kit::div().flex_1())
+                .children((kind == LayerEffectKind::Stroke).then(|| {
                     StrokePositionPicker::new(inside)
-                        .with_on_pick(app_on(&app, |state, inside, _, cx| {
-                            set_stroke_inside(state, inside, cx)
-                        })),
-                );
-            }
-            row
-        };
-        let mut body = gpui_kit::div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(title_row(cx));
+                        .with_on_pick(panel_on(&this, |panel, inside, _, cx| {
+                            panel.set_stroke_inside(inside, cx)
+                        }))
+                })),
+        );
         match kind {
             LayerEffectKind::Stroke => {
                 body = body
                     .child(
                         SheetRow::new("Color").with_control(
                             EffectSwatch::new(kind, color)
-                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
-                                    state.open_effect_color_picker(kind, cx)
+                                .with_on_click(panel_on_click(&this, move |panel, _, _, cx| {
+                                    panel.open_color_picker(kind, cx)
                                 })),
                         ),
                     )
@@ -266,8 +385,8 @@ impl AppState {
                     .child(
                         SheetRow::new("Color").with_control(
                             EffectSwatch::new(kind, color)
-                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
-                                    state.open_effect_color_picker(kind, cx)
+                                .with_on_click(panel_on_click(&this, move |panel, _, _, cx| {
+                                    panel.open_color_picker(kind, cx)
                                 })),
                         ),
                     )
@@ -289,8 +408,8 @@ impl AppState {
                     .child(
                         SheetRow::new("Color").with_control(
                             EffectSwatch::new(kind, color)
-                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
-                                    state.open_effect_color_picker(kind, cx)
+                                .with_on_click(panel_on_click(&this, move |panel, _, _, cx| {
+                                    panel.open_color_picker(kind, cx)
                                 })),
                         ),
                     )
@@ -303,8 +422,8 @@ impl AppState {
                     .child(
                         SheetRow::new("Color").with_control(
                             EffectSwatch::new(kind, color)
-                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
-                                    state.open_effect_color_picker(kind, cx)
+                                .with_on_click(panel_on_click(&this, move |panel, _, _, cx| {
+                                    panel.open_color_picker(kind, cx)
                                 })),
                         ),
                     )
@@ -326,8 +445,8 @@ impl AppState {
                     .child(
                         SheetRow::new("Color").with_control(
                             EffectSwatch::new(kind, color)
-                                .with_on_click(app_on_click(&app, move |state, _, _, cx| {
-                                    state.open_effect_color_picker(kind, cx)
+                                .with_on_click(panel_on_click(&this, move |panel, _, _, cx| {
+                                    panel.open_color_picker(kind, cx)
                                 })),
                         ),
                     )
@@ -339,7 +458,14 @@ impl AppState {
                     ));
             }
         }
-        body.into_any_element()
+        let footer = panel_footer(
+            panel_names::EFFECTS_PANEL,
+            &this,
+            false,
+            |panel, _, cx| panel.cancel(cx),
+            |panel, _, cx| panel.confirm(cx),
+        );
+        panel_body_frame(body.into_any_element(), footer)
     }
 }
 
@@ -366,7 +492,7 @@ fn stroke_segment_target(segment: usize) -> bool {
 #[derive(IntoElement)]
 pub struct StrokePositionPicker {
     inside: bool,
-    on_pick: AppCallback<bool>,
+    on_pick: crate::ui::AppCallback<bool>,
 }
 
 impl StrokePositionPicker {
@@ -377,7 +503,7 @@ impl StrokePositionPicker {
         }
     }
 
-    pub fn with_on_pick(mut self, on_pick: AppCallback<bool>) -> Self {
+    pub fn with_on_pick(mut self, on_pick: crate::ui::AppCallback<bool>) -> Self {
         self.on_pick = on_pick;
         self
     }
@@ -402,22 +528,6 @@ impl RenderOnce for StrokePositionPicker {
                     })
             }))
     }
-}
-
-/// Stroke's Outside/Inside change goes through the session like every slider,
-/// so the canvas and the undo trail follow (`EffectsSheet.swift`'s picker).
-fn set_stroke_inside(state: &mut AppState, inside: bool, cx: &mut Context<AppState>) {
-    state.tab().session.update(cx, |session, _| {
-        session.change_effects(|effects| {
-            if let Some(stroke) = effects.stroke.as_mut() {
-                stroke.inside = inside;
-            }
-        })
-    });
-    if let Some(panel) = state.panel_widgets.effects.as_mut() {
-        panel.inside = inside;
-    }
-    state.touch(cx);
 }
 
 /// The effect's color swatch (`EffectsSheet`'s color rows): the effect's
@@ -466,6 +576,60 @@ impl RenderOnce for EffectSwatch {
             .border_color(gpui_kit::rgb(crate::ui::BORDER_INSET))
             .bg(gpui_kit::rgb(rgb))
             .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
+}
+
+impl AppState {
+    /// `session.effectsEditing` → effectsPanel, title = the effect's name
+    /// (`ContentView.swift:217-224`). The caller (`add_effect`) has already
+    /// started the editing session; the panel reads it at construction.
+    pub fn open_effects_panel(&mut self, cx: &mut Context<Self>) {
+        let session = self.tab().session.clone();
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| EffectsPanelView::new(session, app, cx));
+        self.panel_views.insert(
+            panel_names::EFFECTS_PANEL,
+            crate::ui::floating_panel::PanelContent::Effects(panel),
+        );
+        // The title follows the edited kind, as the old open read it.
+        let title = {
+            let kind = self.tab().session.read(cx).effects_editing;
+            kind.map(|editing| editing.kind)
+                .unwrap_or(LayerEffectKind::Stroke)
+        }
+        .label();
+        self.panels
+            .show(panel_names::EFFECTS_PANEL, title, PanelPlacement::Automatic);
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// `finishEffectsEditing(commit: false)` (`EffectsSheet.swift:20`).
+    pub fn cancel_effects_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.close(panel_names::EFFECTS_PANEL) {
+            return;
+        }
+        self.tab()
+            .session
+            .update(cx, |session, _| session.finish_effects_editing(false));
+        self.panel_views.remove(panel_names::EFFECTS_PANEL);
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// `finishEffectsEditing(commit: true)` (`EffectsSheet.swift:22`): every
+    /// change was already a committed undo step; OK just ends the session.
+    pub fn confirm_effects_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.is_visible(panel_names::EFFECTS_PANEL) {
+            return;
+        }
+        self.tab()
+            .session
+            .update(cx, |session, _| session.finish_effects_editing(true));
+        self.panel_views.remove(panel_names::EFFECTS_PANEL);
+        self.panels.close(panel_names::EFFECTS_PANEL);
+        self.sync_panel_guard();
+        self.touch(cx);
     }
 }
 

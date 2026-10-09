@@ -1,39 +1,39 @@
-//! The color picker panel (`UI/ColorPickerSheet.swift`): the drawn
-//! saturation/brightness field, the vertical hue strip with its arrow
-//! markers, the new-color preview swatch, hex entry and OK/Cancel, laid out
-//! exactly like Swift's `HStack { saturationBrightnessField; hueStrip; … }`.
-//! The working color is the session's `color_picker.hsb`, so nothing lands
-//! until OK; field/strip drags feed the same state the former sliders did,
-//! including an effect color's live preview.
+//! The color picker panel (`UI/ColorPickerSheet.swift`) as its own view
+//! entity (ADR 0003 step D, ticket 41): the drawn saturation/brightness
+//! field, the vertical hue strip with its arrow markers, the new-color
+//! preview swatch, hex entry and OK/Cancel, laid out exactly like Swift's
+//! `HStack { saturationBrightnessField; hueStrip; … }`. The working color is
+//! the session's `color_picker.hsb`, so nothing lands until OK; field/strip
+//! drags feed the same state the former sliders did, including an effect
+//! color's live preview. The hex entry is the panel's own field — Swift's
+//! `@State hexDraft` (ColorPickerSheet.swift:10), the former
+//! `AppState.picker_ui`.
 //!
 //! Layout divergence: Swift also has R/G/B number entry fields. They are not
-//! in this cut because `PickerUi`'s shape is fixed by `state.rs`
-//! (`build_picker_ui`), which leaves nowhere to keep three more input
-//! entities. The hue/saturation/brightness sliders that predated the drawn
+//! in this cut — the port kept nowhere to host three more input entities,
+//! and that has not changed with the panel entity.
+//! The hue/saturation/brightness sliders that predated the drawn
 //! field are gone — the field and the hue strip feed the same state.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::{
-    AnyElement, App, AppContext, Bounds, Context, Corners, Entity, Focusable, Global,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, PathBuilder, Pixels, Point, RenderImage, RenderOnce, Styled, Window, canvas,
-    point, px, rgba, size,
+    App, AppContext, Bounds, Context, Corners, Entity, Focusable, Global, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PathBuilder, Pixels, Point, Render, RenderImage, RenderOnce, Styled, WeakEntity, Window,
+    canvas, point, px, rgba, size,
 };
 use image::Frame;
 
 use compositor_core::document::{PaletteColor, PickerHSB};
-use compositor_core::session::ColorPickerTarget;
+use compositor_core::session::{ColorPickerTarget, EditorSession};
 
 use crate::state::AppState;
-use crate::ui::{
-    ClickHandler, DragMoveHandler, PressHandler, app_on_click, app_on_drag_move, app_on_press,
-    text_label,
-};
+use crate::ui::floating_panel::{panel_on_click, panel_on_drag_move, panel_on_press};
+use crate::ui::{ClickHandler, DragMoveHandler, PressHandler, text_label};
 
 /// `fieldSize` (ColorPickerSheet.swift): the SV field's edge and the hue
 /// strip's length, in points.
@@ -51,131 +51,68 @@ const HUE_ARROW_H: f32 = 10.0;
 /// down on paint, staying sharp at 2× backing scale.
 const BACKING_SCALE: f32 = 2.0;
 
-/// The open picker's widgets; `None` while no picker is open. The drawn
-/// field and the hue strip write the session's `color_picker.hsb`
-/// directly ([`AppState::picker_apply`]); only the hex entry stays an
-/// entity.
-pub struct PickerUi {
-    pub hex: Entity<InputState>,
+/// The color picker panel as its own view entity (Swift
+/// `ColorPickerSheet`'s edit state; ticket 41). Its one widget is the hex
+/// entry — the field and the hue strip write the session's
+/// `color_picker.hsb` directly through the drags below. Created by the
+/// shell's `open_color_picker_ui` / `open_text_color_picker_ui`, dropped on
+/// close.
+pub struct ColorPickerPanelView {
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the commit/close flow stays
+    /// there (the OK/Cancel read the hex first, then close the session's
+    /// picker).
+    app: WeakEntity<AppState>,
+    /// The hex entry (`ColorPickerSheet.swift:10`'s `@State hexDraft`); a
+    /// well-formed entry overrides the field at commit.
+    hex: Entity<InputState>,
 }
 
-impl AppState {
-    /// Opens the picker on a palette swatch and builds its widgets
-    /// (ColorPalette.swift:60-63).
-    pub fn open_color_picker_ui(
-        &mut self,
-        background: bool,
+impl ColorPickerPanelView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        hex: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.tab().session.read(cx).color_picker.is_some()
-            || !self.tab().session.read(cx).can_edit_palette()
-        {
-            return;
-        }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.open_color_picker(background));
-        let hex = self
-            .tab()
-            .session
-            .read(cx)
-            .color_picker
-            .as_ref()
-            .map(|picker| picker.color().hex());
-        let Some(hex) = hex else {
-            return;
-        };
+    ) -> Self {
         let hex = cx.new(|cx| InputState::new(window, cx).default_value(hex));
-        // A stale drag from a previous open must not survive.
-        cx.default_global::<PickerFieldState>().drag = None;
-        self.picker_ui = Some(PickerUi { hex });
-        // The picker lives in the shared floating panel
-        // (ColorPickerSheet.swift:167-181): first opened centered on the
-        // canvas, afterwards wherever it was last left.
-        let title = self
-            .tab()
-            .session
-            .read(cx)
-            .color_picker
-            .as_ref()
-            .map(|picker| picker.target.title())
-            .unwrap_or_default();
-        self.panels.show(
-            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
-            title,
-            crate::ui::floating_panel::PanelPlacement::Automatic,
-        );
-        self.sync_panel_guard();
-        self.touch(cx);
+        ColorPickerPanelView { session, app, hex }
     }
 
-    /// OK/Cancel (ColorPickerSheet.swift:24-27): commit reads the hex field
-    /// first, then the session writes (or drops) the color.
-    pub fn close_color_picker_ui(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if commit {
-            let text = self
-                .picker_ui
-                .as_ref()
-                .map(|ui| ui.hex.read(cx).value().to_string())
-                .unwrap_or_default();
-            // A well-formed hex entry overrides the field (Swift's
-            // commitHex on submit).
-            if let Some(color) = PaletteColor::from_hex(&text) {
-                self.tab().session.update(cx, |session, _| {
-                    if let Some(picker) = session.color_picker.as_mut() {
-                        picker.hsb = PickerHSB::from_rgb(color);
-                    }
-                });
-            }
-            self.tab()
-                .session
-                .update(cx, |session, _| session.close_color_picker(true));
-        } else {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.close_color_picker(false));
-        }
-        self.picker_ui = None;
-        self.panels
-            .close(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
-        self.sync_panel_guard();
-        cx.default_global::<PickerFieldState>().drag = None;
-        self.touch(cx);
+    /// The hex entry's text, for the shell's commit (the one panel read from
+    /// outside this view — the commit reads the hex before closing).
+    pub(crate) fn hex_text(&self, cx: &gpui_kit::App) -> String {
+        self.hex.read(cx).value().to_string()
     }
 
     /// Press on the SV field: start its drag and jump to the pointer
     /// (`DragGesture(minimumDistance: 0)` on `saturationBrightnessField`).
-    pub fn picker_sv_drag_begin(
+    fn sv_drag_begin(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.default_global::<PickerFieldState>().drag = Some(PickerDrag::Sv);
-        self.picker_sv_drag(event.position, window, cx);
+        self.sv_drag(event.position, window, cx);
     }
 
     /// Press on the hue strip: start its drag and jump to the pointer
     /// (`DragGesture(minimumDistance: 0)` on `hueStrip`).
-    pub fn picker_hue_drag_begin(
+    fn hue_drag_begin(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.default_global::<PickerFieldState>().drag = Some(PickerDrag::Hue);
-        self.picker_hue_drag(event.position, window, cx);
+        self.hue_drag(event.position, window, cx);
     }
 
     /// Dragging on the SV field sets saturation from x and brightness from
     /// the flipped y (ColorPickerSheet.swift:64-67).
-    pub fn picker_sv_drag(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn sv_drag(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bounds) = cx
             .try_global::<PickerFieldState>()
             .and_then(|state| state.sv_bounds)
@@ -195,12 +132,7 @@ impl AppState {
 
     /// Dragging on the hue strip sets hue from the flipped y
     /// (ColorPickerSheet.swift:89-91).
-    pub fn picker_hue_drag(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn hue_drag(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bounds) = cx
             .try_global::<PickerFieldState>()
             .and_then(|state| state.hue_bounds)
@@ -223,15 +155,14 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let is_effect = matches!(
-            self.tab()
-                .session
+            self.session
                 .read(cx)
                 .color_picker
                 .as_ref()
                 .map(|picker| &picker.target),
             Some(ColorPickerTarget::Effect { .. })
         );
-        self.tab().session.update(cx, |session, _| {
+        self.session.update(cx, |session, _| {
             if let Some(picker) = session.color_picker.as_mut() {
                 apply(&mut picker.hsb);
             }
@@ -240,76 +171,84 @@ impl AppState {
             }
         });
         let text = self
-            .tab()
             .session
             .read(cx)
             .color_picker
             .as_ref()
             .map(|picker| picker.color().hex())
             .unwrap_or_default();
-        if let Some(hex) = self.picker_ui.as_ref().map(|ui| ui.hex.clone()) {
-            let focused = hex.read(cx).focus_handle(cx).is_focused(window);
-            if !focused {
-                hex.update(cx, |input, cx| input.set_value(text, window, cx));
-            }
+        let focused = self.hex.read(cx).focus_handle(cx).is_focused(window);
+        if !focused {
+            self.hex
+                .update(cx, |input, cx| input.set_value(text, window, cx));
         }
         self.touch(cx);
+    }
+
+    /// The panel's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on the shell (ticket 39's field audit).
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// OK/Cancel (ColorPickerSheet.swift:24-27): the shell's commit/close
+    /// flow reads the hex field first, then the session writes (or drops)
+    /// the color.
+    fn close(&mut self, commit: bool, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.close_color_picker_ui(commit, cx))
+            .ok();
+    }
+}
+
+impl Render for ColorPickerPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let picker = self.session.read(cx).color_picker.as_ref();
+        let Some(picker) = picker else {
+            return gpui_kit::div().into_any_element();
+        };
+        let color = picker.color();
+        let hsb = picker.hsb;
+        let hex = self.hex.clone();
+
+        // The gradient bitmaps: one per working hue for the field, one strip
+        // shared by every open (both at 2× backing).
+        let sv_image = prepare_sv_image(cx, hsb.hue);
+        let strip_image = prepare_strip_image(cx);
+
+        ColorPickerSheet::new(
+            color,
+            hex,
+            SvField::new(hsb, sv_image)
+                .with_on_press(panel_on_press(&this, |panel, event, window, cx| {
+                    panel.sv_drag_begin(event, window, cx);
+                }))
+                .with_on_drag(panel_on_drag_move(&this, |panel, event, window, cx| {
+                    panel.sv_drag(event.position, window, cx);
+                })),
+            HueStrip::new(hsb, strip_image)
+                .with_on_press(panel_on_press(&this, |panel, event, window, cx| {
+                    panel.hue_drag_begin(event, window, cx);
+                }))
+                .with_on_drag(panel_on_drag_move(&this, |panel, event, window, cx| {
+                    panel.hue_drag(event.position, window, cx);
+                })),
+        )
+        .with_on_ok(panel_on_click(&this, |panel, _, _, cx| {
+            panel.close(true, cx)
+        }))
+        .with_on_cancel(panel_on_click(&this, |panel, _, _, cx| {
+            panel.close(false, cx)
+        }))
+        .into_any_element()
     }
 }
 
 /// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
 /// hue strip and the right column with preview, OK/Cancel and hex entry.
-/// Rendered inside `ui/floating_panel.rs`'s `FloatingPanel` shell; the OK/Cancel and the
-/// title-bar ✕ route through `close_color_picker_ui`'s commit flag.
-pub(crate) fn color_picker_panel_body(
-    state: &mut AppState,
-    cx: &mut Context<AppState>,
-) -> Option<AnyElement> {
-    let picker = state.tab().session.read(cx).color_picker.as_ref()?;
-    let color = picker.color();
-    let hsb = picker.hsb;
-    let ui = state.picker_ui.as_ref()?;
-    let hex = ui.hex.clone();
-    let app = cx.entity().downgrade();
-
-    // The gradient bitmaps: one per working hue for the field, one strip
-    // shared by every open (both at 2× backing).
-    let sv_image = prepare_sv_image(cx, hsb.hue);
-    let strip_image = prepare_strip_image(cx);
-
-    Some(
-        ColorPickerSheet::new(
-            color,
-            hex,
-            SvField::new(hsb, sv_image)
-                .with_on_press(app_on_press(&app, |state, event, window, cx| {
-                    state.picker_sv_drag_begin(event, window, cx);
-                }))
-                .with_on_drag(app_on_drag_move(&app, |state, event, window, cx| {
-                    state.picker_sv_drag(event.position, window, cx);
-                })),
-            HueStrip::new(hsb, strip_image)
-                .with_on_press(app_on_press(&app, |state, event, window, cx| {
-                    state.picker_hue_drag_begin(event, window, cx);
-                }))
-                .with_on_drag(app_on_drag_move(&app, |state, event, window, cx| {
-                    state.picker_hue_drag(event.position, window, cx);
-                })),
-        )
-        .with_on_ok(app_on_click(&app, |state, _, _, cx| {
-            state.close_color_picker_ui(true, cx);
-        }))
-        .with_on_cancel(app_on_click(&app, |state, _, _, cx| {
-            state.close_color_picker_ui(false, cx);
-        })),
-    )
-    .map(|sheet| sheet.into_any_element())
-}
-
-/// The picker panel's body (`ColorPickerSheet`'s layout): the SV field, the
-/// hue strip and the right column with preview, OK/Cancel and hex entry.
-/// Rendered inside `ui/floating_panel.rs`'s `FloatingPanel` shell; the
-/// OK/Cancel route through the caller's commit flag.
+/// The panel entity renders it (ticket 41); the OK/Cancel and the title-bar
+/// ✕ route through `close_color_picker_ui`'s commit flag.
 #[derive(IntoElement)]
 pub struct ColorPickerSheet {
     color: PaletteColor,
@@ -332,8 +271,8 @@ impl ColorPickerSheet {
             hex,
             sv_field,
             hue_strip,
-            on_ok: Rc::new(|_, _, _| {}),
-            on_cancel: Rc::new(|_, _, _| {}),
+            on_ok: app_on_click_stub(),
+            on_cancel: app_on_click_stub(),
         }
     }
 
@@ -346,6 +285,11 @@ impl ColorPickerSheet {
         self.on_cancel = on_cancel;
         self
     }
+}
+
+/// The no-op click handler the component's builder starts from.
+fn app_on_click_stub() -> ClickHandler {
+    std::rc::Rc::new(|_: &gpui_kit::ClickEvent, _, _| {})
 }
 
 impl RenderOnce for ColorPickerSheet {
@@ -446,8 +390,8 @@ impl SvField {
         SvField {
             hsb,
             image,
-            on_press: Rc::new(|_, _, _| {}),
-            on_drag: Rc::new(|_, _, _| {}),
+            on_press: std::rc::Rc::new(|_, _, _| {}),
+            on_drag: std::rc::Rc::new(|_, _, _| {}),
         }
     }
 
@@ -521,8 +465,8 @@ impl HueStrip {
         HueStrip {
             hsb,
             image,
-            on_press: Rc::new(|_, _, _| {}),
-            on_drag: Rc::new(|_, _, _| {}),
+            on_press: std::rc::Rc::new(|_, _, _| {}),
+            on_drag: std::rc::Rc::new(|_, _, _| {}),
         }
     }
 
@@ -641,8 +585,7 @@ enum PickerDrag {
 /// same bridge `CurvesCanvasLayout` provides the curves canvas), and `drag`
 /// marks which control owns the pointer until mouse-up. A module-private
 /// gpui global is the explicit owner — window-level handlers cannot reach
-/// element state, and the owning entity's state shape (`PickerUi`) is the
-/// session's, not this view's.
+/// element state (ADR 0002 keeps this bridge; ticket 41).
 #[derive(Default)]
 struct PickerFieldState {
     sv_bounds: Option<Bounds<Pixels>>,
@@ -667,7 +610,7 @@ impl Global for GradientCache {}
 
 /// The SV field bitmap, cached by hue: dragging s/v reuses it, moving through
 /// hues regenerates at most once per degree.
-fn prepare_sv_image(cx: &mut Context<AppState>, hue: f64) -> Arc<RenderImage> {
+fn prepare_sv_image(cx: &mut App, hue: f64) -> Arc<RenderImage> {
     let key = sv_cache_key(hue);
     let cache = cx.default_global::<GradientCache>();
     if cache.sv.is_none() || cache.sv_key != key {
@@ -684,7 +627,7 @@ fn prepare_sv_image(cx: &mut Context<AppState>, hue: f64) -> Arc<RenderImage> {
 
 /// The hue strip bitmap; its gradient is the same for every open, so it is
 /// generated once.
-fn prepare_strip_image(cx: &mut Context<AppState>) -> Arc<RenderImage> {
+fn prepare_strip_image(cx: &mut App) -> Arc<RenderImage> {
     let cache = cx.default_global::<GradientCache>();
     if cache.strip.is_none() {
         let (width, height) = backing_size(STRIP_WIDTH, FIELD_SIZE);
@@ -921,6 +864,98 @@ pub fn hue_strip_bitmap(width: usize, height: usize) -> Vec<u8> {
         }
     }
     data
+}
+
+impl AppState {
+    /// The palette swatch's picker opener (`ColorPickerSheet.swift:167-181`):
+    /// arm the session's picker, put the panel entity (with the color's hex
+    /// prefilled) in the registry, and show the shared floating panel —
+    /// first open centered on the canvas, afterwards wherever it was last
+    /// left.
+    pub fn open_color_picker_ui(
+        &mut self,
+        background: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab().session.read(cx).color_picker.is_some()
+            || !self.tab().session.read(cx).can_edit_palette()
+        {
+            return;
+        }
+        self.tab()
+            .session
+            .update(cx, |session, _| session.open_color_picker(background));
+        let hex = self
+            .tab()
+            .session
+            .read(cx)
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.color().hex());
+        let Some(hex) = hex else {
+            return;
+        };
+        let title = self
+            .tab()
+            .session
+            .read(cx)
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.target.title())
+            .unwrap_or_default();
+        let session = self.tab().session.clone();
+        let app = cx.entity().downgrade();
+        // A stale drag from a previous open must not survive.
+        cx.default_global::<PickerFieldState>().drag = None;
+        let panel = cx.new(|cx| ColorPickerPanelView::new(session, app, &hex, window, cx));
+        self.panel_views.insert(
+            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
+            crate::ui::floating_panel::PanelContent::ColorPicker(panel),
+        );
+        self.panels.show(
+            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
+            title,
+            crate::ui::floating_panel::PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// The color picker's OK (commit) / Cancel / title-bar ✕ routes
+    /// (`ColorPickerSheet`'s commitHex + `onClose` = Cancel): a well-formed
+    /// hex entry overrides the field on commit, then the picker session
+    /// closes either way.
+    pub fn close_color_picker_ui(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if commit {
+            let text = match self
+                .panel_views
+                .get(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL)
+            {
+                Some(crate::ui::floating_panel::PanelContent::ColorPicker(panel)) => {
+                    panel.read(cx).hex_text(cx)
+                }
+                _ => String::new(),
+            };
+            if let Some(color) = PaletteColor::from_hex(&text) {
+                self.tab().session.update(cx, |session, _| {
+                    if let Some(picker) = session.color_picker.as_mut() {
+                        picker.hsb = PickerHSB::from_rgb(color);
+                    }
+                });
+            }
+        }
+        self.tab()
+            .session
+            .update(cx, |session, _| session.close_color_picker(commit));
+        self.panel_views
+            .remove(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
+        self.panels
+            .close(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
+        self.sync_panel_guard();
+        cx.default_global::<PickerFieldState>().drag = None;
+        self.touch(cx);
+    }
 }
 
 #[cfg(test)]

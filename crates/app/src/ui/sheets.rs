@@ -1,49 +1,21 @@
 //! Modal sheet plumbing: opening sheets, slider wiring and the live preview
 //! that stands in for the active layer's pixels. The sheet UI itself lives in
-//! `sheets_ui.rs`.
+//! `sheets_ui.rs`. The floating panels' interactions moved onto their view
+//! entities (ticket 41); what stays here are the shell-side preview
+//! recomputes those entities reach through their seam, plus the modal
+//! sheets' own widgets.
 
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::{AppContext, Context, Entity, Window};
 
-use compositor_core::adjust::levels_auto::LevelsAuto;
-use compositor_core::adjust::{
-    ColorRange, LevelsChannel, LevelsSettings, RangeAdjustment, hue_saturation_apply,
-    levels_apply_settings,
-};
+use compositor_core::adjust::{LevelsSettings, hue_saturation_apply, levels_apply_settings};
 use compositor_core::effects::LayerEffectKind;
-use compositor_core::filters::{FilterKind, FilterSettings};
 use compositor_core::geometry::CGAffineTransform;
 use compositor_core::raster::Bitmap;
 use compositor_core::transform::LayerTransform;
 
 use crate::state::{AppState, Sheet, SheetState};
-
-/// A slider role: which setting a sheet slider writes back to.
-#[derive(Clone, Copy, PartialEq)]
-pub enum SliderRole {
-    LevelsInputBlack,
-    LevelsGamma,
-    LevelsWhite,
-    LevelsOutBlack,
-    LevelsOutWhite,
-    Hue,
-    Saturation,
-    Lightness,
-    Radius,
-    Angle,
-    Distance,
-    Amount,
-    Distortion,
-    CameraRaw(usize),
-    JpegQuality,
-    /// One Effects-sheet slider, by its position in the sheet's slider list.
-    /// The edited `LayerEffectKind` rides in `SheetState.channel`, and the
-    /// write-back reads every slider of the sheet at once, so the index only
-    /// tags the slider as an effects one (EffectsSheet.swift's per-kind
-    /// `changeEffects` closures).
-    Effect(usize),
-}
 
 impl AppState {
     // MARK: Opening
@@ -66,15 +38,16 @@ impl AppState {
         cx.new(|cx| InputState::new(window, cx).default_value(default))
     }
 
-    /// Creates a panel slider with the given range and initial value. The
-    /// subscription funnels every change into `apply_slider` with the role,
-    /// so the write-back does not care which panel the slider lives in.
-    pub(crate) fn make_slider(
+    /// Creates the JPEG export sheet's quality slider. Its changes refresh
+    /// the live encoded preview — `apply_slider`'s JpegQuality branch, which
+    /// stayed behind when the panel sliders moved onto their view entities
+    /// (ticket 41), tail included: the epoch and the repaint followed every
+    /// event in the old dispatcher, guards or not.
+    fn make_slider(
         &mut self,
         min: f32,
         max: f32,
         value: f32,
-        role: SliderRole,
         cx: &mut Context<Self>,
     ) -> Entity<SliderState> {
         let state = cx.new(|_| {
@@ -84,11 +57,13 @@ impl AppState {
                 .step(if max - min > 12.0 { 1.0 } else { 0.1 })
                 .default_value(value)
         });
-        let subscription = cx.subscribe(&state, move |this, _slider, event: &SliderEvent, cx| {
-            let value = match event {
+        let subscription = cx.subscribe(&state, |this, _slider, event: &SliderEvent, cx| {
+            let _value = match event {
                 SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
             };
-            this.apply_slider(role, value, cx);
+            this.refresh_jpeg_preview(cx);
+            this.revision += 1;
+            cx.notify();
         });
         self.subscriptions.push(subscription);
         state
@@ -159,7 +134,6 @@ impl AppState {
                     0.0,
                     1.0,
                     crate::settings::lock_global().number("jpegExportQuality", 0.85) as f32,
-                    SliderRole::JpegQuality,
                     cx,
                 )],
                 // 0 = white matte, 1 = black.
@@ -194,114 +168,35 @@ impl AppState {
             .unwrap_or(0.0)
     }
 
-    /// Reads one of a panel bundle's slider values.
-    pub(crate) fn panel_value(
-        sliders: &[Entity<SliderState>],
-        cx: &gpui_kit::App,
-        index: usize,
-    ) -> f32 {
-        sliders
-            .get(index)
-            // Single-value sliders keep the live value in `end`; `start` is always 0.
-            .map(|slider| slider.read(cx).value().end())
-            .unwrap_or(0.0)
-    }
+    // MARK: The panels' preview recomputes (reached through the seam)
 
-    /// Writes a slider back to its setting and refreshes the preview. Panel
-    /// sliders (`ui/floating_panel.rs`) route by role to their panel's widget bundle;
-    /// the JPEG quality slider is the one modal sheet slider left.
-    pub fn apply_slider(&mut self, role: SliderRole, _value: f32, cx: &mut Context<Self>) {
-        match role {
-            SliderRole::JpegQuality => {
-                self.refresh_jpeg_preview(cx);
-            }
-            SliderRole::LevelsInputBlack
-            | SliderRole::LevelsGamma
-            | SliderRole::LevelsWhite
-            | SliderRole::LevelsOutBlack
-            | SliderRole::LevelsOutWhite => {
-                let Some(panel) = self.panel_widgets.levels.as_ref() else {
-                    return;
-                };
-                let preview = panel.preview;
-                // Editing an adjustment layer: sliders feed the session's
-                // Levels editor, which previews through the live composite.
-                if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-                    let settings = self.levels_settings_from_panel(cx);
-                    self.tab().session.update(cx, |session, _| {
-                        session.levels = Some(settings);
-                        session.preview_adjustment_editing(preview);
-                    });
-                    return;
-                }
-                if let Some(base) = self.preview_base.clone() {
-                    if preview {
-                        let settings = self.levels_settings_from_panel(cx);
-                        let mut adjusted = base.as_ref().clone();
-                        levels_apply_settings(&mut adjusted, &settings);
-                        adjusted = self.blend_adjusted(adjusted, cx);
-                        self.preview = Some(std::sync::Arc::new(adjusted));
-                    } else {
-                        self.preview = Some(base);
-                    }
-                }
-            }
-            SliderRole::Hue | SliderRole::Saturation | SliderRole::Lightness => {
-                let Some(panel) = self.panel_widgets.hue_saturation.as_ref() else {
-                    return;
-                };
-                let colorize = panel.colorize;
-                let hue = Self::panel_value(&panel.sliders, cx, 0) as f64;
-                let saturation = Self::panel_value(&panel.sliders, cx, 1) as f64;
-                let lightness = Self::panel_value(&panel.sliders, cx, 2) as f64;
-                let mut settings = compositor_core::adjust::HueSaturationSettings::new(
-                    hue, saturation, lightness, colorize,
-                );
-                if colorize {
-                    settings.adjustments.insert(
-                        ColorRange::Master,
-                        RangeAdjustment {
-                            hue,
-                            // Colorize's saturation is an HSL amount 0…1
-                            // (HueSaturation.swift:301); zero must stay zero.
-                            saturation: (saturation / 100.0).clamp(0.0, 1.0),
-                            lightness,
-                        },
-                    );
-                }
-                // The adjustment-layer editor previews through the session.
-                if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-                    self.tab().session.update(cx, |session, _| {
-                        session.hue_saturation = Some(settings);
-                        session.preview_adjustment_editing(true);
-                    });
-                    return;
-                }
-                if let Some(base) = self.preview_base.clone() {
-                    let mut adjusted = base.as_ref().clone();
-                    hue_saturation_apply(&mut adjusted, &settings);
-                    adjusted = self.blend_adjusted(adjusted, cx);
-                    self.preview = Some(std::sync::Arc::new(adjusted));
-                }
-            }
-            SliderRole::CameraRaw(_) => {
-                let settings = self.filter_settings_from_panel(cx);
-                self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
-            }
-            SliderRole::Effect(_) => {
-                self.apply_effects_sliders(cx);
-            }
-            SliderRole::Radius
-            | SliderRole::Angle
-            | SliderRole::Distance
-            | SliderRole::Amount
-            | SliderRole::Distortion => {
-                let Some(panel) = self.panel_widgets.filter.as_ref() else {
-                    return;
-                };
-                let kind = panel.kind;
-                let settings = self.filter_settings_from_panel(cx);
-                self.apply_filter_preview(kind, settings, cx);
+    /// Writes the Levels settings into the live preview — `apply_slider`'s
+    /// Levels branch, hosted here so the panel entity reaches it through its
+    /// seam (ticket 41). An adjustment-layer editing session previews
+    /// through the session and — exactly as the slider dispatcher's early
+    /// return did — leaves before the repaint epoch; a pixel session
+    /// recomputes the preview bitmap, then the epoch moves.
+    pub(crate) fn apply_levels_preview(
+        &mut self,
+        settings: LevelsSettings,
+        preview: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab().session.update(cx, |session, _| {
+                session.levels = Some(settings);
+                session.preview_adjustment_editing(preview);
+            });
+            return;
+        }
+        if let Some(base) = self.preview_base.clone() {
+            if preview {
+                let mut adjusted = base.as_ref().clone();
+                levels_apply_settings(&mut adjusted, &settings);
+                adjusted = self.blend_adjusted(adjusted, cx);
+                self.preview = Some(std::sync::Arc::new(adjusted));
+            } else {
+                self.preview = Some(base);
             }
         }
         self.revision += 1;
@@ -310,13 +205,16 @@ impl AppState {
 
     /// Rebuilds the Levels preview after the Preview checkbox flips: unchecked
     /// shows the untouched pixels, exactly as Swift's `edit.preview` does.
-    pub fn refresh_levels_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.panel_widgets.levels.as_ref() else {
-            return;
-        };
-        let preview = panel.preview;
+    /// Unlike a slider change ([`Self::apply_levels_preview`]), the
+    /// adjustment path repaints too — the old `refresh_levels_preview`
+    /// bumped the epoch on both branches.
+    pub(crate) fn refresh_levels_preview(
+        &mut self,
+        settings: LevelsSettings,
+        preview: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            let settings = self.levels_settings_from_panel(cx);
             self.tab().session.update(cx, |session, _| {
                 session.levels = Some(settings);
                 session.preview_adjustment_editing(preview);
@@ -329,7 +227,6 @@ impl AppState {
             return;
         };
         if preview {
-            let settings = self.levels_settings_from_panel(cx);
             let mut adjusted = base.as_ref().clone();
             levels_apply_settings(&mut adjusted, &settings);
             adjusted = self.blend_adjusted(adjusted, cx);
@@ -341,153 +238,27 @@ impl AppState {
         cx.notify();
     }
 
-    /// The Levels panel's settings: the Auto modes set every channel's range
-    /// at once; those keep their values while the sliders stay the source of
-    /// truth for the visible channel's range.
-    fn levels_settings_from_panel(&self, cx: &gpui_kit::App) -> LevelsSettings {
-        let mut settings = self
-            .panel_widgets
-            .levels
-            .as_ref()
-            .map(|panel| panel.levels)
-            .unwrap_or_default();
-        settings.channel = match self
-            .panel_widgets
-            .levels
-            .as_ref()
-            .map(|panel| panel.channel)
-        {
-            Some(1) => LevelsChannel::Red,
-            Some(2) => LevelsChannel::Green,
-            Some(3) => LevelsChannel::Blue,
-            _ => LevelsChannel::Rgb,
-        };
-        let sliders = self
-            .panel_widgets
-            .levels
-            .as_ref()
-            .map(|panel| panel.sliders.clone())
-            .unwrap_or_default();
-        let mut range = settings.current();
-        range.black = Self::panel_value(&sliders, cx, 0) as f64;
-        range.gamma = Self::panel_value(&sliders, cx, 1) as f64;
-        range.white = Self::panel_value(&sliders, cx, 2) as f64;
-        range.output_black = Self::panel_value(&sliders, cx, 3) as f64;
-        range.output_white = Self::panel_value(&sliders, cx, 4) as f64;
-        settings.set_current(range);
-        settings
-    }
-
-    /// The open filter panel's settings from its sliders and checkboxes.
-    pub(crate) fn filter_settings_from_panel(&self, cx: &gpui_kit::App) -> FilterSettings {
-        let mut settings = FilterSettings::default();
-        let Some(panel) = self.panel_widgets.filter.as_ref() else {
-            return settings;
-        };
-        match panel.kind {
-            FilterKind::GaussianBlur => {
-                settings.radius = Self::panel_value(&panel.sliders, cx, 0) as f64;
-            }
-            FilterKind::MotionBlur => {
-                settings.angle = Self::panel_value(&panel.sliders, cx, 0) as f64;
-                settings.distance = Self::panel_value(&panel.sliders, cx, 1) as f64;
-            }
-            FilterKind::AddNoise => {
-                settings.amount = Self::panel_value(&panel.sliders, cx, 0) as f64;
-                settings.gaussian = panel.gaussian;
-                settings.monochromatic = panel.monochromatic;
-            }
-            FilterKind::LensCorrection => {
-                settings.distortion = Self::panel_value(&panel.sliders, cx, 0) as f64;
-            }
-            FilterKind::CameraRaw => {
-                let value = |i: usize| Self::panel_value(&panel.sliders, cx, i) as f64;
-                let raw = &mut settings.camera_raw;
-                raw.temperature = value(0);
-                raw.tint = value(1);
-                raw.exposure = value(2);
-                raw.contrast = value(3);
-                raw.highlights = value(4);
-                raw.shadows = value(5);
-                raw.whites = value(6);
-                raw.blacks = value(7);
-                raw.vibrance = value(8);
-                raw.saturation = value(9);
-                raw.texture = value(10);
-                raw.clarity = value(11);
-                raw.dehaze = value(12);
-                raw.vignette_amount = value(13);
-            }
-            _ => {}
-        }
-        settings
-    }
-
-    /// The Levels panel's Auto button: Contrast, the shared-interval mode.
-    pub fn levels_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.levels_auto_mode(LevelsAuto::Contrast, window, cx);
-    }
-
-    /// `autoLevels` (LevelsAutomatic.swift): the mode's settings replace the
-    /// edit's wholesale, then the visible sliders follow the current channel's
-    /// range and the preview refreshes, exactly as manual slider edits do.
-    pub fn levels_auto_mode(
+    /// Writes the Hue/Saturation settings into the live preview —
+    /// `apply_slider`'s Hue branch, hosted for the panel entity (ticket 41).
+    /// The adjustment path returns before the epoch, as the dispatcher did.
+    pub(crate) fn apply_hue_saturation_preview(
         &mut self,
-        mode: LevelsAuto,
-        window: &mut Window,
+        settings: compositor_core::adjust::HueSaturationSettings,
         cx: &mut Context<Self>,
     ) {
-        let (histogram, channel) = {
-            let Some(panel) = self.panel_widgets.levels.as_ref() else {
-                return;
-            };
-            (panel.histogram, panel.channel)
-        };
-        let settings = mode.settings(&histogram);
-        let values = levels_auto_slider_values(&settings, channel);
-        if let Some(panel) = self.panel_widgets.levels.as_mut() {
-            panel.levels = settings;
-        }
-        for (index, value) in values.into_iter().enumerate() {
-            if let Some(slider) = self
-                .panel_widgets
-                .levels
-                .as_ref()
-                .and_then(|panel| panel.sliders.get(index))
-            {
-                let slider = slider.clone();
-                slider.update(cx, |state, cx| {
-                    state.set_value(SliderValue::Single(value), window, cx)
-                });
-            }
-        }
-        self.apply_slider(SliderRole::LevelsInputBlack, values[0], cx);
-    }
-
-    /// Blends an adjustment result back over the untouched base through the
-    /// selection, as `LevelsFilter.run`/`HueSaturationFilter.run` do before
-    /// the pixels reach the layer (Levels.swift:80-82, HueSaturation.swift:
-    /// 244-250). Without a selection the adjustment stands alone.
-    fn blend_adjusted(&self, adjusted: Bitmap, cx: &gpui_kit::App) -> Bitmap {
-        let Some(base) = self.preview_base.as_deref() else {
-            return adjusted;
-        };
-        blend_through_selection(
-            base,
-            adjusted,
-            self.preview_base_transform,
-            self.current_tab().session.read(cx).selection().cloned(),
-        )
-    }
-
-    /// Re-runs the noise filters when their checkboxes change.
-    pub fn refresh_filter_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.panel_widgets.filter.as_ref() else {
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab().session.update(cx, |session, _| {
+                session.hue_saturation = Some(settings);
+                session.preview_adjustment_editing(true);
+            });
             return;
-        };
-        let kind = panel.kind;
-        let settings = self.filter_settings_from_panel(cx);
-        self.apply_filter_preview(kind, settings, cx);
+        }
+        if let Some(base) = self.preview_base.clone() {
+            let mut adjusted = base.as_ref().clone();
+            hue_saturation_apply(&mut adjusted, &settings);
+            adjusted = self.blend_adjusted(adjusted, cx);
+            self.preview = Some(std::sync::Arc::new(adjusted));
+        }
         self.revision += 1;
         cx.notify();
     }
@@ -519,94 +290,35 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// The Effects sheet's color swatch: opens the color picker on the
-    /// effect's color (EffectsSheet.swift's `openEffectColorPicker`; guards
-    /// and state live on the core session in `color_picker.rs`). Nothing is
-    /// written into the layer until the picker closes.
-    pub fn open_effect_color_picker(&mut self, kind: LayerEffectKind, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.open_effect_color_picker(kind));
-        self.touch(cx);
-    }
-
-    /// Pushes the Effects panel's sliders into the bound layer's effect — a
-    /// real undo step per change through `changeEffects`, which is what makes
-    /// the canvas preview live.
-    pub fn apply_effects_sliders(&mut self, cx: &mut Context<Self>) {
-        let (kind, values) = {
-            let cx_app: &gpui_kit::App = cx;
-            let Some(panel) = self.panel_widgets.effects.as_ref() else {
-                return;
-            };
-            let kind = LayerEffectKind::ALL
-                .get(panel.kind_index)
-                .copied()
-                .unwrap_or(LayerEffectKind::Stroke);
-            let values: Vec<f64> = (0..panel.sliders.len())
-                .map(|index| Self::panel_value(&panel.sliders, cx_app, index) as f64)
-                .collect();
-            (kind, values)
+    /// Blends an adjustment result back over the untouched base through the
+    /// selection, as `LevelsFilter.run`/`HueSaturationFilter.run` do before
+    /// the pixels reach the layer (Levels.swift:80-82, HueSaturation.swift:
+    /// 244-250). Without a selection the adjustment stands alone.
+    fn blend_adjusted(&self, adjusted: Bitmap, cx: &gpui_kit::App) -> Bitmap {
+        let Some(base) = self.preview_base.as_deref() else {
+            return adjusted;
         };
-        let value = |index: usize| values.get(index).copied().unwrap_or(0.0);
-        self.tab().session.update(cx, move |session, _| {
-            session.change_effects(move |effects| match kind {
-                LayerEffectKind::Stroke => {
-                    if let Some(stroke) = effects.stroke.as_mut() {
-                        stroke.size = value(0);
-                        stroke.opacity = value(1) / 100.0;
-                    }
-                }
-                LayerEffectKind::Shadow => {
-                    if let Some(shadow) = effects.shadow.as_mut() {
-                        shadow.opacity = value(0) / 100.0;
-                        shadow.angle = value(1);
-                        shadow.distance = value(2);
-                        shadow.blur = value(3);
-                    }
-                }
-                LayerEffectKind::ColorOverlay => {
-                    if let Some(overlay) = effects.color_overlay.as_mut() {
-                        overlay.opacity = value(0) / 100.0;
-                    }
-                }
-                LayerEffectKind::InnerShadow => {
-                    if let Some(inner) = effects.inner_shadow.as_mut() {
-                        inner.opacity = value(0) / 100.0;
-                        inner.angle = value(1);
-                        inner.distance = value(2);
-                        inner.blur = value(3);
-                    }
-                }
-                LayerEffectKind::OuterGlow => {
-                    if let Some(glow) = effects.outer_glow.as_mut() {
-                        glow.size = value(0);
-                        glow.opacity = value(1) / 100.0;
-                    }
-                }
-                LayerEffectKind::InnerGlow => {
-                    if let Some(glow) = effects.inner_glow.as_mut() {
-                        glow.size = value(0);
-                        glow.opacity = value(1) / 100.0;
-                    }
-                }
-            })
-        });
-        self.touch(cx);
+        blend_through_selection(
+            base,
+            adjusted,
+            self.preview_base_transform,
+            self.current_tab().session.read(cx).selection().cloned(),
+        )
     }
 }
 
-/// Slider values (input black, gamma, input white, output black, output
-/// white) shown for `channel` after Auto replaces the settings.
-fn levels_auto_slider_values(settings: &LevelsSettings, channel: usize) -> [f32; 5] {
-    let range = settings.ranges[channel.min(3)];
-    [
-        range.black as f32,
-        range.gamma as f32,
-        range.white as f32,
-        range.output_black as f32,
-        range.output_white as f32,
-    ]
+/// Reads one of a panel's slider values (the panel entities read their own
+/// widgets with this since ticket 41).
+pub(crate) fn panel_value(
+    sliders: &[Entity<SliderState>],
+    cx: &gpui_kit::App,
+    index: usize,
+) -> f32 {
+    sliders
+        .get(index)
+        // Single-value sliders keep the live value in `end`; `start` is always 0.
+        .map(|slider| slider.read(cx).value().end())
+        .unwrap_or(0.0)
 }
 
 /// The placement transform `adjust::pixel::coverage` samples by: every pixel
@@ -657,8 +369,7 @@ pub(crate) fn histogram_coverage(
 
 #[cfg(test)]
 mod tests {
-    use super::{blend_through_selection, histogram_coverage, levels_auto_slider_values};
-    use compositor_core::adjust::levels_auto::LevelsAuto;
+    use super::{blend_through_selection, histogram_coverage};
     use compositor_core::filters::FilterSettings;
     use compositor_core::geometry::{CGPoint, CGRect, CGSize};
     use compositor_core::raster::Bitmap;
@@ -735,32 +446,6 @@ mod tests {
         assert_eq!(shifted.value(1, 0), 255);
         assert_eq!(shifted.value(4, 0), 0);
         assert_eq!(shifted.value(6, 0), 0);
-    }
-
-    #[test]
-    fn auto_slider_values_follow_the_current_channel() {
-        let mut bins = [0.0; 1024];
-        for c in 1..4 {
-            bins[c * 256 + 20 * c] = 100.0;
-            bins[c * 256 + 200 + c * 10] = 100.0;
-        }
-        // Contrast touches only the composite range: the RGB sliders move,
-        // a channel's sliders stay put.
-        let contrast = LevelsAuto::Contrast.settings(&bins);
-        assert_eq!(
-            levels_auto_slider_values(&contrast, 0),
-            [20.0, 1.0, 230.0, 0.0, 255.0]
-        );
-        assert_eq!(
-            levels_auto_slider_values(&contrast, 1),
-            [0.0, 1.0, 255.0, 0.0, 255.0]
-        );
-        // Color's per-channel ranges show up when that channel is visible.
-        let color = LevelsAuto::Color.settings(&bins);
-        assert_eq!(
-            levels_auto_slider_values(&color, 3),
-            [60.0, 1.0, 230.0, 0.0, 255.0]
-        );
     }
 
     #[test]

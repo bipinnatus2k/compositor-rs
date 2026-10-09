@@ -1,7 +1,8 @@
 //! Application state: the window shell around the per-tab `EditorSession` —
-//! the frame cache, the modal sheet, the panels and the preview pipelines —
-//! plus the canvas view entity (see `canvas::editor_canvas`) and the layers
-//! panel view entity (see `ui::native_layer_list`).
+//! the frame cache, the modal sheet, the panel host and the preview pipelines —
+//! plus the canvas view entity (see `canvas::editor_canvas`), the layers
+//! panel view entity (see `ui::native_layer_list`) and the floating panels'
+//! content entities (see `ui::floating_panel`, ticket 41).
 
 use std::sync::Arc;
 
@@ -262,9 +263,10 @@ pub struct AppState {
     pub layers_panel: Entity<LayersPanelView>,
     pub sheet: Option<SheetState>,
     /// The floating panels (design doc §5): the registry of open panels plus
-    /// their remembered positions, and the per-panel widget bundles.
+    /// their remembered positions, and the panels' content view entities
+    /// (ticket 41) — each entity exists exactly while its panel is open.
     pub panels: crate::ui::floating_panel::FloatingPanels,
-    pub panel_widgets: crate::ui::floating_panel::PanelWidgets,
+    pub panel_views: crate::ui::floating_panel::PanelContents,
     pub status: Option<String>,
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
@@ -282,11 +284,6 @@ pub struct AppState {
     pub wand_slider: Entity<SliderState>,
     pub gradient_slider: Entity<SliderState>,
     pub subscriptions: Vec<Subscription>,
-    /// The open color picker's widgets (`color_picker_ui`).
-    pub picker_ui: Option<crate::ui::color_picker_sheet::PickerUi>,
-    /// The Curves filter sheet's editor; `None` while no Curves sheet is
-    /// open (see `CurvesEditor`).
-    pub curves_editor: Option<CurvesEditor>,
     /// The Type header's numeric fields (size, tracking, leading).
     pub type_size_input: Entity<InputState>,
     pub type_tracking_input: Entity<InputState>,
@@ -309,11 +306,6 @@ pub struct AppState {
     /// whose controller owns the pending `SaveAs` and what to resume after
     /// `finish_save`.
     pub pending_save: Option<(crate::project::TabId, SaveAfter)>,
-    /// Add Noise / grain's random pattern for the open filter panel: fixed
-    /// while the panel is open so changing Amount doesn't reshuffle it, and
-    /// shared by the preview and the committed pixels (FilterEdit.seed,
-    /// Filters.swift:223).
-    pub filter_seed: u32,
     /// The live-mask delete ask (`deleteWithLiveMaskChoice`,
     /// LiveLayerMask.swift:106-125): the layers waiting for the
     /// Bake / Remove Links / Cancel answer, while the three-button Confirm
@@ -482,7 +474,7 @@ impl AppState {
             layers_panel,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
-            panel_widgets: crate::ui::floating_panel::PanelWidgets::default(),
+            panel_views: crate::ui::floating_panel::PanelContents::new(),
             status: None,
             preview_base: None,
             camera_raw_samples_defringe: false,
@@ -493,8 +485,6 @@ impl AppState {
             wand_slider,
             gradient_slider,
             subscriptions: Vec::new(),
-            picker_ui: None,
-            curves_editor: None,
             type_size_input,
             type_tracking_input,
             type_leading_input,
@@ -508,7 +498,6 @@ impl AppState {
             welcome_height_input,
             key_epoch: std::time::Instant::now(),
             pending_save: None,
-            filter_seed: time_seed(),
             delete_ask_ids: None,
             session_observer: None,
         };
@@ -773,26 +762,14 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Option-P with the Levels panel open: flips its Preview checkbox.
+    /// Option-P with the Levels panel open: flips its Preview checkbox. The
+    /// checkbox is the panel entity's (ticket 41) — the toggle routes through
+    /// the registry, the one outside write to it.
     pub fn toggle_levels_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.panel_widgets.levels.as_mut() else {
+        let Some(panel) = self.levels_view() else {
             return;
         };
-        panel.preview = !panel.preview;
-        self.refresh_levels_preview(cx);
-    }
-
-    // MARK: Curves sheet
-
-    /// Runs the curve editor's settings as the Curves filter preview, the
-    /// same path the other filter sheets' sliders use.
-    pub fn apply_curves_preview(&mut self, cx: &mut Context<Self>) {
-        let mut settings = FilterSettings::default();
-        if let Some(editor) = self.curves_editor.as_ref() {
-            settings.curves = editor.settings.clone();
-        }
-        self.apply_filter_preview(FilterKind::Curves, settings, cx);
-        self.touch(cx);
+        panel.update(cx, |panel, cx| panel.toggle_preview(cx));
     }
 
     // MARK: Type header (TypeControls.swift)
@@ -850,9 +827,10 @@ impl AppState {
     }
 
     /// The Type header's color chip: opens the app color picker on the text
-    /// color (`session.openTextColorPicker`). The picker is built here rather
-    /// than in `color_picker_ui` because that module only knows the palette
-    /// targets.
+    /// color (`session.openTextColorPicker`). The picker's panel entity is
+    /// built here rather than in `color_picker_sheet` because that module
+    /// only knows the palette targets (ticket 41: the entity replaces the
+    /// former `build_picker_ui` widget half).
     pub fn open_text_color_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab().session.read(cx).color_picker.is_some() {
             return;
@@ -866,8 +844,8 @@ impl AppState {
         self.touch(cx);
     }
 
-    /// Builds the picker widgets for whatever target the session just
-    /// opened (`open_color_picker_ui`'s widget half).
+    /// Builds the picker panel for whatever target the session just opened
+    /// (`open_color_picker_ui`'s entity half).
     fn build_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((title, hex)) = self
             .tab()
@@ -879,10 +857,17 @@ impl AppState {
         else {
             return;
         };
+        let session = self.tab().session.clone();
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| {
+            crate::ui::color_picker_sheet::ColorPickerPanelView::new(session, app, &hex, window, cx)
+        });
         // The text color's picker lives in the same floating panel as the
         // palette one (ColorPickerSheet.swift:170-182).
-        let hex = cx.new(|cx| InputState::new(window, cx).default_value(hex));
-        self.picker_ui = Some(crate::ui::color_picker_sheet::PickerUi { hex });
+        self.panel_views.insert(
+            crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
+            crate::ui::floating_panel::PanelContent::ColorPicker(panel),
+        );
         self.panels.show(
             crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
             title,
@@ -1391,7 +1376,6 @@ impl AppState {
 
     pub fn close_sheet(&mut self, cx: &mut Context<Self>) {
         self.sheet = None;
-        self.curves_editor = None;
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
@@ -1399,9 +1383,8 @@ impl AppState {
         // the sheet clears it exactly as it did when the field lived here.
         self.canvas_view
             .update(cx, |canvas, _| canvas.gradient_cursor = None);
-        // The filter panel session is over: the next one draws a fresh noise
-        // pattern (FilterEdit's `let seed = UInt32.random` at creation).
-        self.filter_seed = time_seed();
+        // A filter panel draws its noise seed fresh at open (each
+        // FilterPanelView seeds itself), so nothing to reseed here.
         self.delete_ask_ids = None;
         self.touch(cx);
     }
@@ -1432,8 +1415,6 @@ impl AppState {
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
-        // A committed filter closes its panel session: a fresh seed next time.
-        self.filter_seed = time_seed();
         self.touch(cx);
     }
 
@@ -1483,6 +1464,32 @@ impl AppState {
         }
     }
 
+    /// The open filter panel's current settings (`FilterSheet`'s `FilterEdit`
+    /// reads): `None` when no filter panel is open.
+    pub(crate) fn filter_settings_from_panel(&self, cx: &App) -> Option<FilterSettings> {
+        match self
+            .panel_views
+            .get(crate::ui::floating_panel::panel_names::FILTER_PANEL)
+        {
+            Some(crate::ui::floating_panel::PanelContent::Filter(view)) => {
+                Some(view.read(cx).filter_settings(cx))
+            }
+            _ => None,
+        }
+    }
+
+    /// The open filter panel's noise seed (`FilterEdit.seed`, drawn at
+    /// panel open); a fresh seed when no panel is open.
+    pub(crate) fn filter_seed_from_panel(&self, cx: &App) -> u32 {
+        match self
+            .panel_views
+            .get(crate::ui::floating_panel::panel_names::FILTER_PANEL)
+        {
+            Some(crate::ui::floating_panel::PanelContent::Filter(view)) => view.read(cx).seed(),
+            _ => time_seed(),
+        }
+    }
+
     /// Runs `filter` over the preview base and shows it live on canvas.
     pub fn apply_filter_preview(
         &mut self,
@@ -1508,7 +1515,7 @@ impl AppState {
             // The seed was drawn when the panel opened and is reused for the
             // committed pixels, so the preview is exactly what lands
             // (FilterEdit.seed, Filters.swift:223).
-            .with_seed(self.filter_seed)
+            .with_seed(self.filter_seed_from_panel(cx))
             .build();
         let result = compositor_core::filters::run_filter(&job);
         self.preview = Some(Arc::new(result));
@@ -1531,7 +1538,9 @@ impl AppState {
         ) else {
             return;
         };
-        let mut settings = self.filter_settings_from_panel(cx);
+        let Some(mut settings) = self.filter_settings_from_panel(cx) else {
+            return;
+        };
         compositor_core::adjust::camera_raw::apply_defringe_sample(
             &mut settings.camera_raw.optics,
             hue,
@@ -1573,7 +1582,9 @@ impl AppState {
         let Some(base) = self.preview_base.clone() else {
             return;
         };
-        let mut settings = self.filter_settings_from_panel(cx);
+        let Some(mut settings) = self.filter_settings_from_panel(cx) else {
+            return;
+        };
         settings.camera_raw.white_balance = CameraRawWhiteBalance::Auto;
         if let Some((temperature, tint)) =
             compositor_core::adjust::camera_raw::CameraRawSettings::auto_balance(&base)

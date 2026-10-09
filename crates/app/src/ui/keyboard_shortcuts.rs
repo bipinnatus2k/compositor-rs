@@ -18,7 +18,6 @@
 //!   [`ShortcutProblem`]. The reserved chords follow this port's ⌘→`ctrl`
 //!   mapping convention used by every default binding.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
@@ -32,15 +31,15 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, Keystroke, KeystrokeEvent,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    WeakEntity, Window, px,
+    AnyElement, App, AppContext, Context, InteractiveElement, IntoElement, Keystroke,
+    KeystrokeEvent, ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, WeakEntity, Window, px,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
-use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::{ClickHandler, app_on_click, text_label};
+use crate::ui::floating_panel::{PanelPlacement, panel_names, panel_on_click};
+use crate::ui::{ClickHandler, text_label};
 
 /// Shortcut groups, mirroring `ShortcutDefinition`'s groups in
 /// KeyboardShortcuts.swift ("Menus", "Canvas & Layers", "Text Editing").
@@ -1828,31 +1827,217 @@ mod tests {
     }
 }
 
-// MARK: Shortcuts settings sheet (KeyboardShortcuts.swift:129-319)
+// MARK: Shortcuts settings panel (KeyboardShortcuts.swift:129-319)
 
-/// The Shortcuts sheet's editor state — Swift's `@State draft` and
-/// `@State recording` plus the recorder's key grab (KeyboardShortcutsSheet's
-/// fields, lines 230-232). It lives beside the sheet instead of in
-/// `SheetState` because that struct (state.rs) is shared with every other
-/// sheet and the port keeps its shape frozen; it is thread-local because the
-/// recorder's live keystroke interceptor (`Subscription`) is not `Sync`, and
-/// every one of these touch points — rendering, clicks, key dispatch — runs
-/// on the main thread.
-pub(crate) struct ShortcutsSheetEditor {
-    /// Overrides when the sheet opened. The sheet edits the live registry as
+/// The Shortcuts panel as its own view entity (ADR 0003 step D, ticket 41).
+/// It owns the editor state — Swift's `@State draft` and `@State recording`
+/// plus the recorder's key grab (KeyboardShortcutsSheet's fields, lines
+/// 230-232) that used to live in the `SHORTCUTS_SHEET` thread_local — and
+/// dies with the panel, which releases the keystroke interceptor with it.
+/// The session never appears here (the registry is a process-wide store and
+/// the flows it needs from the shell go through the seam), so the panel
+/// holds only the seam. Swift's `@State search` has no counterpart in this
+/// port, and the draft remains the baseline-snapshot reading of the Swift
+/// copy-on-edit `draft` — both pre-existing port shapes, untouched here.
+pub struct ShortcutsPanelView {
+    /// The window shell (the transitional root): the save/status flows, the
+    /// keymap rebuild and the panel-close stay there.
+    app: WeakEntity<AppState>,
+    /// Overrides when the panel opened. The panel edits the live registry as
     /// its draft (each row goes through `set_override`/`reset`); Cancel
     /// restores this snapshot, Done saves it.
     baseline: BTreeMap<String, String>,
     /// Catalog id of the row recording a new chord, if any.
     recording: Option<String>,
     /// The app-wide keystroke interceptor that feeds the recorder while the
-    /// sheet is open; dropping it releases the keyboard.
+    /// panel is open; dropping it (with the entity, at close) releases the
+    /// keyboard.
     _capture: Option<Subscription>,
 }
 
-thread_local! {
-    static SHORTCUTS_SHEET: RefCell<Option<ShortcutsSheetEditor>> =
-        const { RefCell::new(None) };
+impl ShortcutsPanelView {
+    pub(crate) fn new(app: WeakEntity<AppState>, cx: &mut Context<Self>) -> Self {
+        // The baseline is the registry's overrides at open, and the app-wide
+        // keystroke interceptor is installed for the panel's lifetime (it
+        // only acts while a row is recording) — the sheet's first-render
+        // init, moved to construction with the entity (ticket 41).
+        let baseline = lock_global().overrides().clone();
+        let this = cx.entity().downgrade();
+        let subscription = cx.intercept_keystrokes(move |event: &KeystrokeEvent, _, cx| {
+            shortcuts_handle_keystroke(&this, event, cx);
+        });
+        ShortcutsPanelView {
+            app,
+            baseline,
+            recording: None,
+            _capture: Some(subscription),
+        }
+    }
+
+    /// Discards the draft: the registry returns to its state when the panel
+    /// opened, and the recording row (if any) is dropped with it.
+    pub(crate) fn cancel_draft(&mut self) {
+        self.recording = None;
+        restore_overrides(std::mem::take(&mut self.baseline));
+    }
+
+    /// A row's chord button was clicked: that row records the next keystroke.
+    fn start_recording(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.recording = Some(id.to_string());
+        cx.notify();
+    }
+
+    /// The footer's Done: the shell persists the draft
+    /// (`ShortcutSettings.save`), closes the panel and rebuilds the keymap.
+    fn done(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.shortcuts_done(cx)).ok();
+    }
+
+    /// The panel body (KeyboardShortcutsSheet's `body`): an intro line, the
+    /// catalog grouped like Swift's ForEach over "Menus", "Canvas & Layers"
+    /// and "Text Editing", and the conflict readout above the footer.
+    fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let problem = lock_global().validate().err();
+        let recording = self.recording.clone();
+
+        // Precompute every row's data while the registry is locked, then
+        // build the elements.
+        let rows: Vec<(&'static ShortcutSpec, String, bool, bool)> = {
+            let registry = lock_global();
+            let mut rows = Vec::new();
+            for group in [Group::Menus, Group::CanvasLayers, Group::TextEditing] {
+                for entry in entries_in_group(group) {
+                    let chord = display_chord(&registry.chord(entry.id));
+                    let customized = registry.is_customized(entry.id);
+                    let is_recording = recording.as_deref() == Some(entry.id);
+                    rows.push((entry, chord, customized, is_recording));
+                }
+            }
+            rows
+        };
+
+        let mut list = gpui_kit::div()
+            .id("shortcuts-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .max_h(px(380.0))
+            .overflow_y_scroll();
+        let mut current_group: Option<Group> = None;
+        let this = cx.entity().downgrade();
+        for (entry, chord, customized, is_recording) in rows {
+            if current_group != Some(entry.group) {
+                current_group = Some(entry.group);
+                list = list.child(
+                    text_label(entry.group.label(), false)
+                        .text_size(px(12.0))
+                        .mt_2(),
+                );
+            }
+            let id = entry.id;
+            list = list.child(
+                ShortcutRow::new(entry, chord, customized, is_recording)
+                    .with_on_record(panel_on_click(&this, move |panel, _, _, cx| {
+                        panel.start_recording(id, cx);
+                    }))
+                    .with_on_reset(panel_on_click(&this, move |_panel, _, _, cx| {
+                        lock_global().reset(id);
+                        cx.notify();
+                    })),
+            );
+        }
+        list = list.child(
+            text_label(
+                "Text fields keep standard editing keys. The shortcut editor itself uses Return to save and Esc to cancel when not recording.",
+                true,
+            )
+            .mt_2(),
+        );
+
+        let mut column = gpui_kit::div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(text_label(
+                "Click a shortcut, then press its new key combination. Changes apply immediately.",
+                true,
+            ))
+            .child(list);
+        if let Some(problem) = problem {
+            column = column.child(
+                text_label(problem.to_string(), false)
+                    .text_color(gpui_kit::rgb(crate::ui::STATUS_WARNING)),
+            );
+        }
+        column.into_any_element()
+    }
+}
+
+impl Render for ShortcutsPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let body = self.render_body(cx);
+        let done_disabled = self.recording.is_some() || lock_global().validate().is_err();
+        // The panel's own footer (`KeyboardShortcutsSheet.swift:270-278`):
+        // Restore Defaults, Cancel (discards the draft) and Done (saves it,
+        // disabled while a row records or the draft conflicts).
+        gpui_kit::div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .gap_1()
+            .child(body)
+            .child(
+                gpui_kit::div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("shortcuts-restore")
+                            .label("Restore Defaults")
+                            .small()
+                            .outline()
+                            .on_click({
+                                let app = self.app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, |app, cx| app.shortcuts_restore_defaults(cx))
+                                        .ok();
+                                }
+                            }),
+                    )
+                    .child(gpui_kit::div().flex_1())
+                    .child(
+                        Button::new("panel-cancel")
+                            .label("Cancel")
+                            .small()
+                            .on_click({
+                                let app = self.app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.cancel_panel(panel_names::KEYBOARD_SHORTCUTS, cx)
+                                    })
+                                    .ok();
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("shortcuts-done")
+                            .label("Done")
+                            .small()
+                            .primary()
+                            .disabled(done_disabled)
+                            .on_click({
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |panel, cx| panel.done(cx)).ok();
+                                }
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 /// What the recorder does with one captured key press
@@ -1907,164 +2092,6 @@ fn display_chord(chord: &str) -> String {
     Keystroke::parse(chord)
         .map(|parsed| crate::ui::keyboard_shortcuts::chord_label(&parsed))
         .unwrap_or_else(|_| chord.to_string())
-}
-
-impl AppState {
-    /// Creates the sheet's editor on first body render: the baseline is the
-    /// registry's overrides, and the app-wide keystroke interceptor is
-    /// installed for the sheet's lifetime (it only acts while a row is
-    /// recording).
-    fn shortcuts_editor_init(&mut self, cx: &mut Context<Self>) {
-        let initialized = SHORTCUTS_SHEET.with_borrow(|slot| slot.is_some());
-        if initialized {
-            return;
-        }
-        let baseline = self.shortcuts().overrides().clone();
-        let app = cx.entity().downgrade();
-        let subscription = cx.intercept_keystrokes(move |event: &KeystrokeEvent, _, cx| {
-            shortcuts_handle_keystroke(&app, event, cx);
-        });
-        SHORTCUTS_SHEET.with_borrow_mut(|slot| {
-            *slot = Some(ShortcutsSheetEditor {
-                baseline,
-                recording: None,
-                _capture: Some(subscription),
-            });
-        });
-    }
-
-    /// Drops the sheet's editor state (and with it the keystroke
-    /// interceptor). Called from `render_sheet_overlay` whenever the Shortcuts
-    /// sheet is not the open one.
-    pub(crate) fn shortcuts_editor_take() -> Option<ShortcutsSheetEditor> {
-        SHORTCUTS_SHEET.with_borrow_mut(|slot| slot.take())
-    }
-
-    /// The id of the row currently recording, if any.
-    pub(crate) fn shortcuts_recording_id() -> Option<String> {
-        SHORTCUTS_SHEET
-            .with_borrow(|slot| slot.as_ref().and_then(|editor| editor.recording.clone()))
-    }
-
-    /// Discards the draft: the registry returns to its state when the sheet
-    /// opened, and the editor state drops.
-    pub(crate) fn shortcuts_cancel_draft() {
-        let baseline = Self::shortcuts_editor_take().map(|editor| editor.baseline);
-        if let Some(baseline) = baseline {
-            restore_overrides(baseline);
-        }
-    }
-
-    /// A row's chord button was clicked: that row records the next keystroke.
-    pub fn shortcuts_start_recording(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        SHORTCUTS_SHEET.with_borrow_mut(|slot| {
-            if let Some(editor) = slot.as_mut() {
-                editor.recording = Some(id.to_string());
-            }
-        });
-        self.notify_only(cx);
-    }
-
-    /// The footer's Done: persists the draft (`ShortcutSettings.save`) and
-    /// closes. The keymap itself is rebuilt at startup, so new chords take
-    /// effect immediately (the keymap rebuilds from the registry).
-    pub(crate) fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
-        match self.shortcuts().save() {
-            Ok(()) => self.set_status("Shortcuts saved", cx),
-            Err(error) => self.set_status(format!("Saving shortcuts failed: {error}"), cx),
-        }
-        Self::shortcuts_editor_take();
-        self.close_shortcuts_panel(cx);
-    }
-
-    /// The sheet body (KeyboardShortcutsSheet's `body`): an intro line, the
-    /// catalog grouped like Swift's ForEach over "Menus", "Canvas & Layers"
-    /// and "Text Editing", and the conflict readout above the footer.
-    pub(crate) fn shortcuts_sheet_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        self.shortcuts_editor_init(cx);
-        let problem = self.shortcuts().validate().err();
-        let recording = Self::shortcuts_recording_id();
-
-        // Precompute every row's data while the registry is locked, then
-        // build the elements.
-        let rows: Vec<(
-            &'static crate::ui::keyboard_shortcuts::ShortcutSpec,
-            String,
-            bool,
-            bool,
-        )> = {
-            let registry = self.shortcuts();
-            let mut rows = Vec::new();
-            for group in [
-                crate::ui::keyboard_shortcuts::Group::Menus,
-                crate::ui::keyboard_shortcuts::Group::CanvasLayers,
-                crate::ui::keyboard_shortcuts::Group::TextEditing,
-            ] {
-                for entry in crate::ui::keyboard_shortcuts::entries_in_group(group) {
-                    let chord = display_chord(&registry.chord(entry.id));
-                    let customized = registry.is_customized(entry.id);
-                    let is_recording = recording.as_deref() == Some(entry.id);
-                    rows.push((entry, chord, customized, is_recording));
-                }
-            }
-            rows
-        };
-
-        let mut list = gpui_kit::div()
-            .id("shortcuts-list")
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .max_h(px(380.0))
-            .overflow_y_scroll();
-        let mut current_group: Option<crate::ui::keyboard_shortcuts::Group> = None;
-        let app = cx.entity().downgrade();
-        for (entry, chord, customized, is_recording) in rows {
-            if current_group != Some(entry.group) {
-                current_group = Some(entry.group);
-                list = list.child(
-                    text_label(entry.group.label(), false)
-                        .text_size(px(12.0))
-                        .mt_2(),
-                );
-            }
-            let id = entry.id;
-            list = list.child(
-                ShortcutRow::new(entry, chord, customized, is_recording)
-                    .with_on_record(app_on_click(&app, move |state, _, _, cx| {
-                        state.shortcuts_start_recording(id, cx);
-                    }))
-                    .with_on_reset(app_on_click(&app, move |state, _, _, cx| {
-                        state.shortcuts().reset(id);
-                        state.notify_only(cx);
-                    })),
-            );
-        }
-        list = list.child(
-            text_label(
-                "Text fields keep standard editing keys. The shortcut editor itself uses Return to save and Esc to cancel when not recording.",
-                true,
-            )
-            .mt_2(),
-        );
-
-        let mut column = gpui_kit::div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(text_label(
-                "Click a shortcut, then press its new key combination. Changes apply immediately.",
-                true,
-            ))
-            .child(list);
-        if let Some(problem) = problem {
-            column = column.child(
-                text_label(problem.to_string(), false)
-                    .text_color(gpui_kit::rgb(crate::ui::STATUS_WARNING)),
-            );
-        }
-        column.into_any_element()
-    }
 }
 
 /// One catalog row (`KeyboardShortcutsSheet`'s list row): the action's
@@ -2152,28 +2179,35 @@ impl RenderOnce for ShortcutRow {
 /// `performKeyEquivalent`): while a row records, every keystroke is swallowed
 /// (`cx.stop_propagation`, which also keeps actions from dispatching); a
 /// single-key chord is assigned to the row and ends the recording, a bare
-/// modifier or garbage keeps waiting.
+/// modifier or garbage keeps waiting. Hosted on the panel entity since
+/// ticket 41 — the interceptor is installed in the panel's context and reads
+/// its `recording` field.
 fn shortcuts_handle_keystroke(
-    app: &WeakEntity<AppState>,
+    panel: &WeakEntity<ShortcutsPanelView>,
     event: &KeystrokeEvent,
     cx: &mut gpui_kit::App,
 ) {
     let chord_text = event.keystroke.unparse();
-    let finished = SHORTCUTS_SHEET.with_borrow_mut(|slot| {
-        let editor = slot.as_mut()?;
-        editor.recording.as_ref()?;
-        // Recording: swallow the keystroke either way.
-        cx.stop_propagation();
-        match recorder_capture(&chord_text) {
-            RecorderCapture::Ignore => None,
-            RecorderCapture::Finish(chord) => {
-                let id = editor.recording.take().unwrap();
-                Some((id, chord))
+    let mut app = None;
+    let finished = panel
+        .update(cx, |panel, cx| {
+            let recording = panel.recording.as_ref()?;
+            // Recording: swallow the keystroke either way.
+            cx.stop_propagation();
+            match recorder_capture(&chord_text) {
+                RecorderCapture::Ignore => None,
+                RecorderCapture::Finish(chord) => {
+                    let id = recording.to_owned();
+                    panel.recording = None;
+                    app = Some(panel.app.clone());
+                    Some((id, chord))
+                }
             }
-        }
-    });
+        })
+        .ok()
+        .flatten();
     let Some((id, chord)) = finished else { return };
-    let app = app.clone();
+    let app = app.expect("set whenever a chord finished");
     let _ = app.update(cx, move |state, cx| {
         if let Err(problem) = state.shortcuts().set_override(&id, &chord) {
             state.set_status(problem.to_string(), cx);
@@ -2284,10 +2318,16 @@ mod recorder_tests {
 
 impl AppState {
     /// `ShortcutSettings.show()` (`KeyboardShortcuts.swift:155-157`): title
-    /// "Keyboard Shortcuts". The editor state (baseline draft, recording row,
-    /// keystroke interceptor) is created by the body's first render, as the
-    /// sheet did.
+    /// "Keyboard Shortcuts". The panel entity carries the editor state
+    /// (baseline draft, recording row, keystroke interceptor), created here
+    /// — the sheet's first-render init moved to construction (ticket 41).
     pub fn open_shortcuts_panel(&mut self, cx: &mut Context<Self>) {
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| ShortcutsPanelView::new(app, cx));
+        self.panel_views.insert(
+            panel_names::KEYBOARD_SHORTCUTS,
+            crate::ui::floating_panel::PanelContent::Shortcuts(panel),
+        );
         self.panels.show(
             panel_names::KEYBOARD_SHORTCUTS,
             "Keyboard Shortcuts",
@@ -2302,73 +2342,33 @@ impl AppState {
     /// `ShortcutSettings.close` after Done saved the draft
     /// (`KeyboardShortcuts.swift:162-166`).
     pub fn close_shortcuts_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel_views.remove(panel_names::KEYBOARD_SHORTCUTS);
         self.panels.close(panel_names::KEYBOARD_SHORTCUTS);
         self.sync_panel_guard();
         self.touch(cx);
     }
 
-    /// The Shortcuts panel's body plus its own footer
-    /// (`KeyboardShortcutsSheet.swift:270-278`): Restore Defaults, Cancel
-    /// (discards the draft) and Done (saves it, disabled while a row records
-    /// or the draft conflicts).
-    pub(crate) fn shortcuts_panel_footer_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let body = self.shortcuts_sheet_body(cx);
-        let done_disabled =
-            Self::shortcuts_recording_id().is_some() || self.shortcuts().validate().is_err();
-        gpui_kit::div()
-            .flex()
-            .flex_col()
-            .px_3()
-            .py_2()
-            .gap_1()
-            .child(body)
-            .child(
-                gpui_kit::div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("shortcuts-restore")
-                            .label("Restore Defaults")
-                            .small()
-                            .outline()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.shortcuts().reset_all();
-                                // Restore Defaults applies immediately: the
-                                // keymap is rebuilt from the reset registry.
-                                this.rebuild_keymap(cx);
-                                this.notify_only(cx);
-                            })),
-                    )
-                    .child(gpui_kit::div().flex_1())
-                    .child(
-                        Button::new("panel-cancel")
-                            .label("Cancel")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_panel(panel_names::KEYBOARD_SHORTCUTS, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("shortcuts-done")
-                            .label("Done")
-                            .small()
-                            .primary()
-                            .disabled(done_disabled)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.shortcuts_done(cx);
-                                // Done rebuilt nothing while the draft was
-                                // being edited; save closed the panel, and
-                                // the saved registry now drives a live
-                                // keymap rebuild (no restart needed).
-                                this.rebuild_keymap(cx);
-                                this.set_status("Shortcuts saved", cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
+    /// The footer's Done: persists the draft (`ShortcutSettings.save`),
+    /// closes the panel and rebuilds the keymap so the saved registry drives
+    /// a live keymap (no restart needed). The footer listener's sequence
+    /// moved in whole with the flow (ticket 41).
+    pub(crate) fn shortcuts_done(&mut self, cx: &mut Context<Self>) {
+        match self.shortcuts().save() {
+            Ok(()) => self.set_status("Shortcuts saved", cx),
+            Err(error) => self.set_status(format!("Saving shortcuts failed: {error}"), cx),
+        }
+        self.close_shortcuts_panel(cx);
+        self.rebuild_keymap(cx);
+        self.set_status("Shortcuts saved", cx);
     }
 
-    // MARK: Panel bodies (moved from the sheets)
+    /// Restore Defaults (KeyboardShortcutsSheet.swift's footer): the
+    /// registry returns to its defaults and the keymap rebuilds immediately.
+    pub(crate) fn shortcuts_restore_defaults(&mut self, cx: &mut Context<Self>) {
+        self.shortcuts().reset_all();
+        // Restore Defaults applies immediately: the keymap is rebuilt from
+        // the reset registry.
+        self.rebuild_keymap(cx);
+        self.notify_only(cx);
+    }
 }

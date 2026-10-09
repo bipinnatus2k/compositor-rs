@@ -98,14 +98,8 @@ impl AppState {
 
     pub fn render_sheet_overlay(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         // The Shortcuts panel's editor state (baseline draft + recording row +
-        // keystroke interceptor) dies with its panel: drop it as soon as the
-        // Shortcuts panel is not open.
-        if !self
-            .panels
-            .is_visible(crate::ui::floating_panel::panel_names::KEYBOARD_SHORTCUTS)
-        {
-            Self::shortcuts_editor_take();
-        }
+        // keystroke interceptor) lives on the panel entity (ticket 41) and
+        // dies with its registry entry — no explicit teardown here.
         let kind = self.sheet.as_ref()?.kind;
 
         let title_bar = gpui_kit::div()

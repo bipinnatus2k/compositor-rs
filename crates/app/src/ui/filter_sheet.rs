@@ -1,76 +1,116 @@
-//! Port of the Filter sheet (`FilterSheet.swift`) as the floating
-//! panel: open/OK/Cancel actions and the panel body (Camera Raw's
-//! filter panel opens docked per Swift's placement).
+//! Port of the Filter sheet (`FilterSheet.swift`) as its own view entity
+//! (ADR 0003 step D, ticket 41): which filter is open, its sliders, Add
+//! Noise's two checkboxes and — folded in, since they share one open/close
+//! and one preview path — the Curves editor state (`CurvesControls`'s
+//! `settings`/`selected`/`dragging`, the former `AppState.curves_editor`),
+//! plus the open-panel-time noise seed (fixed for the panel's whole session,
+//! `FilterEdit.seed`, Filters.swift:223). The shell keeps the preview
+//! recompute and the commit flows, reached through the panel's seam
+//! (Camera Raw's filter panel opens docked per Swift's placement).
 
 use gpui_kit::component::button::Button;
-use gpui_kit::component::slider::Slider;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{Disableable, Sizable};
-use gpui_kit::{AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, px};
-
-use compositor_core::adjust::LevelsChannel;
-use compositor_core::filters::FilterKind;
-
-use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
-use crate::ui::floating_panel::FilterPanelState;
-use crate::ui::floating_panel::{PanelPlacement, panel_names};
-use crate::ui::levels_sheet::levels_channel_label;
-use crate::ui::sheets::SliderRole;
-use crate::ui::{
-    Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, app_on_drag_move, app_on_drag_up,
-    text_label,
+use gpui_kit::{
+    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Subscription, WeakEntity, Window, px,
 };
 
-impl AppState {
-    /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
-    /// title = the filter's label; Camera Raw opens
-    /// `DockedToMainWindowRight`, every other filter `Automatic`.
-    pub fn open_filter_panel(&mut self, kind: FilterKind, cx: &mut Context<Self>) {
-        self.begin_preview(cx);
-        let mut panel = FilterPanelState {
+use compositor_core::filters::FilterKind;
+use compositor_core::filters::FilterSettings;
+use compositor_core::session::EditorSession;
+
+use crate::sheets_ui::SheetRow;
+use crate::state::{AppState, CurvesEditor, time_seed};
+use crate::ui::floating_panel::{
+    PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on, panel_on_drag_move,
+    panel_on_drag_up,
+};
+use crate::ui::levels_sheet::levels_channel_label;
+use crate::ui::sheets::panel_value;
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, text_label};
+
+/// The filter panel as its own view entity (Swift `FilterSheet`'s edit
+/// state plus `CurvesControls`' editor; ticket 41). Created by
+/// `AppState::open_filter_panel`, dropped on close — which is what retires
+/// the noise seed and the curves editor ("fixed while the panel is open"
+/// semantics, unchanged). Its session can never go stale: tab switches are
+/// blocked while any panel is open.
+pub struct FilterPanelView {
+    /// The session this panel edits. Unread today — every interaction
+    /// funnels through the shell seam, and tab switches are blocked while a
+    /// panel is open so it can never go stale; kept for ticket 43's per-tab
+    /// rebuild.
+    #[allow(dead_code)]
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the preview recompute and
+    /// the commit/cancel flows stay there. `pub(crate)`: the curves gesture
+    /// impl block lives in curves_controls.rs (the session.rs split-impl
+    /// layout).
+    pub(crate) app: WeakEntity<AppState>,
+    /// Which filter is open.
+    kind: FilterKind,
+    /// The open filter's sliders (Camera Raw carries fourteen).
+    sliders: Vec<Entity<SliderState>>,
+    /// Add Noise's Distribution (Swift's Uniform/Gaussian picker).
+    gaussian: bool,
+    /// Add Noise's Monochromatic toggle.
+    monochromatic: bool,
+    /// The Curves editor (`CurvesControls.swift`'s `settings`/`selected`/
+    /// `dragging`); `Some` only while Curves is the open filter.
+    /// `pub(crate)`: the curves gesture impl block lives in
+    /// curves_controls.rs (the session.rs split-impl layout).
+    pub(crate) curves: Option<CurvesEditor>,
+    /// The noise seed drawn when the panel opened: fixed for the session so
+    /// changing Amount doesn't reshuffle the pattern, shared by the preview
+    /// and the committed pixels (FilterEdit.seed, Filters.swift:223).
+    seed: u32,
+    subscriptions: Vec<Subscription>,
+}
+
+impl FilterPanelView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        kind: FilterKind,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut panel = FilterPanelView {
+            session,
+            app,
             kind,
             sliders: Vec::new(),
             gaussian: false,
             monochromatic: false,
+            // A fresh filter replaces any previous editor state (the sheet
+            // dropped `curves_editor` in `close_sheet`).
+            curves: if kind == FilterKind::Curves {
+                Some(CurvesEditor::new())
+            } else {
+                None
+            },
+            seed: time_seed(),
+            subscriptions: Vec::new(),
         };
-        let defaults = compositor_core::filters::FilterSettings::default();
+        let defaults = FilterSettings::default();
         match kind {
             FilterKind::GaussianBlur => {
-                panel.sliders = vec![self.make_slider(
-                    0.1,
-                    250.0,
-                    defaults.radius as f32,
-                    SliderRole::Radius,
-                    cx,
-                )];
+                panel.sliders = vec![panel.make_slider(0.1, 250.0, defaults.radius as f32, cx)];
             }
             FilterKind::MotionBlur => {
                 panel.sliders = vec![
-                    self.make_slider(-90.0, 90.0, defaults.angle as f32, SliderRole::Angle, cx),
-                    self.make_slider(
-                        1.0,
-                        2000.0,
-                        defaults.distance as f32,
-                        SliderRole::Distance,
-                        cx,
-                    ),
+                    panel.make_slider(-90.0, 90.0, defaults.angle as f32, cx),
+                    panel.make_slider(1.0, 2000.0, defaults.distance as f32, cx),
                 ];
             }
             FilterKind::AddNoise => {
-                panel.sliders = vec![self.make_slider(
-                    0.1,
-                    400.0,
-                    defaults.amount as f32,
-                    SliderRole::Amount,
-                    cx,
-                )];
+                panel.sliders = vec![panel.make_slider(0.1, 400.0, defaults.amount as f32, cx)];
             }
             FilterKind::LensCorrection => {
-                panel.sliders =
-                    vec![self.make_slider(-100.0, 100.0, 0.0, SliderRole::Distortion, cx)];
+                panel.sliders = vec![panel.make_slider(-100.0, 100.0, 0.0, cx)];
             }
             FilterKind::CameraRaw => {
-                let group: [(f64, f64, f64); 14] = [
+                let group: [(f32, f32, f32); 14] = [
                     (-100.0, 100.0, 0.0), // Temperature
                     (-100.0, 100.0, 0.0), // Tint
                     (-5.0, 5.0, 0.0),     // Exposure
@@ -88,92 +128,131 @@ impl AppState {
                 ];
                 panel.sliders = group
                     .iter()
-                    .enumerate()
-                    .map(|(i, (min, max, value))| {
-                        self.make_slider(
-                            *min as f32,
-                            *max as f32,
-                            *value as f32,
-                            SliderRole::CameraRaw(i),
-                            cx,
-                        )
-                    })
+                    .map(|(min, max, value)| panel.make_slider(*min, *max, *value, cx))
                     .collect();
             }
-            // Curves edits through `curves_editor`; the automatic filters
+            // Curves edits through `curves`; the automatic filters
             // (Black & White, Color Balance, Exposure, Gradient Map, Grain)
             // run with their default settings and show no sliders.
             _ => {}
         }
-        // A fresh filter replaces any previous editor state (the sheet dropped
-        // `curves_editor` in `close_sheet`).
-        self.curves_editor = if kind == FilterKind::Curves {
-            Some(crate::state::CurvesEditor::new())
-        } else {
-            None
-        };
-        self.panel_widgets.filter = Some(panel);
-        let placement = if kind == FilterKind::CameraRaw {
-            PanelPlacement::DockedToMainWindowRight
-        } else {
-            PanelPlacement::Automatic
-        };
-        self.panels
-            .show(panel_names::FILTER_PANEL, kind.label(), placement);
-        self.sync_panel_guard();
-        self.touch(cx);
+        panel
     }
 
-    /// `cancelFilter` (`FilterSheet.swift`): an adjustment editing session
-    /// restores the opening settings; the preview is dropped.
-    pub fn cancel_filter_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.close(panel_names::FILTER_PANEL) {
-            return;
-        }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
-        }
-        self.panel_widgets.filter = None;
-        self.curves_editor = None;
-        self.after_panel_editing_closed(cx);
+    /// Creates one of the panel's sliders. Every slider funnels its changes
+    /// into [`Self::slider_changed`] — the write-back reads all sliders and
+    /// the checkboxes, so no per-slider role is needed.
+    fn make_slider(
+        &mut self,
+        min: f32,
+        max: f32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let state = cx.new(|_| {
+            crate::state::slider(min, max, if max - min > 12.0 { 1.0 } else { 0.1 }, value)
+        });
+        let subscription = cx.subscribe(&state, |this, _slider, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+            };
+            this.slider_changed(value, cx);
+        });
+        self.subscriptions.push(subscription);
+        state
     }
 
-    /// `commitFilter` (`FilterSheet.swift`): the filter's previewed pixels
-    /// become one undo step named after the filter.
-    pub fn confirm_filter_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.is_visible(panel_names::FILTER_PANEL) {
-            return;
-        }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
-        } else {
-            let name = self
-                .panel_widgets
-                .filter
-                .as_ref()
-                .map(|panel| panel.kind.label())
-                .unwrap_or("Filter")
-                .to_string();
-            self.commit_preview_pixels(&name, cx);
-        }
-        self.panel_widgets.filter = None;
-        self.curves_editor = None;
-        self.panels.close(panel_names::FILTER_PANEL);
-        self.after_panel_editing_closed(cx);
+    /// A slider moved (or a noise checkbox flipped): the shell recomputes
+    /// the live preview from this panel's settings (`apply_slider`'s filter
+    /// and CameraRaw branches, `refresh_filter_preview` — one path, since
+    /// the old tails agreed).
+    fn slider_changed(&mut self, _value: f32, cx: &mut Context<Self>) {
+        let kind = self.kind;
+        let settings = self.filter_settings(cx);
+        self.app
+            .update(cx, |app, cx| {
+                app.apply_filter_preview(kind, settings, cx);
+                app.touch(cx);
+            })
+            .ok();
     }
 
-    /// `FilterSheet`'s body: the open filter's controls.
-    pub(crate) fn filter_panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let app = cx.entity().downgrade();
-        let Some(panel) = self.panel_widgets.filter.as_ref() else {
-            return gpui_kit::div().into_any_element();
-        };
-        let kind = panel.kind;
-        let sliders = panel.sliders.clone();
+    /// The open filter's settings from its sliders and checkboxes.
+    pub(crate) fn filter_settings(&self, cx: &gpui_kit::App) -> FilterSettings {
+        let mut settings = FilterSettings::default();
+        match self.kind {
+            FilterKind::GaussianBlur => {
+                settings.radius = panel_value(&self.sliders, cx, 0) as f64;
+            }
+            FilterKind::MotionBlur => {
+                settings.angle = panel_value(&self.sliders, cx, 0) as f64;
+                settings.distance = panel_value(&self.sliders, cx, 1) as f64;
+            }
+            FilterKind::AddNoise => {
+                settings.amount = panel_value(&self.sliders, cx, 0) as f64;
+                settings.gaussian = self.gaussian;
+                settings.monochromatic = self.monochromatic;
+            }
+            FilterKind::LensCorrection => {
+                settings.distortion = panel_value(&self.sliders, cx, 0) as f64;
+            }
+            FilterKind::CameraRaw => {
+                let value = |i: usize| panel_value(&self.sliders, cx, i) as f64;
+                let raw = &mut settings.camera_raw;
+                raw.temperature = value(0);
+                raw.tint = value(1);
+                raw.exposure = value(2);
+                raw.contrast = value(3);
+                raw.highlights = value(4);
+                raw.shadows = value(5);
+                raw.whites = value(6);
+                raw.blacks = value(7);
+                raw.vibrance = value(8);
+                raw.saturation = value(9);
+                raw.texture = value(10);
+                raw.clarity = value(11);
+                raw.dehaze = value(12);
+                raw.vignette_amount = value(13);
+            }
+            _ => {}
+        }
+        settings
+    }
+
+    /// The noise seed the shell's preview pipeline uses while this panel is
+    /// open (FilterEdit.seed): read through the registry, like the layers
+    /// panel header's slider (the one read from outside this view).
+    pub(crate) fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    /// The open filter's label, for the commit's undo name.
+    pub(crate) fn kind_label(&self) -> &'static str {
+        self.kind.label()
+    }
+
+    /// The panel's commit/cancel routes: the footer's OK/Cancel are
+    /// panel-entity callbacks that reach the shell's pipelines through the
+    /// seam (ticket 41's ruling 4).
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.cancel_filter_panel(cx))
+            .ok();
+    }
+
+    fn confirm(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.confirm_filter_panel(cx))
+            .ok();
+    }
+}
+
+impl Render for FilterPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let app = self.app.clone();
+        let kind = self.kind;
+        let sliders = self.sliders.clone();
         let mut body = gpui_kit::div().flex().flex_col().gap_1();
         match kind {
             FilterKind::Curves => {
@@ -181,11 +260,11 @@ impl AppState {
                 // curve canvas with its click/drag gesture, a selected-point
                 // readout with Remove, and Reset. The preview runs through the
                 // same filter pipeline as the slider sheets.
-                if self.curves_editor.is_none() {
-                    self.curves_editor = Some(crate::state::CurvesEditor::new());
+                if self.curves.is_none() {
+                    self.curves = Some(CurvesEditor::new());
                 }
                 let (curves, selected) = {
-                    let editor = self.curves_editor.as_ref().unwrap();
+                    let editor = self.curves.as_ref().unwrap();
                     (editor.settings.clone(), editor.selected)
                 };
                 let channel = curves.channel;
@@ -204,7 +283,7 @@ impl AppState {
                             Dropdown::new("curves-channel", levels_channel_label(channel))
                                 .with_width(px(90.0))
                                 .with_entries(
-                                    LevelsChannel::ALL
+                                    compositor_core::adjust::LevelsChannel::ALL
                                         .iter()
                                         .map(|choice| {
                                             let choice = *choice;
@@ -218,6 +297,8 @@ impl AppState {
                                         })
                                         .collect(),
                                 )
+                                // The dropdown keeps the app-shell dispatch
+                                // (ticket 40's transitional seam).
                                 .with_dispatch(app_dispatch(&app)),
                         ),
                     )
@@ -240,16 +321,16 @@ impl AppState {
                                 crate::ui::curves_controls::CurvesCanvas::new(
                                     curves, points, selected,
                                 )
-                                .with_on_drag_move(app_on_drag_move(
-                                    &app,
-                                    |state, event, _window, cx| {
-                                        state.curves_mouse_move(event, cx);
+                                .with_on_drag_move(panel_on_drag_move(
+                                    &this,
+                                    |panel, event, _window, cx| {
+                                        panel.curves_mouse_move(event, cx);
                                     },
                                 ))
-                                .with_on_drag_up(app_on_drag_up(
-                                    &app,
-                                    |state, event, _window, cx| {
-                                        state.curves_mouse_up(event, cx);
+                                .with_on_drag_up(panel_on_drag_up(
+                                    &this,
+                                    |panel, event, _window, cx| {
+                                        panel.curves_mouse_up(event, cx);
                                     },
                                 )),
                             ),
@@ -299,8 +380,8 @@ impl AppState {
                     ));
             }
             FilterKind::AddNoise => {
-                let gaussian = panel.gaussian;
-                let monochromatic = panel.monochromatic;
+                let gaussian = self.gaussian;
+                let monochromatic = self.monochromatic;
                 body = body
                     .child(SheetRow::new("Amount").with_optional_control(
                         sliders.first().map(|slider| Slider::new(slider).flex_1()),
@@ -309,11 +390,9 @@ impl AppState {
                         SheetRow::new("Distribution").with_control(
                             LabeledCheckbox::new("noise-gaussian", "Gaussian")
                                 .checked(gaussian)
-                                .with_on_change(app_on(&app, |state, checked, _, cx| {
-                                    if let Some(panel) = state.panel_widgets.filter.as_mut() {
-                                        panel.gaussian = checked;
-                                    }
-                                    state.refresh_filter_preview(cx);
+                                .with_on_change(panel_on(&this, |panel, checked, _, cx| {
+                                    panel.gaussian = checked;
+                                    panel.slider_changed(0.0, cx);
                                 })),
                         ),
                     )
@@ -321,11 +400,9 @@ impl AppState {
                         SheetRow::new("").with_control(
                             LabeledCheckbox::new("noise-mono", "Monochromatic")
                                 .checked(monochromatic)
-                                .with_on_change(app_on(&app, |state, checked, _, cx| {
-                                    if let Some(panel) = state.panel_widgets.filter.as_mut() {
-                                        panel.monochromatic = checked;
-                                    }
-                                    state.refresh_filter_preview(cx);
+                                .with_on_change(panel_on(&this, |panel, checked, _, cx| {
+                                    panel.monochromatic = checked;
+                                    panel.slider_changed(0.0, cx);
                                 })),
                         ),
                     );
@@ -391,6 +468,77 @@ impl AppState {
                 ));
             }
         }
-        body.into_any_element()
+        let footer = panel_footer(
+            panel_names::FILTER_PANEL,
+            &this,
+            false,
+            |panel, _, cx| panel.cancel(cx),
+            |panel, _, cx| panel.confirm(cx),
+        );
+        panel_body_frame(body.into_any_element(), footer)
+    }
+}
+
+impl AppState {
+    /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
+    /// title = the filter's label; Camera Raw opens
+    /// `DockedToMainWindowRight`, every other filter `Automatic`.
+    pub fn open_filter_panel(&mut self, kind: FilterKind, cx: &mut Context<Self>) {
+        self.begin_preview(cx);
+        let session = self.tab().session.clone();
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| FilterPanelView::new(session, app, kind, cx));
+        self.panel_views.insert(
+            panel_names::FILTER_PANEL,
+            crate::ui::floating_panel::PanelContent::Filter(panel),
+        );
+        let placement = if kind == FilterKind::CameraRaw {
+            PanelPlacement::DockedToMainWindowRight
+        } else {
+            PanelPlacement::Automatic
+        };
+        self.panels
+            .show(panel_names::FILTER_PANEL, kind.label(), placement);
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// `cancelFilter` (`FilterSheet.swift`): an adjustment editing session
+    /// restores the opening settings; the preview is dropped. The panel
+    /// entity — the curves editor and the session's noise seed with it —
+    /// dies here.
+    pub fn cancel_filter_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.close(panel_names::FILTER_PANEL) {
+            return;
+        }
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        }
+        self.panel_views.remove(panel_names::FILTER_PANEL);
+        self.after_panel_editing_closed(cx);
+    }
+
+    /// `commitFilter` (`FilterSheet.swift`): the filter's previewed pixels
+    /// become one undo step named after the filter.
+    pub fn confirm_filter_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.is_visible(panel_names::FILTER_PANEL) {
+            return;
+        }
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        } else {
+            let name = self
+                .filter_view()
+                .map(|panel| panel.read(cx).kind_label().to_string())
+                .unwrap_or("Filter".to_string());
+            self.commit_preview_pixels(&name, cx);
+        }
+        self.panel_views.remove(panel_names::FILTER_PANEL);
+        self.panels.close(panel_names::FILTER_PANEL);
+        self.after_panel_editing_closed(cx);
     }
 }

@@ -20,19 +20,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::InputState;
-use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Global, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce,
-    SharedString, Styled, WeakEntity, Window, anchored, canvas, div, point, px,
+    AnyElement, App, ClickEvent, Context, Entity, Global, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, Styled, WeakEntity, Window, anchored, canvas, div, point, px,
 };
 
-use compositor_core::filters::FilterKind;
-use compositor_core::session::SelectionAmountOperation;
-
 use crate::state::AppState;
-use crate::ui::{ClickHandler, app_on_click, text_label};
+use crate::ui::{
+    AppCallback, ClickHandler, DragMoveHandler, DragUpHandler, PressHandler, text_label,
+};
 
 /// Camera Raw's three grading wheels are the widest thing a docked panel
 /// holds; their own sliders are narrowed to fit this rather than the panel
@@ -735,62 +732,122 @@ mod tests {
     }
 }
 
-/// The per-panel widget bundles. A panel's bundle exists exactly while the
-/// panel is open — the same lifetime the sheet's `SheetState` had.
-#[derive(Default)]
-pub struct PanelWidgets {
-    pub levels: Option<LevelsPanelState>,
-    pub hue_saturation: Option<HueSaturationPanelState>,
-    pub amount: Option<AmountPanelState>,
-    pub filter: Option<FilterPanelState>,
-    pub effects: Option<EffectsPanelState>,
+/// One open panel's content: its view entity (ADR 0003 step D, ticket 41).
+/// Each variant's entity owns the panel's widgets and interaction state —
+/// the Swift sheet views' `@State`, per the field-ownership audit — and
+/// renders its body and footer. An entity exists exactly while its panel is
+/// open: the `open_*` flow that shows the panel creates it, the close paths
+/// drop it.
+pub enum PanelContent {
+    Levels(Entity<crate::ui::levels_sheet::LevelsPanelView>),
+    HueSaturation(Entity<crate::ui::hue_saturation_sheet::HueSaturationPanelView>),
+    Amount(Entity<crate::ui::lasso_controls::AmountPanelView>),
+    Filter(Entity<crate::ui::filter_sheet::FilterPanelView>),
+    Effects(Entity<crate::ui::effects_sheet::EffectsPanelView>),
+    ColorPicker(Entity<crate::ui::color_picker_sheet::ColorPickerPanelView>),
+    Shortcuts(Entity<crate::ui::keyboard_shortcuts::ShortcutsPanelView>),
 }
 
-/// The Levels panel's widgets (`LevelsSheet`'s edit state): the five sliders,
-/// the visible channel, the Preview toggle and the histogram, plus the full
-/// settings the Auto modes write wholesale.
-pub struct LevelsPanelState {
-    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
-    pub channel: usize,
-    pub preview: bool,
-    pub histogram: [f64; 1024],
-    pub levels: compositor_core::adjust::LevelsSettings,
+impl PanelContent {
+    /// The panel's content element: the view entity (its Render impl covers
+    /// the body plus the footer — Swift's Cancel/OK row; the color picker
+    /// carries its own OK/Cancel and the Shortcuts panel its
+    /// Restore/Cancel/Done footer).
+    pub fn element(&self) -> AnyElement {
+        match self {
+            PanelContent::Levels(view) => view.clone().into_any_element(),
+            PanelContent::HueSaturation(view) => view.clone().into_any_element(),
+            PanelContent::Amount(view) => view.clone().into_any_element(),
+            PanelContent::Filter(view) => view.clone().into_any_element(),
+            PanelContent::Effects(view) => view.clone().into_any_element(),
+            PanelContent::ColorPicker(view) => view.clone().into_any_element(),
+            PanelContent::Shortcuts(view) => view.clone().into_any_element(),
+        }
+    }
 }
 
-/// The Hue/Saturation panel's widgets (`HueSaturationSheet`).
-pub struct HueSaturationPanelState {
-    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
-    pub colorize: bool,
+/// The open panels' content entities, keyed by panel name — the content side
+/// of the [`FloatingPanels`] registry (the host side stays put; ticket 43
+/// moves it per-tab with ContentView).
+pub type PanelContents = HashMap<&'static str, PanelContent>;
+
+/// The panel-entity twin of `ui::app_on_click`: run a click handler inside a
+/// panel view entity (ticket 41 moved the panels' footers, swatches and rows
+/// onto the views).
+pub(crate) fn panel_on_click<E: 'static>(
+    panel: &WeakEntity<E>,
+    handler: impl Fn(&mut E, &ClickEvent, &mut Window, &mut Context<E>) + 'static,
+) -> ClickHandler {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, event, window, cx))
+            .ok();
+    })
 }
 
-/// The selection-amount panel's widgets (`SelectionAmountSheet`): the amount
-/// field, its 1…maximum companion slider (`LassoControls.swift:224-228`) and
-/// which operation is being sized.
-pub struct AmountPanelState {
-    pub operation: SelectionAmountOperation,
-    pub tolerance: gpui_kit::Entity<InputState>,
-    pub slider: gpui_kit::Entity<SliderState>,
+/// The panel-entity twin of `ui::app_on`: run a value callback (a checkbox's
+/// new state, an Auto mode pick) inside a panel view entity.
+pub(crate) fn panel_on<E: 'static, T: 'static>(
+    panel: &WeakEntity<E>,
+    handler: impl Fn(&mut E, T, &mut Window, &mut Context<E>) + 'static,
+) -> AppCallback<T> {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |value, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, value, window, cx))
+            .ok();
+    })
 }
 
-/// The filter panel's widgets (`FilterSheet`): which filter is open plus its
-/// sliders and Add Noise's two checkboxes. Curves keeps its editor on
-/// `AppState.curves_editor`, exactly as the sheet did.
-pub struct FilterPanelState {
-    pub kind: FilterKind,
-    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
-    /// Add Noise's Distribution (Swift's Uniform/Gaussian picker).
-    pub gaussian: bool,
-    /// Add Noise's Monochromatic toggle.
-    pub monochromatic: bool,
+/// The panel-entity twin of `ui::app_on_press` (press-capture drags).
+pub(crate) fn panel_on_press<E: 'static>(
+    panel: &WeakEntity<E>,
+    handler: impl Fn(&mut E, &MouseDownEvent, &mut Window, &mut Context<E>) + 'static,
+) -> PressHandler {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, event, window, cx))
+            .ok();
+    })
 }
 
-/// The Effects panel's widgets (`EffectsSheet`): which effect is being edited
-/// (an index into `LayerEffectKind::ALL`), its sliders, and Stroke's
-/// Outside/Inside position.
-pub struct EffectsPanelState {
-    pub kind_index: usize,
-    pub sliders: Vec<gpui_kit::Entity<SliderState>>,
-    pub inside: bool,
+/// The panel-entity twin of `ui::app_on_drag_move` (window-level move events
+/// while the panel control's drag is live).
+pub(crate) fn panel_on_drag_move<E: 'static>(
+    panel: &WeakEntity<E>,
+    handler: impl Fn(&mut E, &MouseMoveEvent, &mut Window, &mut Context<E>) + 'static,
+) -> DragMoveHandler {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, event, window, cx))
+            .ok();
+    })
+}
+
+/// The panel-entity twin of `ui::app_on_drag_up` (window-level release).
+pub(crate) fn panel_on_drag_up<E: 'static>(
+    panel: &WeakEntity<E>,
+    handler: impl Fn(&mut E, &MouseUpEvent, &mut Window, &mut Context<E>) + 'static,
+) -> DragUpHandler {
+    let panel = panel.clone();
+    let handler = Rc::new(handler);
+    Rc::new(move |event, window, cx| {
+        let handler = handler.clone();
+        panel
+            .update(cx, move |panel, cx| handler(panel, event, window, cx))
+            .ok();
+    })
 }
 
 impl AppState {
@@ -812,7 +869,9 @@ impl AppState {
             panel_names::KEYBOARD_SHORTCUTS => {
                 // The draft is discarded: the registry returns to its state
                 // when the panel opened (KeyboardShortcutsSheet's Cancel).
-                Self::shortcuts_cancel_draft();
+                if let Some(panel) = self.shortcuts_view() {
+                    panel.update(cx, |panel, _| panel.cancel_draft());
+                }
                 self.close_shortcuts_panel(cx);
                 // Re-sync the live keymap with the restored registry.
                 self.rebuild_keymap(cx);
@@ -844,14 +903,50 @@ impl AppState {
 
     /// The panel counterpart of `close_sheet`'s preview teardown: the live
     /// adjustment/filter preview is dropped, so the canvas shows the layer's
-    /// own pixels again.
+    /// own pixels again. The Effects entity dies with it, exactly as its
+    /// former widget bundle did.
     pub(crate) fn after_panel_editing_closed(&mut self, cx: &mut Context<Self>) {
-        self.panel_widgets.effects = None;
+        self.panel_views.remove(panel_names::EFFECTS_PANEL);
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
         self.sync_panel_guard();
         self.touch(cx);
+    }
+
+    // MARK: Panel entities (ticket 41)
+
+    /// Typed looks into the content registry — the reads the shell's flows
+    /// make from outside a panel (the commit pipelines' panel readers, the
+    /// canvas-side Camera Raw sampling, Option-P's preview toggle).
+    pub(crate) fn levels_view(&self) -> Option<Entity<crate::ui::levels_sheet::LevelsPanelView>> {
+        match self.panel_views.get(panel_names::LEVELS_PANEL)? {
+            PanelContent::Levels(view) => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn amount_view(&self) -> Option<Entity<crate::ui::lasso_controls::AmountPanelView>> {
+        match self.panel_views.get(panel_names::SELECTION_AMOUNT_PANEL)? {
+            PanelContent::Amount(view) => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn filter_view(&self) -> Option<Entity<crate::ui::filter_sheet::FilterPanelView>> {
+        match self.panel_views.get(panel_names::FILTER_PANEL)? {
+            PanelContent::Filter(view) => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn shortcuts_view(
+        &self,
+    ) -> Option<Entity<crate::ui::keyboard_shortcuts::ShortcutsPanelView>> {
+        match self.panel_views.get(panel_names::KEYBOARD_SHORTCUTS)? {
+            PanelContent::Shortcuts(view) => Some(view.clone()),
+            _ => None,
+        }
     }
 
     // MARK: Rendering
@@ -909,7 +1004,9 @@ impl AppState {
             None
         };
 
-        let content = self.panel_content(name, cx)?;
+        // The content is the panel's own view entity (ticket 41): its Render
+        // impl covers the body and the footer.
+        let content = self.panel_views.get(name)?.element();
 
         let on_close =
             move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
@@ -951,51 +1048,6 @@ impl AppState {
             let size = window.viewport_size();
             (f32::from(size.width) / 2.0, f32::from(size.height) / 2.0)
         }
-    }
-
-    /// One panel's content: the view body plus its footer (Swift's Cancel /
-    /// OK row). The color picker carries its own OK/Cancel in its layout and
-    /// the Shortcuts panel its Restore/Cancel/Done footer.
-    fn panel_content(&mut self, name: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let body = match name {
-            panel_names::LEVELS_PANEL => self.levels_panel_body(cx),
-            panel_names::ADJUSTMENT_PANEL => self.hue_saturation_panel_body(cx),
-            panel_names::SELECTION_AMOUNT_PANEL => self.amount_panel_body(cx),
-            panel_names::FILTER_PANEL => self.filter_panel_body(cx),
-            panel_names::EFFECTS_PANEL => self.effects_panel_body(cx),
-            panel_names::COLOR_PICKER_PANEL => {
-                return crate::ui::color_picker_sheet::color_picker_panel_body(self, cx);
-            }
-            panel_names::KEYBOARD_SHORTCUTS => {
-                return Some(self.shortcuts_panel_footer_body(cx));
-            }
-            _ => return None,
-        };
-        let ok_disabled = if name == panel_names::SELECTION_AMOUNT_PANEL {
-            let cx_app: &gpui_kit::App = cx;
-            !self.amount_input_valid(cx_app)
-        } else {
-            false
-        };
-        let app = cx.entity().downgrade();
-        let footer = PanelFooter::new(name, ok_disabled)
-            .with_on_cancel(app_on_click(&app, move |state, _, _, cx| {
-                state.cancel_panel(name, cx);
-            }))
-            .with_on_ok(app_on_click(&app, move |state, _, _, cx| {
-                state.confirm_panel(name, cx);
-            }));
-        Some(
-            gpui_kit::div()
-                .flex()
-                .flex_col()
-                .px_3()
-                .py_2()
-                .gap_1()
-                .child(body)
-                .child(footer)
-                .into_any_element(),
-        )
     }
 }
 
@@ -1053,6 +1105,40 @@ impl RenderOnce for PanelFooter {
                     .on_click(move |event, window, cx| (self.on_ok)(event, window, cx)),
             )
     }
+}
+
+/// The Cancel/OK footer a panel view renders below its body (Swift's
+/// `HStack { Cancel; Spacer; OK }`): OK runs the commit branch, Cancel —
+/// like the ✕ — the cancel branch, both as panel-entity callbacks that route
+/// to the shell's pipelines through the panel's seam (ticket 41).
+pub(crate) fn panel_footer<E: 'static>(
+    name: &'static str,
+    panel: &WeakEntity<E>,
+    ok_disabled: bool,
+    on_cancel: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    on_ok: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+) -> PanelFooter {
+    PanelFooter::new(name, ok_disabled)
+        .with_on_cancel(panel_on_click(panel, move |panel, _, window, cx| {
+            on_cancel(panel, window, cx)
+        }))
+        .with_on_ok(panel_on_click(panel, move |panel, _, window, cx| {
+            on_ok(panel, window, cx)
+        }))
+}
+
+/// The panel body's shared frame: the padded column the body and the footer
+/// sit in (the frame the former `panel_content` dispatcher wrapped them in).
+pub(crate) fn panel_body_frame(body: gpui_kit::AnyElement, footer: PanelFooter) -> AnyElement {
+    gpui_kit::div()
+        .flex()
+        .flex_col()
+        .px_3()
+        .py_2()
+        .gap_1()
+        .child(body)
+        .child(footer)
+        .into_any_element()
 }
 
 /// A first-open size estimate per panel (`fittingSize`): only used to center

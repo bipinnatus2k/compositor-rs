@@ -1,25 +1,31 @@
-//! Port of the Levels sheet (`LevelsSheet.swift`). The sheet body lands
-//! here as it is carved out of sheets_ui.rs; today this holds the shared
-//! Levels UI helpers.
+//! Port of the Levels sheet (`LevelsSheet.swift`) as its own view entity
+//! (ADR 0003 step D, ticket 41): the panel owns the five sliders, the
+//! visible channel, the Preview toggle and the histogram — the sheet view's
+//! `@State` — and renders its body and footer; the shell keeps the preview
+//! pipelines and the commit flows, reached through the panel's seam.
 
 use std::rc::Rc;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::slider::Slider;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, IntoElement, ParentElement, RenderOnce, SharedString,
-    Styled, Window, px,
+    App, AppContext, Context, ElementId, Entity, IntoElement, ParentElement, Render, RenderOnce,
+    SharedString, Styled, Subscription, WeakEntity, Window, px,
 };
 
 use compositor_core::adjust::LevelsChannel;
+use compositor_core::adjust::LevelsSettings;
 use compositor_core::adjust::levels_auto::LevelsAuto;
+use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::{HistogramView, SheetRow};
 use crate::state::AppState;
-use crate::ui::floating_panel::{LevelsPanelState, PanelPlacement, panel_names};
-use crate::ui::sheets::SliderRole;
-use crate::ui::{AppCallback, Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on};
+use crate::ui::floating_panel::{
+    PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on,
+};
+use crate::ui::sheets::panel_value;
+use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch};
 
 /// The Levels/Curves channel picker's labels (LevelsSheet.swift's Picker).
 pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
@@ -31,101 +37,193 @@ pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
     }
 }
 
-impl AppState {
-    /// `session.levels != nil` → levelsPanel (`ContentView.swift:198-206`),
-    /// title "Levels", `Automatic` placement. Opening captures the active
-    /// layer for the live preview and computes the histogram, exactly as the
-    /// sheet's `build_sheet` did.
-    pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
-        self.begin_preview(cx);
-        let mut panel = LevelsPanelState {
-            sliders: vec![
-                self.make_slider(0.0, 254.0, 0.0, SliderRole::LevelsInputBlack, cx),
-                self.make_slider(0.1, 9.99, 1.0, SliderRole::LevelsGamma, cx),
-                self.make_slider(1.0, 255.0, 255.0, SliderRole::LevelsWhite, cx),
-                self.make_slider(0.0, 255.0, 0.0, SliderRole::LevelsOutBlack, cx),
-                self.make_slider(0.0, 255.0, 255.0, SliderRole::LevelsOutWhite, cx),
-            ],
+/// The Levels panel as its own view entity (Swift `LevelsSheet`'s edit
+/// state; ticket 41). It holds the session plus the transitional
+/// `WeakEntity<AppState>` seam: the sliders, the Preview checkbox, the
+/// channel picker and the Auto trio run here (they read this panel's own
+/// widgets), while the preview recomputes and the commit/cancel pipelines
+/// stay on the shell. The entity exists exactly while the panel is open —
+/// created by `AppState::open_levels_panel`, dropped on close — so its
+/// session can never go stale (tab switches are blocked while any panel is
+/// open, and `sync_session_observer` does not observe panels).
+pub struct LevelsPanelView {
+    /// The session the panel opened on. Unread today — the handlers funnel
+    /// through the shell seam, and tab switches are blocked while a panel
+    /// is open so it can never go stale; kept for ticket 43's per-tab
+    /// rebuild.
+    #[allow(dead_code)]
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the preview recomputes and
+    /// the commit/cancel flows stay there (ticket 41's handler split).
+    app: WeakEntity<AppState>,
+    /// The five sliders: input black, gamma, input white, output black,
+    /// output white.
+    sliders: Vec<Entity<SliderState>>,
+    /// The visible channel (0 = RGB).
+    channel: usize,
+    /// Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
+    preview: bool,
+    /// The histogram computed at open (selection-weighted), feeding Auto.
+    histogram: [f64; 1024],
+    /// The full settings the Auto modes write wholesale; the visible
+    /// channel's range is the sliders'.
+    levels: LevelsSettings,
+    subscriptions: Vec<Subscription>,
+}
+
+impl LevelsPanelView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        histogram: [f64; 1024],
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut panel = LevelsPanelView {
+            session,
+            app,
+            sliders: Vec::new(),
             channel: 0,
-            // Swift's LevelsEdit.preview (LevelsSheet's Preview toggle): on when opened.
             preview: true,
-            histogram: [0.0; 1024],
-            levels: compositor_core::adjust::LevelsSettings::default(),
+            histogram,
+            levels: LevelsSettings::default(),
+            subscriptions: Vec::new(),
         };
-        if let Some(pixels) = self.preview_base.clone() {
-            // With a selection, bins are weighted by the selection's coverage
-            // on the layer's pixel grid (LevelsFilter.histogram,
-            // Levels.swift:90-96).
-            let coverage = crate::ui::sheets::histogram_coverage(
-                self.preview_base_transform,
-                self.tab().session.read(cx).selection().cloned(),
-                pixels.width,
-                pixels.height,
-            );
-            compositor_core::adjust::levels_histogram(
-                pixels.as_ref(),
-                coverage.as_ref(),
-                &mut panel.histogram,
-            );
-        }
-        self.panel_widgets.levels = Some(panel);
-        self.panels.show(
-            panel_names::LEVELS_PANEL,
-            "Levels",
-            PanelPlacement::Automatic,
-        );
-        self.sync_panel_guard();
-        self.touch(cx);
+        panel.sliders = vec![
+            panel.make_slider(0.0, 254.0, 0.0, cx),
+            panel.make_slider(0.1, 9.99, 1.0, cx),
+            panel.make_slider(1.0, 255.0, 255.0, cx),
+            panel.make_slider(0.0, 255.0, 0.0, cx),
+            panel.make_slider(0.0, 255.0, 255.0, cx),
+        ];
+        panel
     }
 
-    /// `cancelLevels` (`LevelsSheet.swift:79`): an adjustment editing session
-    /// restores the opening settings; a pixel-layer session just drops the
-    /// preview.
-    pub fn cancel_levels_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.close(panel_names::LEVELS_PANEL) {
-            return;
-        }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
-        }
-        self.panel_widgets.levels = None;
-        self.after_panel_editing_closed(cx);
+    /// Creates one of the panel's sliders. Every slider funnels its changes
+    /// into [`Self::slider_changed`] — the write-back reads all five
+    /// sliders, so no per-slider role is needed.
+    fn make_slider(
+        &mut self,
+        min: f32,
+        max: f32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let state = cx.new(|_| {
+            crate::state::slider(min, max, if max - min > 12.0 { 1.0 } else { 0.1 }, value)
+        });
+        let subscription = cx.subscribe(&state, |this, _slider, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+            };
+            this.slider_changed(value, cx);
+        });
+        self.subscriptions.push(subscription);
+        state
     }
 
-    /// `commitLevels` (`LevelsSheet.swift:82`): the settings previewed live
-    /// are kept as one undo step.
-    pub fn confirm_levels_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.is_visible(panel_names::LEVELS_PANEL) {
-            return;
-        }
-        // Editing an adjustment layer: the previewed settings are the commit.
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
-        } else {
-            self.commit_preview_pixels("Levels", cx);
-        }
-        self.panel_widgets.levels = None;
-        self.panels.close(panel_names::LEVELS_PANEL);
-        self.after_panel_editing_closed(cx);
+    /// A slider moved: the shell recomputes the live preview from this
+    /// panel's settings (`apply_slider`'s Levels branch).
+    fn slider_changed(&mut self, _value: f32, cx: &mut Context<Self>) {
+        let settings = self.levels_settings(cx);
+        let preview = self.preview;
+        self.app
+            .update(cx, |app, cx| {
+                app.apply_levels_preview(settings, preview, cx)
+            })
+            .ok();
     }
 
-    /// `LevelsSheet`'s body: Preview toggle, channel picker, histogram, five
-    /// sliders, and the Auto trio (`LevelsAutomatic.swift`'s modes).
-    pub(crate) fn levels_panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let app = cx.entity().downgrade();
-        let Some(panel) = self.panel_widgets.levels.as_ref() else {
-            return gpui_kit::div().into_any_element();
+    /// The Preview checkbox flipped (or Option-P): the shell's refresh path,
+    /// which — unlike a slider change — repaints on the adjustment path too
+    /// (`refresh_levels_preview`'s exact shape).
+    pub(crate) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview = !self.preview;
+        self.refresh_preview(cx);
+    }
+
+    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        let settings = self.levels_settings(cx);
+        let preview = self.preview;
+        self.app
+            .update(cx, |app, cx| {
+                app.refresh_levels_preview(settings, preview, cx)
+            })
+            .ok();
+    }
+
+    /// The channel dropdown's write-back: only the visible channel changes,
+    /// exactly as the sheet's `set_channel` did.
+    pub(crate) fn set_channel(&mut self, channel: usize, cx: &mut Context<Self>) {
+        self.channel = channel;
+        cx.notify();
+    }
+
+    /// The panel's settings: the Auto modes set every channel's range at
+    /// once; those keep their values while the sliders stay the source of
+    /// truth for the visible channel's range.
+    fn levels_settings(&self, cx: &App) -> LevelsSettings {
+        let mut settings = self.levels;
+        settings.channel = match self.channel {
+            1 => LevelsChannel::Red,
+            2 => LevelsChannel::Green,
+            3 => LevelsChannel::Blue,
+            _ => LevelsChannel::Rgb,
         };
-        let channel = panel.channel;
-        let histogram = panel.histogram;
-        let sliders = panel.sliders.clone();
-        let preview = panel.preview;
+        let mut range = settings.current();
+        range.black = panel_value(&self.sliders, cx, 0) as f64;
+        range.gamma = panel_value(&self.sliders, cx, 1) as f64;
+        range.white = panel_value(&self.sliders, cx, 2) as f64;
+        range.output_black = panel_value(&self.sliders, cx, 3) as f64;
+        range.output_white = panel_value(&self.sliders, cx, 4) as f64;
+        settings.set_current(range);
+        settings
+    }
 
-        gpui_kit::div()
+    /// `autoLevels` (LevelsAutomatic.swift): the mode's settings replace the
+    /// edit's wholesale, then the visible sliders follow the current
+    /// channel's range and the preview refreshes, exactly as manual slider
+    /// edits do.
+    fn auto_mode(&mut self, mode: LevelsAuto, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = mode.settings(&self.histogram);
+        let values = levels_auto_slider_values(&settings, self.channel);
+        self.levels = settings;
+        for (index, value) in values.into_iter().enumerate() {
+            if let Some(slider) = self.sliders.get(index) {
+                let slider = slider.clone();
+                slider.update(cx, |state, cx| {
+                    state.set_value(SliderValue::Single(value), window, cx)
+                });
+            }
+        }
+        self.slider_changed(values[0], cx);
+    }
+
+    /// The panel's commit/cancel routes: the footer's OK/Cancel are
+    /// panel-entity callbacks that reach the shell's pipelines through the
+    /// seam (ticket 41's ruling 4).
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.cancel_levels_panel(cx))
+            .ok();
+    }
+
+    fn confirm(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.confirm_levels_panel(cx))
+            .ok();
+    }
+}
+
+impl Render for LevelsPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let app = self.app.clone();
+        let channel = self.channel;
+        let histogram = self.histogram;
+        let sliders = self.sliders.clone();
+        let preview = self.preview;
+
+        let body = gpui_kit::div()
             .flex()
             .flex_col()
             .gap_1()
@@ -133,11 +231,9 @@ impl AppState {
                 SheetRow::new("Preview").with_control(
                     LabeledCheckbox::new("levels-preview", "Preview")
                         .checked(preview)
-                        .with_on_change(app_on(&app, |state, checked, _, cx| {
-                            if let Some(panel) = state.panel_widgets.levels.as_mut() {
-                                panel.preview = checked;
-                            }
-                            state.refresh_levels_preview(cx);
+                        .with_on_change(panel_on(&this, |panel, checked, _, cx| {
+                            panel.preview = checked;
+                            panel.refresh_preview(cx);
                         })),
                 ),
             )
@@ -154,11 +250,17 @@ impl AppState {
                     )
                     .with_width(px(90.0))
                     .with_entries(vec![
-                        MenuEntry::new("RGB", |state, _, cx| set_levels_channel(state, 0, cx)),
-                        MenuEntry::new("Red", |state, _, cx| set_levels_channel(state, 1, cx)),
-                        MenuEntry::new("Green", |state, _, cx| set_levels_channel(state, 2, cx)),
-                        MenuEntry::new("Blue", |state, _, cx| set_levels_channel(state, 3, cx)),
+                        MenuEntry::new("RGB", move |state, _, cx| set_levels_channel(state, 0, cx)),
+                        MenuEntry::new("Red", move |state, _, cx| set_levels_channel(state, 1, cx)),
+                        MenuEntry::new("Green", move |state, _, cx| {
+                            set_levels_channel(state, 2, cx)
+                        }),
+                        MenuEntry::new("Blue", move |state, _, cx| {
+                            set_levels_channel(state, 3, cx)
+                        }),
                     ])
+                    // The dropdown keeps the app-shell dispatch (ticket 40's
+                    // transitional seam; ticket 43 retires it with ui.rs).
                     .with_dispatch(app_dispatch(&app)),
                 ),
             )
@@ -207,38 +309,60 @@ impl AppState {
                                 "Contrast",
                                 LevelsAuto::Contrast,
                             )
-                            .with_on_auto(app_on(
-                                &app,
-                                |state, mode, window, cx| {
-                                    state.levels_auto_mode(mode, window, cx);
+                            .with_on_auto(panel_on(
+                                &this,
+                                |panel, mode, window, cx| {
+                                    panel.auto_mode(mode, window, cx);
                                 },
                             )),
                         )
                         .child(
                             AutoButton::new("levels-auto-color", "Color", LevelsAuto::Color)
-                                .with_on_auto(app_on(&app, |state, mode, window, cx| {
-                                    state.levels_auto_mode(mode, window, cx);
+                                .with_on_auto(panel_on(&this, |panel, mode, window, cx| {
+                                    panel.auto_mode(mode, window, cx);
                                 })),
                         )
                         .child(
                             AutoButton::new("levels-auto-neutral", "Neutral", LevelsAuto::Neutral)
-                                .with_on_auto(app_on(&app, |state, mode, window, cx| {
-                                    state.levels_auto_mode(mode, window, cx);
+                                .with_on_auto(panel_on(&this, |panel, mode, window, cx| {
+                                    panel.auto_mode(mode, window, cx);
                                 })),
                         ),
                 ),
             )
-            .into_any_element()
+            .into_any_element();
+        let footer = panel_footer(
+            panel_names::LEVELS_PANEL,
+            &this,
+            false,
+            |panel, _, cx| panel.cancel(cx),
+            |panel, _, cx| panel.confirm(cx),
+        );
+        panel_body_frame(body, footer)
     }
 }
 
-/// The Levels channel dropdown's write-back: only the visible channel
-/// changes, exactly as the sheet's `set_channel` did.
+/// The Levels channel dropdown's write-back: a menu entry is
+/// AppState-flavored, so it lands on the shell and reads the panel through
+/// the content registry (the ticket-40 transitional pattern for `MenuEntry`
+/// dropdowns).
 fn set_levels_channel(state: &mut AppState, channel: usize, cx: &mut Context<AppState>) {
-    if let Some(panel) = state.panel_widgets.levels.as_mut() {
-        panel.channel = channel;
+    if let Some(panel) = state.levels_view() {
+        panel.update(cx, |panel, cx| panel.set_channel(channel, cx));
     }
-    state.notify_only(cx);
+}
+
+/// Slider values (input black, gamma, input white, output black, output
+/// white) shown for `channel` after Auto replaces the settings.
+fn levels_auto_slider_values(settings: &LevelsSettings, channel: usize) -> [f32; 5] {
+    let range = settings.ranges[channel.min(3)];
+    [
+        range.black as f32,
+        range.gamma as f32,
+        range.white as f32,
+        range.output_black as f32,
+        range.output_white as f32,
+    ]
 }
 
 /// One Auto button (`LevelsSheet.swift:64`): the mode's settings replace
@@ -249,7 +373,7 @@ pub struct AutoButton {
     id: ElementId,
     label: SharedString,
     mode: LevelsAuto,
-    on_auto: AppCallback<LevelsAuto>,
+    on_auto: crate::ui::AppCallback<LevelsAuto>,
 }
 
 impl AutoButton {
@@ -262,7 +386,7 @@ impl AutoButton {
         }
     }
 
-    pub fn with_on_auto(mut self, on_auto: AppCallback<LevelsAuto>) -> Self {
+    pub fn with_on_auto(mut self, on_auto: crate::ui::AppCallback<LevelsAuto>) -> Self {
         self.on_auto = on_auto;
         self
     }
@@ -279,10 +403,84 @@ impl RenderOnce for AutoButton {
     }
 }
 
+impl AppState {
+    /// `showLevelsPanel` (`LevelsSheet` via the panel-spawning onChange):
+    /// capture the preview base, compute the histogram, and put the panel
+    /// entity in the registry.
+    pub fn open_levels_panel(&mut self, cx: &mut Context<Self>) {
+        self.begin_preview(cx);
+        // With a selection, bins are weighted by the selection's coverage on
+        // the layer's pixel grid (LevelsFilter.histogram, Levels.swift:90-96).
+        let mut histogram = [0.0; 1024];
+        if let Some(pixels) = self.preview_base.clone() {
+            let coverage = crate::ui::sheets::histogram_coverage(
+                self.preview_base_transform,
+                self.tab().session.read(cx).selection().cloned(),
+                pixels.width,
+                pixels.height,
+            );
+            compositor_core::adjust::levels_histogram(
+                pixels.as_ref(),
+                coverage.as_ref(),
+                &mut histogram,
+            );
+        }
+        let session = self.tab().session.clone();
+        let app = cx.entity().downgrade();
+        let panel = cx.new(|cx| LevelsPanelView::new(session, app, histogram, cx));
+        self.panel_views.insert(
+            panel_names::LEVELS_PANEL,
+            crate::ui::floating_panel::PanelContent::Levels(panel),
+        );
+        self.panels.show(
+            panel_names::LEVELS_PANEL,
+            "Levels",
+            PanelPlacement::Automatic,
+        );
+        self.sync_panel_guard();
+        self.touch(cx);
+    }
+
+    /// `onClose` semantics = Cancel (`cancelLevels`): the panel closes and
+    /// an adjustment edit in progress is discarded.
+    pub fn cancel_levels_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.close(panel_names::LEVELS_PANEL) {
+            return;
+        }
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        }
+        self.panel_views.remove(panel_names::LEVELS_PANEL);
+        self.after_panel_editing_closed(cx);
+    }
+
+    /// `commitLevels` (`LevelsSheet.swift:82`): the settings previewed live
+    /// are kept as one undo step.
+    pub fn confirm_levels_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.is_visible(panel_names::LEVELS_PANEL) {
+            return;
+        }
+        // Editing an adjustment layer: the previewed settings are the commit.
+        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
+            self.tab()
+                .session
+                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        } else {
+            self.commit_preview_pixels("Levels", cx);
+        }
+        self.panel_views.remove(panel_names::LEVELS_PANEL);
+        self.panels.close(panel_names::LEVELS_PANEL);
+        self.after_panel_editing_closed(cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::levels_channel_label;
+    use super::{levels_auto_slider_values, levels_channel_label};
     use compositor_core::adjust::LevelsChannel;
+    use compositor_core::adjust::levels_auto::LevelsAuto;
 
     #[test]
     fn channel_labels_match_the_swift_picker() {
@@ -290,5 +488,32 @@ mod tests {
         assert_eq!(levels_channel_label(LevelsChannel::Red), "Red");
         assert_eq!(levels_channel_label(LevelsChannel::Green), "Green");
         assert_eq!(levels_channel_label(LevelsChannel::Blue), "Blue");
+    }
+
+    /// (Re-hosted with `levels_auto_slider_values` from sheets.rs, ticket 41.)
+    #[test]
+    fn auto_slider_values_follow_the_current_channel() {
+        let mut bins = [0.0; 1024];
+        for c in 1..4 {
+            bins[c * 256 + 20 * c] = 100.0;
+            bins[c * 256 + 200 + c * 10] = 100.0;
+        }
+        // Contrast touches only the composite range: the RGB sliders move,
+        // a channel's sliders stay put.
+        let contrast = LevelsAuto::Contrast.settings(&bins);
+        assert_eq!(
+            levels_auto_slider_values(&contrast, 0),
+            [20.0, 1.0, 230.0, 0.0, 255.0]
+        );
+        assert_eq!(
+            levels_auto_slider_values(&contrast, 1),
+            [0.0, 1.0, 255.0, 0.0, 255.0]
+        );
+        // Color's per-channel ranges show up when that channel is visible.
+        let color = LevelsAuto::Color.settings(&bins);
+        assert_eq!(
+            levels_auto_slider_values(&color, 3),
+            [60.0, 1.0, 230.0, 0.0, 255.0]
+        );
     }
 }

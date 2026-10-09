@@ -10,8 +10,10 @@ use gpui_kit::{
 };
 
 use compositor_core::adjust::{CurvePoint, CurvesSettings, LevelsChannel};
+use compositor_core::filters::FilterSettings;
 
 use crate::state::{AppState, CurvesEditor};
+use crate::ui::filter_sheet::FilterPanelView;
 use crate::ui::{DragMoveHandler, DragUpHandler};
 
 /// Starting a drag on the curve canvas (`CurvesControls.swift`'s
@@ -30,27 +32,27 @@ pub enum CurveDragBegin {
     None,
 }
 
-impl AppState {
+impl FilterPanelView {
     // MARK: Curves canvas (CurvesControls.swift's DragGesture)
 
     /// The channel picker: switching clears the selection, exactly as the
     /// Swift `onChange(of: settings.channel)` does.
-    pub fn curves_set_channel(&mut self, channel: LevelsChannel, cx: &mut Context<Self>) {
-        if let Some(editor) = self.curves_editor.as_mut() {
+    pub(crate) fn curves_set_channel(&mut self, channel: LevelsChannel, cx: &mut Context<Self>) {
+        if let Some(editor) = self.curves.as_mut() {
             editor.settings.channel = channel;
             editor.selected = None;
             editor.dragging = None;
         }
-        self.notify_only(cx);
+        cx.notify();
     }
 
     /// Pointer down on the curve canvas: grab the nearest point, or add a
     /// new one on empty canvas, then start dragging it.
-    pub fn curves_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    pub(crate) fn curves_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(bounds) = curve_layout_bounds(cx) else {
             return;
         };
-        let Some(editor) = self.curves_editor.as_mut() else {
+        let Some(editor) = self.curves.as_mut() else {
             return;
         };
         curves_press(editor, event.position, bounds);
@@ -60,11 +62,11 @@ impl AppState {
 
     /// Pointer move while a drag is live: the point follows, the preview
     /// re-renders.
-    pub fn curves_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    pub(crate) fn curves_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let Some(bounds) = curve_layout_bounds(cx) else {
             return;
         };
-        let Some(editor) = self.curves_editor.as_ref() else {
+        let Some(editor) = self.curves.as_ref() else {
             return;
         };
         if editor.dragging.is_none() {
@@ -75,22 +77,22 @@ impl AppState {
     }
 
     /// Pointer up: the drag ends (the selection stays).
-    pub fn curves_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
+    pub(crate) fn curves_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
         let was_dragging = self
-            .curves_editor
+            .curves
             .as_mut()
             .map(|editor| editor.dragging.take().is_some())
             .unwrap_or(false);
         if was_dragging {
-            self.notify_only(cx);
+            cx.notify();
         }
     }
 
     /// The "Remove point" button: interior points only, as in Swift
     /// (`selected > 0 && selected < points.count-1`).
-    pub fn curves_remove_point(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn curves_remove_point(&mut self, cx: &mut Context<Self>) {
         let removed = {
-            let Some(editor) = self.curves_editor.as_mut() else {
+            let Some(editor) = self.curves.as_mut() else {
                 return;
             };
             let Some(index) = editor.selected else {
@@ -112,8 +114,8 @@ impl AppState {
 
     /// The "Reset curve" button: the channel's points return to the
     /// identity diagonal.
-    pub fn curves_reset(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.curves_editor.as_mut() else {
+    pub(crate) fn curves_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.curves.as_mut() else {
             return;
         };
         let channel = editor.settings.channel.index();
@@ -126,7 +128,7 @@ impl AppState {
     /// Folds a pointer position into the dragged point and refreshes the
     /// preview.
     fn curves_drag_to(&mut self, x: f64, y: f64, cx: &mut Context<Self>) {
-        let Some(editor) = self.curves_editor.as_mut() else {
+        let Some(editor) = self.curves.as_mut() else {
             return;
         };
         let Some(index) = editor.dragging else {
@@ -136,6 +138,35 @@ impl AppState {
         let moved = curve_drag_move(&editor.settings.channels[channel], index, x, y);
         editor.settings.channels[channel] = moved;
         self.apply_curves_preview(cx);
+    }
+
+    /// Runs the curve editor's settings as the Curves filter preview, the
+    /// same path the other filter sheets' sliders use (the former
+    /// `AppState::apply_curves_preview`, moved with the editor, ticket 41).
+    pub(crate) fn apply_curves_preview(&mut self, cx: &mut Context<Self>) {
+        let mut settings = FilterSettings::default();
+        if let Some(editor) = self.curves.as_ref() {
+            settings.curves = editor.settings.clone();
+        }
+        let kind = compositor_core::filters::FilterKind::Curves;
+        self.app
+            .update(cx, |app, cx| {
+                app.apply_filter_preview(kind, settings, cx);
+                app.touch(cx);
+            })
+            .ok();
+    }
+}
+
+impl AppState {
+    /// The curves channel dropdown's write-back: a menu entry is
+    /// AppState-flavored, so it lands on the shell and reads the filter
+    /// panel through the content registry (the ticket-40 transitional
+    /// pattern for `MenuEntry` dropdowns).
+    pub fn curves_set_channel(&mut self, channel: LevelsChannel, cx: &mut Context<Self>) {
+        if let Some(panel) = self.filter_view() {
+            panel.update(cx, |panel, cx| panel.curves_set_channel(channel, cx));
+        }
     }
 }
 
@@ -295,7 +326,7 @@ impl Global for CurvesCanvasLayout {}
 
 /// The canvas bounds to map pointer positions through; `None` before the
 /// canvas's first layout.
-fn curve_layout_bounds(cx: &Context<AppState>) -> Option<Bounds<Pixels>> {
+fn curve_layout_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     cx.try_global::<CurvesCanvasLayout>().and_then(|l| l.bounds)
 }
 

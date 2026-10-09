@@ -4,6 +4,38 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-10：废除 AppState 票 41——浮动面板内容实体化）
+
+八个浮动面板的内容从 `PanelWidgets` 捆绑 + AppState 方法族改为独立
+view 实体（Swift 对照：各 Sheet 视图的 `@State` 编辑态——HueSaturationSheet
+的 `dragging`:132、ColorPickerSheet 的 `hexDraft`:10、KeyboardShortcutsSheet
+的 `draft`/`search`/`recording`:229-232、LassoControls 的 `input`:184；
+面板宿主 FloatingPanelController 本是 ContentView 的 `@State`
+（ContentView.swift:11-15），宿主注册表原地不动，随票 43 落每 tab）。
+
+- **七个面板实体**：`LevelsPanelView`/`HueSaturationPanelView`/
+  `AmountPanelView`/`FilterPanelView`（Curves 内容并入，curves 手势
+  split-impl 落 curves_controls.rs）/`EffectsPanelView`/
+  `ColorPickerPanelView`/`ShortcutsPanelView`。各持 session 实体 +
+  `app: WeakEntity<AppState>` 过渡缝；`sync_session_observer` 不观察
+  面板（开板期间 can_switch 阻断切签页，session 不会过期）。
+- **`SHORTCUTS_SHEET` thread_local 消解**（ADR 0002「view 本地 @State →
+  Entity」收编）：草稿/录制行/键击拦截器全部上面板实体，拦截器在面板
+  实体上下文安装、随实体释放；sheets_ui 的「面板关闭即收编」守卫随
+  thread_local 一并删除（实体生命周期替代）。
+- **`PanelWidgets` 捆绑消解**为 `PanelContents = HashMap<&'static str,
+  PanelContent>`（名字键面板实体注册表，开板插入、关板移除）；
+  `filter_seed` 随 FilterPanelView（开板期播种、FilterEdit.seed
+  Filters.swift:223 语义）、`picker_ui` 随 ColorPickerPanelView
+  （hex 字段）。
+- **保留不动**（ADR 0002 既裁定）：`PickerFieldState`/
+  `CurvesCanvasLayout`/`PanelDragState`/`NEXT_COOKIE`/`GradientCache`。
+- 例外披露：三个 MenuEntry 下拉（blend/effects/adjustment）保留
+  ui.rs 的 `MenuEntry`/`app_dispatch` 过渡壳（ui.rs 不在票 41 独占
+  清单，随 43 适配器退役一并处理）；levels/hue_saturation/filter 三
+  面板的 `session` 字段当前无读取点（交互全走缝、面板期切签页被
+  阻断），逐项 `allow(dead_code)` 留待 43 每 tab 重建。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 40——图层面板视图实体 `Entity<LayersPanelView>`）
 
 票 40 落地（裁定全文见 `docs/adr/0003-abolish-appstate-dual-mirror.md`
