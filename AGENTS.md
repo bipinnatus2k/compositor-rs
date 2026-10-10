@@ -95,6 +95,9 @@ cargo test                   # 引擎全量；UI 改动另跑 cargo test -p comp
   `Edges` 一类）豁免。会话状态机家族同样豁免：`EditorSession` 与它持有的
   对话框编辑状态类型（`ColorPickerState` 一类）是原版 `@Observable` 类的
   直译，视图直读字段是原项目写法的一部分；突变仍一律走带守卫的方法。
+  同理豁免的还有 app 侧实体化后的 `ProjectWorkspace` 内层字段（`is_managing`
+  等直读直写）与 `ContentView` 的子视图实体字段——均为原版 `@Observable`
+  类 / SwiftUI 视图成员的直译（`docs/adr/0003-abolish-appstate-dual-mirror.md`）。
   本项目的 seam 指 `compositor-core` ↔ app 边界与 app 内可复用 UI 模块
   的边界。
 - **core 不依赖 gpui**：引擎（文档模型、渲染、工具、格式）全部位于

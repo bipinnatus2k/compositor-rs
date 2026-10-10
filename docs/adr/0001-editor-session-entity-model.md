@@ -1,6 +1,10 @@
 # ADR 0001：EditorSession 的实体模型——每 tab 一个 GPUI 实体
 
-- 状态：Accepted（2026-10-08 架构裁定 Q3/Q5，33 号票落地）
+- 状态：Accepted（2026-10-08 架构裁定 Q3/Q5，33 号票落地）；**Extended by
+  [ADR 0003](0003-abolish-appstate-dual-mirror.md)（2026-10-09）**——本
+  ADR 的「ProjectWorkspace 保持普通结构体」有意偏差由 0003 的
+  `Entity<ProjectWorkspace>` 取代；Future work 一节由 0003 的视图实体
+  镜像 + 票 37 的缓存键作用域取代（改写见文末）。
 - 范围：`crates/app`（`tabs.rs`、`state.rs` 与全部 UI/画布访问面）；`compositor-core` 零改动
 
 ## 背景
@@ -77,26 +81,40 @@ GPUI 原生机制。**
   `(tab_id, revision)` 为键，通知作用域的细化（谁 bump revision、
   observer 触发什么）不在本 ADR 的范围。
 
-## Future work：(a) → (b) 的既定迁移方向
+## Future work：（已终结，2026-10-10）——(a)→(b) 拆实体取消，由 ADR 0003 接管
 
-**用户明确要求留档：本裁定是 (a)，方向是后续迁移到 (b)——完整镜像
-Swift 的 `@Observable` 对象清单，用实体边界替代属性订阅。** 落地条目
-（即 parked 的 37 号票）：
-
-1. `DocumentHistory` → 独立 `Entity<DocumentHistory>`（Swift：
-   DocumentHistory.swift:6-7 是独立 `@Observable` 类，session 持有引
-   用）；undo/redo 的失效从 session 级细化到 history 级。
-2. 对话框对象 → 独立实体，session 以字段持有（Swift 四个
-   `@Observable` 类）：
-   - `LevelsEdit`（Levels.swift:104-105），
-   - `HueSaturationEdit`（HueSaturation.swift:367-368），
-   - `FilterEdit`（Filters.swift:200-201），
-   - `ColorPickerState`（ColorPalette.swift:179-180）。
-   对话框滑杆拖动不再触发 session 级失效。
-3. 通知作用域细化：全局 `touch(cx)` revision → 按 tab/按关注点作用域
-   （缓存键 `(tab_id, revision)` 已就位，是细化基础）；非活动 tab 的观
-   察裁剪（本 ADR 已做活动 tab 单观察，进一步按面板订阅细化留此）。
-4. 完成后把本 ADR 状态改为 Superseded/Extended。
+> 本节原为「(a) → (b) 实体清单迁移」的既定方向（37 号票 parked，用户
+> 明确要求留档）。**2026-10-09 的 ADR 0003 grilling 正式取消该方向**，
+> 两条依据：
+>
+> 1. **源码核实**：`DocumentHistory`（DocumentHistory.swift:6-7）、
+>    `LevelsEdit`（:104-105）、`HueSaturationEdit`（:367-368）、
+>    `FilterEdit`（:200-201）、`ColorPickerState`（ColorPalette.swift:179-180）
+>    五类全部是**纯数据类**（`@Observable final class`，无 View/NSView，
+>    AppKit 接触面仅 NSSound×4/NSColor×2）——它们住在 `Document/`，映射
+>    到 core 的模型层；core 不依赖 gpui 是宪法铁律，core 字段不可能成为
+>    gpui 实体。字面拆分只剩两种工程形态，均被否决：所有权倒置（~40 个
+>    对话框方法签名手术，且本身违数据模型 parity——Swift 就是 session
+>    拥有这些对象）；影子实体（五对象双真相，每条 core 内部突变路径都要
+>    补同步点，漏一处即 UI 陈旧）。
+> 2. **实体粒度的 `@Observable` 镜像已由 33 号票完成**（session 本身就是
+>    实体）；本 ADR 既定「不模拟属性级观察」。
+>
+> 原 Future work 的真实诉求（失效面收敛）由两条新路径达成：
+>
+> - **视图实体镜像 Swift 视图树**（ADR 0003，票 38–43 落地）：失效粒度
+>   = 视图树子 Render 拆分 + 缓存键；`ProjectWorkspaceView`/`ContentView`
+>   双层 root 成形，`AppState` 除名（2d72632）。
+> - **缓存键作用域**（票 37 落地，8966d69）：缩略图按内容键控
+>   （`ThumbnailSource`，滑杆拖动缩略图再生 15→0）、蒙版缩略图缓存、
+>   inline revision bypass 统一进 `touch`/`bump_revision`、失效计数仪表
+>   （一物两用验收 harness）。帧缓存仍以 `(tab_id, revision)` 为键（合成
+>   是失效的必要成本，进一步作用域化留待 profile 数据说话）。
+>
+> 若日后 profile 证明对话框拖动期间的 chrome 重渲染是热点，可为单个最热
+> 对话框评估 app 侧影子实体（局部手术、数据驱动，见 ADR 0003 Future
+> work）。本 ADR 其余裁定（每 tab 一个 session 实体、活动 tab 单观察、
+> 对话框编辑态留 session 内）全部有效。
 
 前置条件：33 号票落地并稳定一轮；性能依据先行——对话滑杆与 undo 通知
 热点的 profile 再评估，避免为细化而细化。

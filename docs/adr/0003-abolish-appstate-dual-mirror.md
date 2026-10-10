@@ -1,8 +1,28 @@
 # ADR 0003：废除 AppState——状态实体与视图实体双层镜像 Swift
 
-- 状态：Accepted（2026-10-09 grill-with-docs 架构裁定；落地按票 38→39→40→41→42→43→37→44 推进）
+- 状态：Accepted（2026-10-09 grill-with-docs 架构裁定）；**落地完成
+  （2026-10-10）**——票序 38→39→40→41→42→43→37 全部落地，`AppState`
+  除名；本文由票 44 定稿回填。
 - 范围：`crates/app`（全部）；`compositor-core` 仅票 38 的 `CanvasViewport` 增补
 - 取代：ADR 0001「ProjectWorkspace 保持普通结构体」的有意偏差；执行 ADR 0002 预留的「AppState 移除路线」
+
+## 落地台账（2026-10-10 回填；分支 refactor-app-architecture）
+
+| 票 | 内容 | commit |
+|---|---|---|
+| 38 | `CanvasViewport` 进 core session（每 tab 视口还原） | 6385f59 + fff37cb（Swift 测试套件移植） |
+| 39 | 画布视图实体 `Entity<EditorCanvasView>` | e35fab3 |
+| 40 | 图层面板实体 `Entity<LayersPanelView>` | fb0c3cf |
+| 41 | 七面板内容实体（SHORTCUTS_SHEET 消解） | f33b433 |
+| 42 | 工具头族/welcome/status 实体（九实体） | ad869b8 |
+| 43 | `Entity<ProjectWorkspace>` + `ProjectWorkspaceView` 改名除名 + `ContentView` 双层 `.id` 镜像 | 2d72632 |
+| 37 | 失效卫生：缩略图内容键控 + bypass 统一 + 失效仪表 | 8966d69 |
+| — | 41–43 双轴 review 补课（零硬违规、五项披露） | 93d8f9e |
+
+全程 919 测试绿（core 627 + app 182 + 集成 110），既有断言零改动；
+逐票 gates 与 boot smoke 全过。执行裁定细节的权威记录在
+`.scratch/parity-review-tickets/issues/38-44`（票面审计表 + 落地记录）
+与 `docs/rust-vs-swift-diff-report.md` 顶部各架构裁定节。
 
 ## 背景
 
@@ -106,23 +126,49 @@ parked 的 37 号票（history/对话框拆实体）卡在一个死结：单 Ren
 - 属性级观察不模拟（ADR 0001 既定）：实体粒度是唯一的观察单元；本裁定
   的失效收益来自视图实体边界与缓存键作用域，不来自更细的观察。
 - 票 39 字段归属审计产出的例外逐条记 diff report。
+- **落地期新增（44 定稿收口）**：
+  - **适配器「退役」= 改名终形**：`ui.rs` 六适配器以
+    `WeakEntity<ProjectWorkspaceView>` 签名同形重写后，已是普通的根视图
+    父回调（组件上报突变的合法形态），不再是过渡缝——裁定 6 的「退役」
+    按此解释（review 披露 ⑦）。
+  - **MenuBar 解析点**：保持吃活动 `Entity<EditorSession>`、根渲染期从
+    workspace 实体解析——即 Swift `.commands` 计算属性
+    （CompositorApp.swift:7）的同构（review 披露 ⑥；票面原文字过度
+    指定，按实现修正）。
+  - **sync_content 亚帧窗口**（review 披露 ⑧，低危留档）：切 tab 突变
+    与下一帧渲染之间派发的事件仍路由到将死的旧 ContentView 子实体
+    （化妆性）；`can_switch` 覆盖交互态但不覆盖此亚帧窗。
+  - **窗口级留根项**：模态 sheet 宿主、面板宿主 + panel_views、帧缓存、
+    preview 族、pending_save/delete_ask_ids、~130 on_action 注册与流
+    方法（Swift 对应物散布在 .commands/ContentView @State/对话框对象，
+    Rust 集中于根视图——`can_switch` 保证行为等价）。
 
 ## 后果
 
-- `AppState` 除名；`ui.rs` 六适配器与 `AppHandler` 退役；~120 处引用清零。
-- 切 tab 行为变化（朝 parity）：视口按 tab 还原（refit hack 删除）；
-  每-tab UI 草稿随 `ContentView` 重建；非活动 tab 自动失观察。
-- core 公共 API 增补：`CanvasViewport` 类型 + `EditorSession.viewport`
-  （票 38，commit 描述按 AGENTS §7 列清单）。
+- `AppState` 除名（2d72632，全 crate 213 处引用清零）；`ui.rs` 六适配器
+  改名为根视图父回调（见偏差记录）；~120 处原引用清零。
+- 切 tab 行为变化（朝 parity）：视口按 tab 还原（refit hack 删除，票
+  38）；每-tab UI 草稿随 `ContentView` 重建；非活动 tab 自动失观察；
+  滑杆/输入框 seeding 随重建重播、状态条文案随 tab 重置（review 追认，
+  皆 Swift `.id` 真实语义）。
+- core 公共 API 增补：`CanvasViewport` 类型 + `EditorSession.viewport` +
+  `fit`/`zoom`/`zoom_keyboard`（票 38，commit 描述按 AGENTS §7 列清单）。
 - 既有 RenderOnce 组件（ADR 0002 的 30 个 struct）不被推翻，成为 view
   entity 的渲染体；helper-seam 测试惯例继续适用。
-- 179 个 app 测试断言零改动；构造代码机械适配。
-- ADR 0001 的 Future work（(a)→(b) 实体清单）由本裁定取代，票 44 执行
-  改写（状态记 Extended by 0003）。
+- 919 个测试断言零改动；构造代码机械适配。
+- 失效面收敛（票 37 数字）：滑杆拖动缩略图再生 15→0、蒙版缩略图每帧
+  重算归零、revision 写入点收敛为 `touch`/`bump_revision` 两个。
+- ADR 0001 的 Future work（(a)→(b) 实体清单）已取消并改写（状态记
+  Extended by 0003，票 44 落）。
 
 ## Future work
 
-- 票 37 落地后若 profile 显示 chrome 重渲染为通知热点：为单个最热对话框
-  评估 app 侧影子实体（局部手术，数据驱动，不预先支付双真相税）。
-- 票 44：ADR 0001 Future work 改写、CONTEXT.md/README/diff report/
-  AGENTS §5 收口。
+- 票 37 落地后若 profile 显示对话框拖动期间的 chrome 重渲染为通知热点：
+  为单个最热对话框评估 app 侧影子实体（局部手术，数据驱动，不预先支付
+  双真相税）。失效仪表已就位（票 37），量测路径现成。
+- 帧缓存 `(tab_id, revision)` 的进一步作用域化：合成是失效的必要成本，
+  仅在 profile 证明可细分（如按 dirty rect）时再动。
+- 三面板 `session` 死字段（levels/hue_saturation/filter 的 house 惯例
+  保持项）：下次触及对应面板票时顺手清理。
+- sync_content 亚帧窗若在真实使用中显形（尚未观察到）：评估
+  selected_id 门。
