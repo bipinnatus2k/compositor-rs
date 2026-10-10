@@ -1,21 +1,24 @@
 //! The left tool rail and the options header shell (NavigationToolHeader.swift
 //! plus ContentView's `toolHeaders` group): the tool title and the dispatch
-//! to each tool's controls. The per-tool control sets live beside their
-//! Swift sources (`ui/brush_controls.rs`, `ui/lasso_controls.rs`,
-//! `ui/crop_controls.rs`, `ui/shape_controls.rs`, `ui/type_controls.rs`,
-//! `ui/transform_inspector.rs`). The Zoom/Hand branches are
-//! NavigationToolHeader.swift's own subject and stay here, with the
-//! Gradient branch beside them pending its own carve.
+//! to each tool's controls. The per-tool control sets are view entities
+//! (ADR 0003 step E, ticket 42) living beside their Swift sources
+//! (`ui/brush_controls.rs`, `ui/lasso_controls.rs`, `ui/crop_controls.rs`,
+//! `ui/shape_controls.rs`, `ui/type_controls.rs`,
+//! `ui/transform_inspector.rs`); the NavigationToolHeader and
+//! GradientControls entities stay here, where their arms were carved
+//! (GradientControls has no file of its own in the port).
 
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    App, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, px,
+    App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    px,
 };
 
 use compositor_core::document::NavigationTool;
@@ -23,7 +26,13 @@ use compositor_core::session::{BrushToolMode, EditorSession};
 use compositor_core::tools::brush::GradientShape;
 
 use crate::canvas::editor_canvas::CanvasDrag;
-use crate::state::AppState;
+use crate::state::{AppState, slider};
+use crate::ui::brush_controls::BrushControlsView;
+use crate::ui::crop_controls::CropControlsView;
+use crate::ui::lasso_controls::LassoControlsView;
+use crate::ui::shape_controls::ShapeControlsView;
+use crate::ui::transform_inspector::TransformInspectorView;
+use crate::ui::type_controls::TypeControlsView;
 use crate::ui::{
     AppCallback, ClickHandler, Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch,
     app_on, app_on_click, text_label,
@@ -291,8 +300,13 @@ impl AppState {
 
     // MARK: Options header
 
+    /// The options header row (Swift `toolHeaders`' shared bar): the title
+    /// plus the active tool's controls. Each per-tool control set is a view
+    /// entity (ticket 42); only the active tool's entity is consulted per
+    /// pass, mirroring Swift's `if session.tool == ...` branches — the
+    /// entities are persistent (`AppState` fields) and re-pointed on tab
+    /// changes by [`AppState::sync_session_observer`].
     pub fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let app = cx.entity().downgrade();
         let (tool, erasing) = {
             let session = self.tab().session.read(cx);
             (session.tool, session.brush_mode == BrushToolMode::Erase)
@@ -331,68 +345,101 @@ impl AppState {
             | NavigationTool::SpotHealing
             | NavigationTool::Blur
             | NavigationTool::CloneStamp => {
-                header = header.children(self.brush_controls(cx));
+                header = header.children(
+                    self.brush_header
+                        .update(cx, BrushControlsView::brush_controls),
+                );
             }
             NavigationTool::Marquee => {
-                header = header.children(self.marquee_controls(cx));
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::marquee_controls),
+                );
             }
             NavigationTool::Lasso => {
-                header = header.children(self.lasso_controls(cx));
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::lasso_controls),
+                );
             }
             NavigationTool::Wand => {
-                header = header.children(self.wand_controls(cx));
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::wand_controls),
+                );
             }
             NavigationTool::Gradient => {
-                // Swift home: GradientControls.swift. It is not in ticket
-                // 32's file contract, so the controls stay with the shell.
-                let settings = self.tab().session.read(cx).gradient_settings;
-                header = header
-                    .child(
-                        Dropdown::new(
-                            "gradient-shape",
-                            match settings.shape {
-                                GradientShape::Linear => "Linear",
-                                GradientShape::Radial => "Radial",
-                            },
-                        )
-                        .with_width(px(84.0))
-                        .with_entries(menu_entries(
-                            [
-                                (GradientShape::Linear, "Linear"),
-                                (GradientShape::Radial, "Radial"),
-                            ],
-                            settings.shape,
-                            |session, value| session.gradient_settings.shape = value,
-                        ))
-                        .with_dispatch(app_dispatch(&app)),
-                    )
-                    .child(
-                        LabeledCheckbox::new("gradient-fg-bg", "Foreground to Background")
-                            .checked(settings.foreground_to_background)
-                            .with_on_change(app_on(&app, |state, checked, _, cx| {
-                                state.tab().session.update(cx, |session, _| {
-                                    session.gradient_settings.foreground_to_background = checked
-                                });
-                                state.touch(cx);
-                            })),
-                    )
-                    .child(
-                        LabeledCheckbox::new("gradient-reverse", "Reverse")
-                            .checked(settings.reversed)
-                            .with_on_change(app_on(&app, |state, checked, _, cx| {
-                                state.tab().session.update(cx, |session, _| {
-                                    session.gradient_settings.reversed = checked
-                                });
-                                state.touch(cx);
-                            })),
-                    )
-                    .child(LabeledSlider::new(
-                        "Opacity",
-                        self.gradient_slider.clone(),
-                        format!("{:.0}%", settings.opacity * 100.0),
-                        px(80.0),
-                    ));
+                // Swift home: GradientControls.swift; the entity lives here,
+                // where the arm was carved (no file of its own in the port).
+                header = header.children(
+                    self.gradient_header
+                        .update(cx, GradientControlsView::gradient_controls),
+                );
             }
+            NavigationTool::Zoom | NavigationTool::Hand => {
+                header = header.children(
+                    self.navigation_header
+                        .update(cx, NavigationToolHeaderView::controls),
+                );
+            }
+            NavigationTool::Crop => {
+                header =
+                    header.children(self.crop_header.update(cx, CropControlsView::crop_controls));
+            }
+            _ => {}
+        }
+
+        if tool == NavigationTool::Move {
+            header = header.children(
+                self.transform_header
+                    .update(cx, TransformInspectorView::transform_inspector),
+            );
+        }
+        if tool == NavigationTool::Type {
+            header = header.children(self.type_header.update(cx, TypeControlsView::type_controls));
+        }
+        if tool == NavigationTool::Shape {
+            header = header.children(
+                self.shape_header
+                    .update(cx, ShapeControlsView::shape_controls),
+            );
+        }
+
+        header.into_any_element()
+    }
+}
+
+/// Swift `NavigationToolHeader`'s Zoom/Hand content: a view entity since
+/// ticket 42. The Swift view's `zoomText`/`displayedZoomText` drafts and
+/// stepper (NavigationToolHeader.swift:5-8) have no Rust counterpart — the
+/// port renders the four zoom buttons and the pan hint, so nothing hangs
+/// beside the seam (recorded, not invented; ticket 43's per-tab rebuild is
+/// where a draft would land if the field were ever ported).
+pub struct NavigationToolHeaderView {
+    /// The active tab's session — the branch pick reads its tool.
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the zoom commands route
+    /// through it (`zoom_fit`, the keyboard zoom levels). No AppState
+    /// dependencies beyond what the moved handlers already used.
+    app: WeakEntity<AppState>,
+}
+
+impl NavigationToolHeaderView {
+    pub(crate) fn new(session: Entity<EditorSession>, app: WeakEntity<AppState>) -> Self {
+        NavigationToolHeaderView { session, app }
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view and the layers panel).
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
+        self.session = session;
+    }
+
+    /// `NavigationToolHeader.swift`'s body: the four zoom buttons on Zoom,
+    /// the pan hint on Hand.
+    pub(crate) fn controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let app = self.app.clone();
+        match self.session.read(cx).tool {
             NavigationTool::Zoom => {
                 let on_zoom = app_on(&app, |state, command, _, cx| match command {
                     ZoomCommand::Fit => state.zoom_fit(cx),
@@ -419,39 +466,169 @@ impl AppState {
                         state.touch(cx);
                     }
                 });
-                header = header
-                    .child(
-                        ZoomButton::new("zoom-fit", ZoomCommand::Fit).with_on_zoom(on_zoom.clone()),
-                    )
-                    .child(
-                        ZoomButton::new("zoom-100", ZoomCommand::ActualSize)
-                            .with_on_zoom(on_zoom.clone()),
-                    )
-                    .child(
-                        ZoomButton::new("zoom-in", ZoomCommand::In).with_on_zoom(on_zoom.clone()),
-                    )
-                    .child(ZoomButton::new("zoom-out", ZoomCommand::Out).with_on_zoom(on_zoom));
+                vec![
+                    ZoomButton::new("zoom-fit", ZoomCommand::Fit)
+                        .with_on_zoom(on_zoom.clone())
+                        .into_any_element(),
+                    ZoomButton::new("zoom-100", ZoomCommand::ActualSize)
+                        .with_on_zoom(on_zoom.clone())
+                        .into_any_element(),
+                    ZoomButton::new("zoom-in", ZoomCommand::In)
+                        .with_on_zoom(on_zoom.clone())
+                        .into_any_element(),
+                    ZoomButton::new("zoom-out", ZoomCommand::Out)
+                        .with_on_zoom(on_zoom)
+                        .into_any_element(),
+                ]
             }
-            NavigationTool::Crop => {
-                header = header.children(self.crop_controls(cx));
+            NavigationTool::Hand => {
+                vec![text_label("Drag to pan · scroll to zoom", true).into_any_element()]
             }
-            _ => {}
+            _ => Vec::new(),
         }
+    }
+}
 
-        if tool == NavigationTool::Move {
-            header = header.children(self.transform_inspector(cx));
-        }
-        if tool == NavigationTool::Hand {
-            header = header.child(text_label("Drag to pan · scroll to zoom", true));
-        }
-        if tool == NavigationTool::Type {
-            header = header.children(self.type_controls(cx));
-        }
-        if tool == NavigationTool::Shape {
-            header = header.children(self.shape_controls(cx));
-        }
+/// Swift `GradientControls`' option bar: a view entity since ticket 42 — it
+/// owns the opacity slider entity and its write subscription
+/// (`subscribe_sliders`' gradient slice). The struct lives here, where the
+/// Gradient arm was carved into this file pending its own carve (the Swift
+/// source is its own view; no Rust file was ever made for it). Only in the
+/// render tree while the Gradient tool is active, so it keeps no session
+/// observer; its session field is re-pointed on tab changes by
+/// [`AppState::sync_session_observer`].
+pub struct GradientControlsView {
+    /// The active tab's session — the settings readouts and the checkbox
+    /// writes speak to it directly (`GradientControls`' `@Bindable
+    /// session`).
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the repaint epoch and the
+    /// shared header row stay there. No AppState dependencies beyond what
+    /// the moved handlers already used.
+    app: WeakEntity<AppState>,
+    /// The opacity slider (`GradientControls`' opacity binding): seeded from
+    /// the persisted tool default at construction, exactly as
+    /// `AppState::new` seeded it when the field lived there.
+    gradient_slider: Entity<SliderState>,
+    /// Keep-alive for the slider subscription: dropping a Subscription
+    /// unsubscribes, so the bundle is held, never read.
+    #[allow(dead_code)]
+    subscriptions: Vec<Subscription>,
+}
 
-        header.into_any_element()
+impl GradientControlsView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let opacity = session.read(cx).gradient_settings.opacity;
+        let gradient_slider = cx.new(|_| slider(1.0, 100.0, 1.0, (opacity * 100.0) as f32));
+        let mut view = GradientControlsView {
+            session,
+            app,
+            gradient_slider,
+            subscriptions: Vec::new(),
+        };
+        view.subscribe_sliders(cx);
+        view
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view and the layers panel). The slider
+    /// subscription reads this field at event time, so the re-point keeps
+    /// it writing to the active tab.
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
+        self.session = session;
+    }
+
+    /// The shell's Opacity-digit sync route (`AppState::opacity_digit` —
+    /// the one write to it from outside this view).
+    pub(crate) fn opacity_slider(&self) -> Entity<SliderState> {
+        self.gradient_slider.clone()
+    }
+
+    /// Keeps the session's gradient opacity in sync with the slider
+    /// (`subscribe_sliders`' gradient slice, moved with the slider): a
+    /// Change or Release writes the value and bumps the repaint epoch.
+    fn subscribe_sliders(&mut self, cx: &mut Context<Self>) {
+        let gradient_slider = self.gradient_slider.clone();
+        let subscription = cx.subscribe(
+            &gradient_slider,
+            |this, _slider, event: &SliderEvent, cx| {
+                let value = match event {
+                    SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+                };
+                this.session.update(cx, |session, _| {
+                    session.gradient_settings.opacity = (value / 100.0) as f64
+                });
+                this.touch(cx);
+            },
+        );
+        self.subscriptions.push(subscription);
+    }
+
+    /// The view's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// an interaction that changed the session asks the shell through the
+    /// seam.
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// `GradientControls.swift`'s bar controls: the shape dropdown, the two
+    /// color-route checkboxes and the opacity slider.
+    pub(crate) fn gradient_controls(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
+        let app = self.app.clone();
+        let settings = self.session.read(cx).gradient_settings;
+        vec![
+            Dropdown::new(
+                "gradient-shape",
+                match settings.shape {
+                    GradientShape::Linear => "Linear",
+                    GradientShape::Radial => "Radial",
+                },
+            )
+            .with_width(px(84.0))
+            .with_entries(menu_entries(
+                [
+                    (GradientShape::Linear, "Linear"),
+                    (GradientShape::Radial, "Radial"),
+                ],
+                settings.shape,
+                |session, value| session.gradient_settings.shape = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
+            .into_any_element(),
+            LabeledCheckbox::new("gradient-fg-bg", "Foreground to Background")
+                .checked(settings.foreground_to_background)
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
+                    state.tab().session.update(cx, |session, _| {
+                        session.gradient_settings.foreground_to_background = checked
+                    });
+                    state.touch(cx);
+                }))
+                .into_any_element(),
+            LabeledCheckbox::new("gradient-reverse", "Reverse")
+                .checked(settings.reversed)
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
+                    state.tab().session.update(cx, |session, _| {
+                        session.gradient_settings.reversed = checked
+                    });
+                    state.touch(cx);
+                }))
+                .into_any_element(),
+            LabeledSlider::new(
+                "Opacity",
+                self.gradient_slider.clone(),
+                format!("{:.0}%", settings.opacity * 100.0),
+                px(80.0),
+            )
+            .into_any_element(),
+        ]
     }
 }
 

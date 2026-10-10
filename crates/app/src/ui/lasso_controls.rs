@@ -13,10 +13,10 @@ use gpui_kit::{
 };
 
 use compositor_core::selection::{LassoKind, WandMode};
-use compositor_core::session::SelectionAmountOperation;
+use compositor_core::session::{EditorSession, SelectionAmountOperation};
 
 use crate::sheets_ui::{SheetRow, parse_input_usize};
-use crate::state::AppState;
+use crate::state::{AppState, slider};
 use crate::ui::floating_panel::{PanelPlacement, panel_body_frame, panel_footer, panel_names};
 use crate::ui::navigation_tool_header::menu_entries;
 use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, text_label};
@@ -183,6 +183,192 @@ impl Render for AmountPanelView {
     }
 }
 
+/// The selection tools' option bar (`LassoControls.swift`'s view): a view
+/// entity since ticket 42 — it owns the wand tolerance slider entity and
+/// its write subscription (`subscribe_sliders`' wand slice) and renders the
+/// Marquee, Lasso and Wand arms. Only in the render tree while a selection
+/// tool is active (Swift's `if session.tool.isSelectionTool`), so it keeps
+/// no session observer; its session field is re-pointed on tab changes by
+/// [`AppState::sync_session_observer`].
+pub struct LassoControlsView {
+    /// The active tab's session — the arm readouts and the tolerance slider
+    /// write speak to it directly (`LassoControls`' `@Bindable session`).
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the repaint epoch and the
+    /// shared header row stay there. No AppState dependencies beyond what
+    /// the moved handlers already used.
+    app: WeakEntity<AppState>,
+    /// The wand tolerance slider (`LassoControls`' tolerance binding):
+    /// seeded from the persisted tool default at construction, exactly as
+    /// `AppState::new` seeded it when the field lived there.
+    wand_slider: Entity<SliderState>,
+    /// Keep-alive for the slider subscription: dropping a Subscription
+    /// unsubscribes, so the bundle is held, never read.
+    #[allow(dead_code)]
+    subscriptions: Vec<Subscription>,
+}
+
+impl LassoControlsView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let tolerance = session.read(cx).wand_settings.tolerance;
+        let wand_slider = cx.new(|_| slider(0.0, 255.0, 1.0, tolerance as f32));
+        let mut view = LassoControlsView {
+            session,
+            app,
+            wand_slider,
+            subscriptions: Vec::new(),
+        };
+        view.subscribe_sliders(cx);
+        view
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view and the layers panel). The slider
+    /// subscription reads this field at event time, so the re-point keeps
+    /// it writing to the active tab.
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
+        self.session = session;
+    }
+
+    /// Keeps the session's wand tolerance in sync with the slider
+    /// (`subscribe_sliders`' wand slice, moved with the slider): a Change
+    /// or Release writes the value and bumps the repaint epoch.
+    fn subscribe_sliders(&mut self, cx: &mut Context<Self>) {
+        let wand_slider = self.wand_slider.clone();
+        let subscription = cx.subscribe(&wand_slider, |this, _slider, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
+            };
+            this.session.update(cx, |session, _| {
+                session.wand_settings.tolerance = value as i32
+            });
+            this.touch(cx);
+        });
+        self.subscriptions.push(subscription);
+    }
+
+    /// The view's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// an interaction that changed the session asks the shell through the
+    /// seam.
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
+    /// `LassoControls.swift`'s Marquee controls: the Rectangle/Ellipse
+    /// shape picker.
+    pub(crate) fn marquee_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let app = self.app.clone();
+        let kind = self.session.read(cx).marquee_kind;
+        vec![
+            Dropdown::new(
+                "marquee-kind",
+                if kind == LassoKind::Ellipse {
+                    "Ellipse"
+                } else {
+                    "Rectangle"
+                },
+            )
+            .with_width(px(100.0))
+            .with_entries(menu_entries(
+                [
+                    (LassoKind::Rectangle, "Rectangle"),
+                    (LassoKind::Ellipse, "Ellipse"),
+                ],
+                kind,
+                |session, value| session.marquee_kind = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
+            .into_any_element(),
+        ]
+    }
+
+    /// `LassoControls.swift`'s Lasso controls: the Freehand/Polygonal
+    /// kind picker.
+    pub(crate) fn lasso_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let app = self.app.clone();
+        let kind = self.session.read(cx).lasso_kind;
+        vec![
+            Dropdown::new(
+                "lasso-kind",
+                if kind == LassoKind::Polygonal {
+                    "Polygonal"
+                } else {
+                    "Freehand"
+                },
+            )
+            .with_width(px(100.0))
+            .with_entries(menu_entries(
+                [
+                    (LassoKind::Freehand, "Freehand"),
+                    (LassoKind::Polygonal, "Polygonal"),
+                ],
+                kind,
+                |session, value| session.lasso_kind = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
+            .into_any_element(),
+        ]
+    }
+
+    /// `LassoControls.swift`'s Wand controls: the Wand/Object mode picker,
+    /// the tolerance slider and the sample checkboxes.
+    pub(crate) fn wand_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let app = self.app.clone();
+        let (mode, settings) = {
+            let session = self.session.read(cx);
+            (session.wand_mode, session.wand_settings)
+        };
+        vec![
+            Dropdown::new(
+                "wand-mode",
+                match mode {
+                    WandMode::Wand => "Wand",
+                    WandMode::Object => "Object",
+                },
+            )
+            .with_width(px(84.0))
+            .with_entries(menu_entries(
+                [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
+                mode,
+                |session, value| session.wand_mode = value,
+            ))
+            .with_dispatch(app_dispatch(&app))
+            .into_any_element(),
+            LabeledSlider::new(
+                "Tolerance",
+                self.wand_slider.clone(),
+                format!("{}", settings.tolerance),
+                px(90.0),
+            )
+            .into_any_element(),
+            LabeledCheckbox::new("wand-contiguous", "Contiguous")
+                .checked(settings.contiguous)
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
+                    state
+                        .tab()
+                        .session
+                        .update(cx, |session, _| session.wand_settings.contiguous = checked);
+                    state.touch(cx);
+                }))
+                .into_any_element(),
+            LabeledCheckbox::new("wand-all-layers", "Sample All Layers")
+                .checked(settings.sample_all_layers)
+                .with_on_change(app_on(&app, |state, checked, _, cx| {
+                    state.tab().session.update(cx, |session, _| {
+                        session.wand_settings.sample_all_layers = checked
+                    });
+                    state.touch(cx);
+                }))
+                .into_any_element(),
+        ]
+    }
+}
+
 impl AppState {
     /// `session.selectionAmountOperation` → selectionAmountPanel, title
     /// "{Operation} Selection" (`ContentView.swift:227-234`). The operation
@@ -265,115 +451,6 @@ impl AppState {
         self.panels.close(panel_names::SELECTION_AMOUNT_PANEL);
         self.sync_panel_guard();
         self.touch(cx);
-    }
-
-    /// `LassoControls.swift`'s Marquee controls: the Rectangle/Ellipse
-    /// shape picker.
-    pub(crate) fn marquee_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
-        let app = cx.entity().downgrade();
-        let kind = self.tab().session.read(cx).marquee_kind;
-        vec![
-            Dropdown::new(
-                "marquee-kind",
-                if kind == LassoKind::Ellipse {
-                    "Ellipse"
-                } else {
-                    "Rectangle"
-                },
-            )
-            .with_width(px(100.0))
-            .with_entries(menu_entries(
-                [
-                    (LassoKind::Rectangle, "Rectangle"),
-                    (LassoKind::Ellipse, "Ellipse"),
-                ],
-                kind,
-                |session, value| session.marquee_kind = value,
-            ))
-            .with_dispatch(app_dispatch(&app))
-            .into_any_element(),
-        ]
-    }
-
-    /// `LassoControls.swift`'s Lasso controls: the Freehand/Polygonal
-    /// kind picker.
-    pub(crate) fn lasso_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
-        let app = cx.entity().downgrade();
-        let kind = self.tab().session.read(cx).lasso_kind;
-        vec![
-            Dropdown::new(
-                "lasso-kind",
-                if kind == LassoKind::Polygonal {
-                    "Polygonal"
-                } else {
-                    "Freehand"
-                },
-            )
-            .with_width(px(100.0))
-            .with_entries(menu_entries(
-                [
-                    (LassoKind::Freehand, "Freehand"),
-                    (LassoKind::Polygonal, "Polygonal"),
-                ],
-                kind,
-                |session, value| session.lasso_kind = value,
-            ))
-            .with_dispatch(app_dispatch(&app))
-            .into_any_element(),
-        ]
-    }
-
-    /// `LassoControls.swift`'s Wand controls: the Wand/Object mode picker,
-    /// the tolerance slider and the sample checkboxes.
-    pub(crate) fn wand_controls(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
-        let app = cx.entity().downgrade();
-        let (mode, settings) = {
-            let session = self.tab().session.read(cx);
-            (session.wand_mode, session.wand_settings)
-        };
-        vec![
-            Dropdown::new(
-                "wand-mode",
-                match mode {
-                    WandMode::Wand => "Wand",
-                    WandMode::Object => "Object",
-                },
-            )
-            .with_width(px(84.0))
-            .with_entries(menu_entries(
-                [(WandMode::Wand, "Wand"), (WandMode::Object, "Object")],
-                mode,
-                |session, value| session.wand_mode = value,
-            ))
-            .with_dispatch(app_dispatch(&app))
-            .into_any_element(),
-            LabeledSlider::new(
-                "Tolerance",
-                self.wand_slider.clone(),
-                format!("{}", settings.tolerance),
-                px(90.0),
-            )
-            .into_any_element(),
-            LabeledCheckbox::new("wand-contiguous", "Contiguous")
-                .checked(settings.contiguous)
-                .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state
-                        .tab()
-                        .session
-                        .update(cx, |session, _| session.wand_settings.contiguous = checked);
-                    state.touch(cx);
-                }))
-                .into_any_element(),
-            LabeledCheckbox::new("wand-all-layers", "Sample All Layers")
-                .checked(settings.sample_all_layers)
-                .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state.tab().session.update(cx, |session, _| {
-                        session.wand_settings.sample_all_layers = checked
-                    });
-                    state.touch(cx);
-                }))
-                .into_any_element(),
-        ]
     }
 }
 

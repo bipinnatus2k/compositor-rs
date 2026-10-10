@@ -1,17 +1,17 @@
 //! Application state: the window shell around the per-tab `EditorSession` —
 //! the frame cache, the modal sheet, the panel host and the preview pipelines —
 //! plus the canvas view entity (see `canvas::editor_canvas`), the layers
-//! panel view entity (see `ui::native_layer_list`) and the floating panels'
-//! content entities (see `ui::floating_panel`, ticket 41).
+//! panel view entity (see `ui::native_layer_list`), the floating panels'
+//! content entities (see `ui::floating_panel`, ticket 41) and the tool
+//! headers / welcome / status bar entities (ticket 42).
 
 use std::sync::Arc;
 
 use gpui_kit::component::WindowExt;
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::slider::SliderEvent;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Point, RenderImage,
+    App, AppContext, Bounds, Context, Entity, FocusHandle, Pixels, Point, RenderImage,
     Subscription, Window, px,
 };
 
@@ -28,7 +28,16 @@ use compositor_core::tools::brush::RasterEdit;
 use compositor_core::transform::LayerTransform;
 
 use crate::canvas::editor_canvas::{CanvasDrag, CanvasGesture, EditorCanvasView};
+use crate::content_view::StatusBarView;
+use crate::ui::brush_controls::BrushControlsView;
+use crate::ui::crop_controls::CropControlsView;
+use crate::ui::lasso_controls::LassoControlsView;
 use crate::ui::native_layer_list::LayersPanelView;
+use crate::ui::navigation_tool_header::{GradientControlsView, NavigationToolHeaderView};
+use crate::ui::shape_controls::ShapeControlsView;
+use crate::ui::transform_inspector::TransformInspectorView;
+use crate::ui::type_controls::TypeControlsView;
+use crate::welcome::WelcomeView;
 
 pub const RULER_SIZE: f32 = 20.0;
 
@@ -267,7 +276,6 @@ pub struct AppState {
     /// (ticket 41) — each entity exists exactly while its panel is open.
     pub panels: crate::ui::floating_panel::FloatingPanels,
     pub panel_views: crate::ui::floating_panel::PanelContents,
-    pub status: Option<String>,
     /// The active layer's pixels when an adjustment sheet opened, and the
     /// live preview result shown on canvas.
     pub preview_base: Option<Arc<Bitmap>>,
@@ -278,28 +286,31 @@ pub struct AppState {
     pub camera_raw_readout: Option<[u8; 3]>,
     pub preview: Option<Arc<Bitmap>>,
     pub preview_base_transform: Option<LayerTransform>,
-    /// Tool option sliders (brush size/hardness/opacity/smoothing,
-    /// wand tolerance, gradient opacity).
-    pub brush_sliders: [Entity<SliderState>; 4],
-    pub wand_slider: Entity<SliderState>,
-    pub gradient_slider: Entity<SliderState>,
     pub subscriptions: Vec<Subscription>,
-    /// The Type header's numeric fields (size, tracking, leading).
-    pub type_size_input: Entity<InputState>,
-    pub type_tracking_input: Entity<InputState>,
-    pub type_leading_input: Entity<InputState>,
-    /// The Transform inspector's numeric fields (X, Y, W, H, Scale %, °).
-    pub transform_x_input: Entity<InputState>,
-    pub transform_y_input: Entity<InputState>,
-    pub transform_w_input: Entity<InputState>,
-    pub transform_h_input: Entity<InputState>,
-    pub transform_scale_input: Entity<InputState>,
-    pub transform_rotation_input: Entity<InputState>,
-    /// The empty tab's welcome form's numeric fields (`render_welcome`,
-    /// NewCanvasSheet's `@State width`/`height`, shown while the tab has no
-    /// document). Built here because an `InputState` needs the window.
-    pub welcome_width_input: Entity<InputState>,
-    pub welcome_height_input: Entity<InputState>,
+    /// The tool option headers (Swift's per-tool header views, ADR 0003
+    /// step E / ticket 42): each owns its option-bar widget entities and
+    /// their write subscriptions, and its controls enter the shared header
+    /// row only while its tool is active (Swift's `if session.tool == …`
+    /// branches — no observer management, as with the panels). Their session
+    /// fields are re-pointed on tab changes by
+    /// [`Self::sync_session_observer`].
+    pub brush_header: Entity<BrushControlsView>,
+    pub lasso_header: Entity<LassoControlsView>,
+    pub gradient_header: Entity<GradientControlsView>,
+    pub crop_header: Entity<CropControlsView>,
+    pub shape_header: Entity<ShapeControlsView>,
+    pub type_header: Entity<TypeControlsView>,
+    pub transform_header: Entity<TransformInspectorView>,
+    /// The Zoom/Hand header (Swift `NavigationToolHeader`; the Swift view's
+    /// zoom-text drafts have no Rust counterpart — recorded in the ticket).
+    pub navigation_header: Entity<NavigationToolHeaderView>,
+    /// The empty tab's welcome form (Swift `ContentView.welcome`, the
+    /// tab-embedded `NewCanvasSheet`): owns the Width/Height fields and
+    /// renders the whole form; the canvas view's welcome branch clones it.
+    pub welcome: Entity<WelcomeView>,
+    /// The status bar (Swift `ContentView.statusBar`): owns the status line
+    /// and observes the session for its readouts.
+    pub status_bar: Entity<StatusBarView>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
     key_epoch: std::time::Instant,
     /// A save panel raised mid-flow (a confirmation's Save button): the tab
@@ -338,6 +349,18 @@ pub(crate) fn slider(min: f32, max: f32, step: f32, value: f32) -> SliderState {
         .max(max)
         .step(step)
         .default_value(value)
+}
+
+/// Creates a numeric field seeded with `format_number(value)` (`InputState`s
+/// need the window, so the tool-header and welcome views build theirs in
+/// their constructors — the same seeds `AppState::new` used when the fields
+/// lived there, ticket 42).
+pub(crate) fn number_input<V: 'static>(
+    value: f64,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> Entity<InputState> {
+    cx.new(|cx| InputState::new(window, cx).default_value(format_number(value)))
 }
 
 /// A fresh pseudo-random seed for noise patterns (`UInt32.random`, via the
@@ -411,51 +434,38 @@ impl AppState {
             .session
             .update(cx, |session, _| session.create_document(1280, 800, true));
         // Session-side ToolDefaults (Auto Select included) are applied per
-        // tab in ProjectTab::new, so the panel sliders seed from
-        // already-persisted settings.
-        let (brush, wand_tolerance, gradient_opacity, style) = {
-            let session = workspace.current().session.read(cx);
-            (
-                session.brush_settings,
-                session.wand_settings.tolerance,
-                session.gradient_settings.opacity,
-                session.current_text_style(),
-            )
-        };
-        let number_input = |value: f64, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).default_value(format_number(value)))
-        };
-        let type_size_input = number_input(style.font_size, window, cx);
-        let type_tracking_input = number_input(style.tracking, window, cx);
-        let type_leading_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(leading_to_text(style.leading)));
-        let transform_x_input = number_input(0.0, window, cx);
-        let transform_y_input = number_input(0.0, window, cx);
-        let transform_w_input = number_input(0.0, window, cx);
-        let transform_h_input = number_input(0.0, window, cx);
-        let transform_scale_input = number_input(100.0, window, cx);
-        let transform_rotation_input = number_input(0.0, window, cx);
-        // The welcome form's defaults: NewCanvasSheet's `@State width`/
-        // `height` ("1920" / "1080").
-        let welcome_width_input = number_input(1920.0, window, cx);
-        let welcome_height_input = number_input(1080.0, window, cx);
+        // tab in ProjectTab::new, so the header widgets seed from
+        // already-persisted settings — every view below is built after the
+        // defaults were applied and reads its seed itself.
 
-        let brush_sliders = [
-            cx.new(|_| slider(1.0, 300.0, 1.0, brush.diameter as f32)),
-            cx.new(|_| slider(0.0, 100.0, 1.0, (brush.hardness * 100.0) as f32)),
-            cx.new(|_| slider(1.0, 100.0, 1.0, (brush.opacity * 100.0) as f32)),
-            cx.new(|_| slider(0.0, 100.0, 1.0, brush.smoothing as f32)),
-        ];
-        let wand_slider = cx.new(|_| slider(0.0, 255.0, 1.0, wand_tolerance as f32));
-        let gradient_slider =
-            cx.new(|_| slider(1.0, 100.0, 1.0, (gradient_opacity * 100.0) as f32));
+        // The transitional seam (tickets 39-42): the views hold it to reach
+        // the shell's commit/preview/status pipelines and the repaint epoch.
+        let app = cx.weak_entity();
+        let active_session = workspace.current().session.clone();
+        // The tool headers (Swift's per-tool header views, ticket 42): each
+        // builds its own widgets — an `InputState` needs the window.
+        let brush_header =
+            cx.new(|cx| BrushControlsView::new(active_session.clone(), app.clone(), cx));
+        let lasso_header =
+            cx.new(|cx| LassoControlsView::new(active_session.clone(), app.clone(), cx));
+        let gradient_header =
+            cx.new(|cx| GradientControlsView::new(active_session.clone(), app.clone(), cx));
+        let crop_header = cx.new(|_| CropControlsView::new(active_session.clone(), app.clone()));
+        let shape_header = cx.new(|_| ShapeControlsView::new(active_session.clone(), app.clone()));
+        let type_header =
+            cx.new(|cx| TypeControlsView::new(active_session.clone(), app.clone(), window, cx));
+        let transform_header = cx
+            .new(|cx| TransformInspectorView::new(active_session.clone(), app.clone(), window, cx));
+        let navigation_header =
+            cx.new(|_| NavigationToolHeaderView::new(active_session.clone(), app.clone()));
+        let welcome =
+            cx.new(|cx| WelcomeView::new(active_session.clone(), app.clone(), window, cx));
+        let status_bar = cx.new(|cx| StatusBarView::new(active_session.clone(), app.clone(), cx));
 
         // The canvas view (Swift `CanvasView`): it builds its own inline
         // text input (an `InputState` needs the window), and it holds the
         // shell's handle so its handlers can reach the pipelines that stay
         // here (ticket 39's transitional seam).
-        let app = cx.weak_entity();
-        let active_session = workspace.current().session.clone();
         let canvas_view =
             cx.new(|cx| EditorCanvasView::new(active_session.clone(), app.clone(), window, cx));
         // The layers panel (Swift `LayersPanel`): it builds its own rename
@@ -475,34 +485,27 @@ impl AppState {
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
             panel_views: crate::ui::floating_panel::PanelContents::new(),
-            status: None,
             preview_base: None,
             camera_raw_samples_defringe: false,
             camera_raw_readout: None,
             preview: None,
             preview_base_transform: None,
-            brush_sliders,
-            wand_slider,
-            gradient_slider,
             subscriptions: Vec::new(),
-            type_size_input,
-            type_tracking_input,
-            type_leading_input,
-            transform_x_input,
-            transform_y_input,
-            transform_w_input,
-            transform_h_input,
-            transform_scale_input,
-            transform_rotation_input,
-            welcome_width_input,
-            welcome_height_input,
+            brush_header,
+            lasso_header,
+            gradient_header,
+            crop_header,
+            shape_header,
+            type_header,
+            transform_header,
+            navigation_header,
+            welcome,
+            status_bar,
             key_epoch: std::time::Instant::now(),
             pending_save: None,
             delete_ask_ids: None,
             session_observer: None,
         };
-        state.subscribe_sliders(cx);
-        state.subscribe_inputs(cx);
         state.sync_session_observer(cx);
         // `on_window_should_close` → `workspace.close_window` (two-phase):
         // a pending unsaved-changes dialog vetoes the close and presents
@@ -557,11 +560,11 @@ impl AppState {
             | NavigationTool::SpotHealing
             | NavigationTool::CloneStamp
             | NavigationTool::Blur => Some((
-                self.brush_sliders[2].clone(),
+                self.brush_header.read(cx).sliders()[2].clone(),
                 (brush_opacity * 100.0) as f32,
             )),
             NavigationTool::Gradient => Some((
-                self.gradient_slider.clone(),
+                self.gradient_header.read(cx).opacity_slider(),
                 (gradient_opacity * 100.0) as f32,
             )),
             // The Move tool's digits drive the active layer's opacity — the
@@ -623,69 +626,15 @@ impl AppState {
         }
     }
 
-    /// Keeps the session's tool settings in sync with the sliders. The
-    /// layers panel header's opacity slider is not among them: it moved to
-    /// `LayersPanelView` with its subscription (ticket 40); what stays here
-    /// are the tool-option sliders of the tool headers (ticket 42).
-    fn subscribe_sliders(&mut self, cx: &mut Context<Self>) {
-        let brush_indices = [0usize, 1, 2, 3];
-        for index in brush_indices {
-            let slider = self.brush_sliders[index].clone();
-            let subscription =
-                cx.subscribe(&slider, move |state, _slider, event: &SliderEvent, cx| {
-                    let value = match event {
-                        SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-                    };
-                    state.tab().session.update(cx, |session, _| {
-                        let brush = &mut session.brush_settings;
-                        match index {
-                            0 => brush.diameter = value as f64,
-                            1 => brush.hardness = (value / 100.0) as f64,
-                            2 => brush.opacity = (value / 100.0) as f64,
-                            _ => brush.smoothing = value as f64,
-                        }
-                    });
-                    state.revision += 1;
-                    cx.notify();
-                });
-            self.subscriptions.push(subscription);
-        }
-        let wand_slider = self.wand_slider.clone();
-        let subscription = cx.subscribe(&wand_slider, |state, _slider, event: &SliderEvent, cx| {
-            let value = match event {
-                SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-            };
-            state.tab().session.update(cx, |session, _| {
-                session.wand_settings.tolerance = value as i32
-            });
-            state.revision += 1;
-            cx.notify();
-        });
-        self.subscriptions.push(subscription);
-        let gradient_slider = self.gradient_slider.clone();
-        let subscription = cx.subscribe(
-            &gradient_slider,
-            |state, _slider, event: &SliderEvent, cx| {
-                let value = match event {
-                    SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
-                };
-                state.tab().session.update(cx, |session, _| {
-                    session.gradient_settings.opacity = (value / 100.0) as f64
-                });
-                state.revision += 1;
-                cx.notify();
-            },
-        );
-        self.subscriptions.push(subscription);
-    }
-
-    /// `[` / `]` shrink and grow the brush, keeping the slider in sync.
+    /// `[` / `]` shrink and grow the brush, keeping the slider in sync. The
+    /// slider entity lives on the brush header (ticket 42) — the one
+    /// outside write to it.
     pub fn resize_brush(&mut self, factor: f64, window: &mut Window, cx: &mut Context<Self>) {
         let next = (self.tab().session.read(cx).brush_settings.diameter * factor).clamp(1.0, 300.0);
         self.tab()
             .session
             .update(cx, |session, _| session.brush_settings.diameter = next);
-        let slider = self.brush_sliders[0].clone();
+        let slider = self.brush_header.read(cx).sliders()[0].clone();
         slider.update(cx, |state, cx| {
             state.set_value(
                 gpui_kit::component::slider::SliderValue::Single(next as f32),
@@ -707,7 +656,7 @@ impl AppState {
             .session
             .update(cx, |session, _| session.change_brush_hardness(increase));
         let next = self.tab().session.read(cx).brush_settings.hardness;
-        let slider = self.brush_sliders[1].clone();
+        let slider = self.brush_header.read(cx).sliders()[1].clone();
         slider.update(cx, |state, cx| {
             state.set_value(
                 gpui_kit::component::slider::SliderValue::Single((next * 100.0) as f32),
@@ -774,58 +723,6 @@ impl AppState {
 
     // MARK: Type header (TypeControls.swift)
 
-    /// A typed change in one of the Type header's fields writes straight
-    /// into the style — the draft while text is being edited, the defaults
-    /// otherwise (`session.changeTextStyle`).
-    pub fn text_style_field_changed(
-        &mut self,
-        field: TextStyleField,
-        text: &str,
-        cx: &mut Context<Self>,
-    ) {
-        match field {
-            TextStyleField::Size => {
-                if let Some(value) = parse_field(text) {
-                    let value = clamp_font_size(value);
-                    self.tab().session.update(cx, |session, _| {
-                        session.change_text_style(move |style| style.font_size = value)
-                    });
-                }
-            }
-            TextStyleField::Tracking => {
-                if let Some(value) = parse_field(text) {
-                    self.tab().session.update(cx, |session, _| {
-                        session.change_text_style(move |style| style.tracking = value)
-                    });
-                }
-            }
-            TextStyleField::Leading => {
-                let value = leading_from_text(text);
-                self.tab().session.update(cx, |session, _| {
-                    session.change_text_style(move |style| style.leading = value)
-                });
-            }
-        }
-        self.touch(cx);
-    }
-
-    /// Pushes the current style back into the Type header's fields (Swift's
-    /// `sync`, run when a value may have moved under an unfocused field).
-    pub fn sync_text_style_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let style = self.tab().session.read(cx).current_text_style();
-        let fields = [
-            (&self.type_size_input, format_number(style.font_size)),
-            (&self.type_tracking_input, format_number(style.tracking)),
-            (&self.type_leading_input, leading_to_text(style.leading)),
-        ];
-        for (input, text) in fields {
-            let focused = input.read(cx).focus_handle(cx).is_focused(window);
-            if !focused && input.read(cx).value() != text {
-                input.update(cx, |state, cx| state.set_value(text, window, cx));
-            }
-        }
-    }
-
     /// The Type header's color chip: opens the app color picker on the text
     /// color (`session.openTextColorPicker`). The picker's panel entity is
     /// built here rather than in `color_picker_sheet` because that module
@@ -878,168 +775,14 @@ impl AppState {
 
     // MARK: Transform inspector (TransformInspector.swift)
 
-    /// The transform the inspector's fields show: the draft while an edit is
-    /// open, else the active layer's (or its unlinked mask's) transform
-    /// (`session.editedTransform`).
-    pub fn transform_displayed(&self, cx: &App) -> Option<LayerTransform> {
-        let session = self.current_tab().session.read(cx);
-        if let Some(edit) = session.transform_edit.as_ref() {
-            return Some(edit.draft);
-        }
-        let layer = session.active_layer()?;
-        let mask_alone = session.is_mask_selected
-            && layer
-                .mask
-                .as_ref()
-                .map(|mask| !mask.is_linked)
-                .unwrap_or(false);
-        Some(if mask_alone {
-            layer.mask_transform()
-        } else {
-            layer.transform
-        })
-    }
-
-    /// 100% scale: the layer's pixels, else the displayed size
-    /// (`transformPixelSize ?? activeLayer?.size ?? value.size`).
-    pub fn transform_pixel_size(&self, cx: &App) -> CGSize {
-        if let Some(layer) = self.current_tab().session.read(cx).active_layer()
-            && let Some(asset) = layer.asset.as_ref()
-        {
-            return CGSize::new(asset.image.width as f64, asset.image.height as f64);
-        }
-        self.transform_displayed(cx)
-            .map(|value| value.size)
-            .unwrap_or(CGSize::new(1.0, 1.0))
-    }
-
-    /// `TransformInspector.change`: open an edit if none runs, fold the
-    /// update into its draft, and show it live.
-    pub fn transform_change(
-        &mut self,
-        update: impl FnOnce(&mut LayerTransform),
-        cx: &mut Context<Self>,
-    ) {
-        self.tab().session.update(cx, |session, _| {
-            if session.transform_edit.is_none() {
-                session.begin_transform();
-            }
-            let Some(edit) = session.transform_edit.as_ref() else {
-                return;
-            };
-            let mut value = edit.draft;
-            update(&mut value);
-            session.preview_transform(value);
-        });
-        self.touch(cx);
-    }
-
-    /// A typed change in one of the inspector's fields
-    /// (`TransformInspector`'s `field`/`resize`/scale closures).
-    pub fn transform_field_changed(
-        &mut self,
-        field: TransformField,
-        text: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(number) = parse_field(text) else {
-            return;
-        };
-        match field {
-            TransformField::X => self.transform_change(|value| value.origin.x = number, cx),
-            TransformField::Y => self.transform_change(|value| value.origin.y = number, cx),
-            TransformField::Width | TransformField::Height => {
-                let lock = self.tab().session.read(cx).locks_transform_ratio;
-                let width = field == TransformField::Width;
-                self.transform_change(
-                    move |value| *value = resize_transform(*value, number, width, lock),
-                    cx,
-                );
-            }
-            TransformField::Scale => {
-                if number <= 0.0 {
-                    return;
-                }
-                let pixel_size = self.transform_pixel_size(cx);
-                self.transform_change(move |value| *value = value.scaled(number, pixel_size), cx);
-            }
-            TransformField::Rotation => {
-                self.transform_change(|value| value.rotation = normalize_rotation(number), cx)
-            }
-        }
-    }
-
     /// Pushes the displayed transform back into the inspector's fields
-    /// (`TransformValueField.sync`).
+    /// (`TransformValueField.sync`): the fields and the sync live on the
+    /// inspector entity since ticket 42; the canvas's Move drags ask the
+    /// shell after a drag ends (ticket 39's seam), so the shell forwards.
     pub fn sync_transform_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(value) = self.transform_displayed(cx) else {
-            return;
-        };
-        let pixel_size = self.transform_pixel_size(cx);
-        for (field, text) in transform_field_texts(value, pixel_size) {
-            let input = match field {
-                TransformField::X => &self.transform_x_input,
-                TransformField::Y => &self.transform_y_input,
-                TransformField::Width => &self.transform_w_input,
-                TransformField::Height => &self.transform_h_input,
-                TransformField::Scale => &self.transform_scale_input,
-                TransformField::Rotation => &self.transform_rotation_input,
-            };
-            let focused = input.read(cx).focus_handle(cx).is_focused(window);
-            if !focused && input.read(cx).value() != text {
-                input.update(cx, |state, cx| state.set_value(text, window, cx));
-            }
-        }
-    }
-
-    /// Wiring for the header's numeric fields: typing writes straight into
-    /// the session (Swift's live `onChange(of: text)`).
-    fn subscribe_inputs(&mut self, cx: &mut Context<Self>) {
-        let text_fields = [
-            (self.type_size_input.clone(), TextStyleField::Size),
-            (self.type_tracking_input.clone(), TextStyleField::Tracking),
-            (self.type_leading_input.clone(), TextStyleField::Leading),
-        ];
-        for (input, field) in text_fields {
-            let watched = input.clone();
-            let subscription = cx.subscribe(
-                &input,
-                move |state: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
-                    if let InputEvent::Change = event {
-                        let text = watched.read(cx).value().to_string();
-                        state.text_style_field_changed(field, &text, cx);
-                    }
-                },
-            );
-            self.subscriptions.push(subscription);
-        }
-        // The inline canvas text editor's two-way binding moved with the
-        // canvas view (ticket 39): its input entity and its input → session
-        // subscription live on `EditorCanvasView` now.
-        let transform_fields = [
-            (self.transform_x_input.clone(), TransformField::X),
-            (self.transform_y_input.clone(), TransformField::Y),
-            (self.transform_w_input.clone(), TransformField::Width),
-            (self.transform_h_input.clone(), TransformField::Height),
-            (self.transform_scale_input.clone(), TransformField::Scale),
-            (
-                self.transform_rotation_input.clone(),
-                TransformField::Rotation,
-            ),
-        ];
-        for (input, field) in transform_fields {
-            let watched = input.clone();
-            let subscription = cx.subscribe(
-                &input,
-                move |state: &mut Self, _input, event: &InputEvent, cx: &mut Context<Self>| {
-                    if let InputEvent::Change = event {
-                        let text = watched.read(cx).value().to_string();
-                        state.transform_field_changed(field, &text, cx);
-                    }
-                },
-            );
-            self.subscriptions.push(subscription);
-        }
+        self.transform_header.update(cx, |inspector, cx| {
+            inspector.sync_transform_inputs(window, cx)
+        });
     }
 
     /// Every mutation funnels through here so the frame image rebuilds.
@@ -1065,6 +808,29 @@ impl AppState {
         // its set_session follows the observation (ticket 40).
         self.layers_panel
             .update(cx, |panel, cx| panel.set_session(session.clone(), cx));
+        // The tool headers, the welcome form and the status bar render (the
+        // bar also observes) the active tab's session; re-point them like
+        // the canvas and the panel (ticket 42).
+        self.brush_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.lasso_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.gradient_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.crop_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.shape_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.type_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.transform_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.navigation_header
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.welcome
+            .update(cx, |view, _| view.set_session(session.clone()));
+        self.status_bar
+            .update(cx, |bar, cx| bar.set_session(session.clone(), cx));
         if self
             .session_observer
             .as_ref()
@@ -1347,8 +1113,13 @@ impl AppState {
 
     // MARK: Status
 
+    /// The status line's write path: the text lives on the status bar view
+    /// entity since ticket 42 (Swift `ContentView.statusBar`'s local
+    /// message); the shell forwards and keeps the repaint epoch (`touch`)
+    /// exactly as when the field lived here.
     pub fn set_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.status = Some(message.into());
+        let message = message.into();
+        self.status_bar.update(cx, |bar, _| bar.set_status(message));
         self.touch(cx);
     }
 

@@ -580,7 +580,11 @@ impl AppState {
             let failures = self.workspace.drain_incoming(cx);
             self.sync_session_observer(cx);
             if !failures.is_empty() {
-                self.status = Some(failures.join("; "));
+                // A quiet store, like the direct field write it replaces:
+                // no repaint epoch bump; the pump's drain-pass notify shows
+                // it (the text itself lives on the bar entity, ticket 42).
+                self.status_bar
+                    .update(cx, |bar, _| bar.set_status(failures.join("; ")));
             }
         }
     }

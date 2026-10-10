@@ -292,13 +292,13 @@ impl Render for EditorCanvasView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // An empty tab shows the welcome form in place of a canvas (Swift's
         // `if session.document == nil { welcome }`, ContentView.swift:99-110 —
-        // the tab-embedded NewCanvasSheet). The form is the shell's (its
-        // inputs and flows live there); the canvas renders it exactly where
-        // `render_canvas` used to branch.
+        // the tab-embedded NewCanvasSheet). The form is its own view entity
+        // (ticket 42); the canvas clones it exactly where `render_canvas`
+        // used to branch.
         if self.session.read(cx).document.is_none() {
             return self
                 .app
-                .update(cx, |app, cx| app.render_welcome(cx))
+                .update(cx, |app, _| app.render_welcome().into_any_element())
                 .unwrap_or_else(|_| div().into_any_element());
         }
         let gesture = CanvasGesture {

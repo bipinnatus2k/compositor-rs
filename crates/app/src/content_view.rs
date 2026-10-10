@@ -4,13 +4,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::{
-    App, Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px,
-    rgb,
+    App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Subscription, WeakEntity, Window, div, px, rgb,
 };
 
 use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::document::NavigationTool;
 use compositor_core::filters::FilterKind;
+use compositor_core::session::EditorSession;
 use compositor_core::session::SelectionAmountOperation;
 
 use crate::keys;
@@ -215,7 +216,9 @@ impl Render for AppState {
                     // footer render there.
                     .child(self.layers_panel.clone()),
             )
-            .child(self.render_status_bar(cx))
+            // The status bar is its own view entity too (ticket 42): it owns
+            // the status line and observes the session for its readouts.
+            .child(self.status_bar.clone())
             .children(self.render_sheet_overlay(cx))
             // The floating panels render above the workspace; the color
             // picker is one of them now (ColorPickerSheet.swift:167).
@@ -1632,11 +1635,91 @@ impl AppState {
             t.touch(cx);
         });
     }
+}
 
-    fn render_status_bar(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let (width, height) = self.doc_size(cx);
+/// The status bar (Swift `ContentView.statusBar`, ContentView.swift:311): a
+/// view entity since ticket 42 — it owns the status line (app-local state;
+/// the shell's `set_status` forwards into it) and observes the session for
+/// its readouts (tool name, undo/redo names, dimensions, zoom), so a
+/// session notification re-renders the bar alone. Its session field is
+/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+pub struct StatusBarView {
+    /// The active tab's session — the bar's readouts read it directly.
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root). The bar currently has no
+    /// outbound flow (its one write, `set_status`, is forwarded from the
+    /// shell), so the seam has no reader yet — kept for the pattern and for
+    /// ticket 43's reshaping.
+    #[allow(dead_code)]
+    app: WeakEntity<AppState>,
+    /// The status line's text (`self.status` when it lived on the shell):
+    /// the last message any flow set, shown until the next one.
+    status: Option<String>,
+    /// The observe subscription on the active tab's session entity: a
+    /// session-entity notify re-renders this bar alone. Re-attached whenever
+    /// the active tab changes ([`Self::set_session`]); kept in a dedicated
+    /// field so a tab switch drops the outgoing session's observation.
+    session_observer: Option<(Entity<EditorSession>, Subscription)>,
+}
+
+impl StatusBarView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut bar = StatusBarView {
+            session,
+            app,
+            status: None,
+            session_observer: None,
+        };
+        bar.attach_session_observer(cx);
+        bar
+    }
+
+    /// Observes the session entity so its notifications re-render this bar
+    /// alone (the readouts are all session reads). Drops the outgoing
+    /// observation.
+    fn attach_session_observer(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let subscription = cx.observe(&session, |_, _, cx| cx.notify());
+        self.session_observer = Some((session, subscription));
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view and the layers panel); the observation
+    /// follows.
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>, cx: &mut Context<Self>) {
+        if self
+            .session_observer
+            .as_ref()
+            .is_some_and(|(observed, _)| observed.entity_id() == session.entity_id())
+        {
+            return;
+        }
+        self.session = session;
+        self.attach_session_observer(cx);
+    }
+
+    /// Stores the status line's text. The shell's `set_status` forwards here
+    /// and keeps the repaint epoch, exactly as when the field lived there.
+    pub(crate) fn set_status(&mut self, message: impl Into<String>) {
+        self.status = Some(message.into());
+    }
+}
+
+impl Render for StatusBarView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (width, height) = self
+            .session
+            .read(cx)
+            .document
+            .as_ref()
+            .map(|d| (d.width as f64, d.height as f64))
+            .unwrap_or((0.0, 0.0));
         let (tool, undo, redo, can_undo, can_redo, brush_error) = {
-            let session = self.tab().session.read(cx);
+            let session = self.session.read(cx);
             (
                 session.tool.label().to_string(),
                 session.history.undo_name().to_string(),
@@ -1646,10 +1729,7 @@ impl AppState {
                 session.brush_error.clone(),
             )
         };
-        let zoom = format!(
-            "{:.0}%",
-            self.current_tab().session.read(cx).viewport.zoom() * 100.0
-        );
+        let zoom = format!("{:.0}%", self.session.read(cx).viewport.zoom() * 100.0);
         let undo_text = if can_undo {
             format!("Undo: {}", undo)
         } else {

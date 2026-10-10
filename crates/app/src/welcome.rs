@@ -2,20 +2,22 @@
 //! (`if session.document == nil { welcome }`, ContentView.swift:99-110, which
 //! presents `NewCanvasSheet` in place of the canvas): a centered Width/Height
 //! form whose Create canvas button builds the tab's document, with the
-//! File > Open and File > Import Images flows beside it.
+//! File > Open and File > Import Images flows beside it. The form is a view
+//! entity since ticket 42 (ADR 0003 step E); the canvas view's welcome
+//! branch clones it exactly where `render_canvas` used to branch.
 
 use compositor_core::session::EditorSession;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
-    Context, DragMoveEvent, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Styled, div, px, rgb,
+    Context, DragMoveEvent, Entity, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, Styled, WeakEntity, Window, div, px, rgb,
 };
 
 use crate::project::Step;
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::{AppState, number_input};
 use crate::ui::text_label;
 
 /// The dimension cap the core enforces (`create_document` silently refuses
@@ -60,7 +62,60 @@ pub(crate) fn welcome_disabled(session: &EditorSession) -> bool {
     session.is_importing || session.is_project_busy
 }
 
-impl AppState {
+/// The empty tab's welcome form (`ContentView.welcome`, the tab-embedded
+/// `NewCanvasSheet`): a view entity since ticket 42 — it owns the
+/// Width/Height field entities (NewCanvasSheet's `@State width`/`height`,
+/// NewCanvasSheet.swift:9-10) and renders the whole form. Rendered only by
+/// the canvas view's welcome branch, so it keeps no session observer (the
+/// branch re-renders with the window, as before); its session field is
+/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+pub struct WelcomeView {
+    /// The active tab's session — the busy gates and the Create write speak
+    /// to it directly (`NewCanvasSheet`'s `session`).
+    session: Entity<EditorSession>,
+    /// The window shell (the transitional root): the Open/Import flows, the
+    /// file-drop receive and the repaint epoch stay there. No AppState
+    /// dependencies beyond what the moved handlers already used.
+    app: WeakEntity<AppState>,
+    /// The dimension fields (`NewCanvasSheet`'s `@State width`/`height`),
+    /// defaulting to 1920×1080 like Swift. Built here because an
+    /// `InputState` needs the window.
+    welcome_width_input: Entity<InputState>,
+    welcome_height_input: Entity<InputState>,
+}
+
+impl WelcomeView {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // The form's defaults: NewCanvasSheet's `@State width`/`height`
+        // ("1920" / "1080").
+        let welcome_width_input = number_input(1920.0, window, cx);
+        let welcome_height_input = number_input(1080.0, window, cx);
+        WelcomeView {
+            session,
+            app,
+            welcome_width_input,
+            welcome_height_input,
+        }
+    }
+
+    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
+    /// same as the canvas view and the layers panel).
+    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
+        self.session = session;
+    }
+
+    /// The view's route to the app-side repaint epoch (`touch`): the frame
+    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// Create asks the shell through the seam.
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch(cx)).ok();
+    }
+
     /// Both form fields parsed; `None` while either is not a valid
     /// dimension (the Create button's disabled state).
     fn welcome_size(&self, cx: &gpui_kit::App) -> Option<(usize, usize)> {
@@ -75,13 +130,13 @@ impl AppState {
     /// Both gates live here: the fields must parse and the sheet must not be
     /// busy, so a Return can never slip past a disabled button.
     fn welcome_submit(&mut self, cx: &mut Context<Self>) {
-        if welcome_disabled(self.tab().session.read(cx)) {
+        if welcome_disabled(self.session.read(cx)) {
             return;
         }
         let Some((width, height)) = self.welcome_size(cx) else {
             return;
         };
-        self.tab().session.update(cx, |session, _| {
+        self.session.update(cx, |session, _| {
             session.create_document(width, height, true)
         });
         self.touch(cx);
@@ -94,7 +149,7 @@ impl AppState {
         let valid = self.welcome_size(cx).is_some();
         // The sheet-level disable (NewCanvasSheet.swift:45): an import in
         // flight or a project operation freezes the whole form.
-        let disabled = welcome_disabled(self.tab().session.read(cx));
+        let disabled = welcome_disabled(self.session.read(cx));
 
         // The sheet's title bar (sheet_title/text sizes follow the other
         // sheets; the subtitle is NewCanvasSheet's secondary line).
@@ -157,12 +212,14 @@ impl AppState {
                     .label(OPEN_PROJECT_LABEL)
                     .small()
                     .disabled(disabled)
-                    .on_click(cx.listener(
-                        |this, _, window, cx| match this.workspace.open(None, cx) {
-                            Step::Pending(pending) => this.present_pending(pending, window, cx),
-                            Step::Done(_) => {}
-                        },
-                    )),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.app
+                            .update(cx, |app, cx| match app.workspace.open(None, cx) {
+                                Step::Pending(pending) => app.present_pending(pending, window, cx),
+                                Step::Done(_) => {}
+                            })
+                            .ok();
+                    })),
             )
             // File > Import Images' entry point: the same shared flow the
             // menu action runs (workspace.rs `prompt_import_images`), so the
@@ -173,7 +230,9 @@ impl AppState {
                     .small()
                     .disabled(disabled)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.prompt_import_images(cx);
+                        this.app
+                            .update(cx, |app, cx| app.prompt_import_images(cx))
+                            .ok();
                     })),
             )
             // The primary action sits on the row's end, as in Swift.
@@ -205,16 +264,23 @@ impl AppState {
                 |this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
                     // The drop point is canvas gesture state (ticket 39); the
                     // welcome form shares the canvas's file-drop import, so it
-                    // records the point through the canvas entity.
-                    this.canvas_view.update(cx, |canvas, cx| {
-                        let local = canvas.local_position(event.event.position);
-                        canvas.drop_point_doc = Some(canvas.screen_to_doc(cx, local.0, local.1));
-                    });
+                    // records the point through the shell's canvas entity.
+                    this.app
+                        .update(cx, |app, cx| {
+                            app.canvas_view.update(cx, |canvas, cx| {
+                                let local = canvas.local_position(event.event.position);
+                                canvas.drop_point_doc =
+                                    Some(canvas.screen_to_doc(cx, local.0, local.1));
+                            });
+                        })
+                        .ok();
                 },
             ))
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
                 let paths = dropped.paths().to_vec();
-                this.receive_dropped_files(paths, cx);
+                this.app
+                    .update(cx, |app, cx| app.receive_dropped_files(paths, cx))
+                    .ok();
             }))
             .child(
                 div()
@@ -256,6 +322,21 @@ impl AppState {
                     ),
             )
             .into_any_element()
+    }
+}
+
+impl Render for WelcomeView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_welcome(cx)
+    }
+}
+
+impl AppState {
+    /// The empty tab's welcome view (Swift `ContentView.welcome`): the form
+    /// entity built once (its inputs need the window); the canvas view's
+    /// welcome branch clones it into the tree (ticket 42).
+    pub fn render_welcome(&self) -> Entity<WelcomeView> {
+        self.welcome.clone()
     }
 }
 

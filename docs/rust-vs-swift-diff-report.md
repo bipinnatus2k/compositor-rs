@@ -4,6 +4,79 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-10：废除 AppState 票 42——工具头族 / welcome / status 实体化）
+
+工具头族、welcome 表单与状态条从 AppState 字段 + 方法族改为独立 view
+实体（Swift 对照：`BrushControls`/`CropControls`/`ShapeControls`/
+`TypeControls`/`TransformInspector`/`NavigationToolHeader`/
+`GradientControls`/`LassoControls` 选项条各为一个 view struct，
+ContentView.swift:25-70 的 `toolHeaders` 按 `session.tool` 分支装配；
+welcome = ContentView.swift:99-110 的 tab 内嵌 `NewCanvasSheet`
+（`@State width`/`height`:9-10）；statusBar = ContentView.swift:311 的
+计算属性，读 session 工具名/undo 名）。
+
+- **九个实体**：`BrushControlsView`（brush_controls.rs，四滑杆 +
+  `subscribe_sliders` brush 切片）/`LassoControlsView`
+  （lasso_controls.rs 选项条段，wand 滑杆 + wand 切片；Marquee/Lasso/
+  Wand 三臂同属 Swift `LassoControls` 一个 view）/`GradientControlsView`
+  /`NavigationToolHeaderView`（两实体落 navigation_tool_header.rs——
+  Gradient 臂当初就刻在此文件、Swift 无对应 Rust 文件，按现文件布局
+  裁定）/`CropControlsView`/`ShapeControlsView`/`TypeControlsView`
+  （三输入 + `subscribe_inputs` text_style 切片）/
+  `TransformInspectorView`（六输入 + transform 切片 + displayed/pixel_
+  size/change/field_changed/sync 全族）/`WelcomeView`（双输入 +
+  welcome_size/welcome_submit/渲染与 drop handler）。各持 session 实体 +
+  `app: WeakEntity<AppState>` 过渡缝；`StatusBarView` 落
+  content_view.rs，观察 session（读数独立重渲染）+ 自持 status。
+- **头部实体寿命 = 常驻字段**（选项头只在对应工具活动时进渲染树，
+  镜像 Swift 的 `if session.tool == …` 分支；实体本身 `AppState` 字段
+  常驻、`sync_session_observer` 重指 session——与画布/图层面板同款，
+  保住滑杆/输入在构造期从持久化工具默认值播种的次序与跨渲染的订阅）。
+  选项头不挂观察者（与面板同理：在树内随窗渲染）；status bar 挂观察者
+  （读数面收窄是本轮目的）。
+- **`set_status` 改转发**：文案逻辑逐字留 `StatusBarView::render`
+  （`status.clone().or(brush_error)`、undo/redo 名、尺寸缩放百分比）；
+  壳上的 `set_status` = 写入 bar 实体 + `touch`（revision 纪元语义
+  不变）；`drain_queued_receives` 的静默直写改 bar 实体静默写入
+  （泵的 drain-pass notify 照旧显示）。
+- **选项头控件面 = 实体方法**：Swift 视图渲染的是片段（ContentView
+  HStack 的直接子元素），Rust 的行壳（标题 + 42px bar）属 ContentView
+  装配（票 43 随 ContentView 实体化），故各实体暴露
+  `*_controls(cx) -> Vec<AnyElement>` 由壳按活动工具调用的实体方法，
+  不包 div（零布局变化）；`cx.listener` 按钮改为视图实体回调，MenuEntry
+  /`app_on` 家族沿用 ui.rs 的 AppState 壳（票 41 既披露的过渡缝）。
+- **工具轨道 + ColorPaletteControls 随装配**：`render_tool_rail` 留
+  AppState（Swift 侧是 ContentView 的计算属性 toolRail，不是独立 view
+  struct；随票 43 的 ContentView 实体走）；ColorPaletteControls 的
+  `choosingMaskBackground`/`pickerPanel` @State（:6-7）在 Rust 无对应
+  字段——点击直接开取色器，无可随迁（记录，不发明）。
+- **`NavigationToolHeader` 的 zoomText/displayedZoomText/stepper 草稿**
+  （NavigationToolHeader.swift:5-8）Rust 无对应（现渲染四个缩放按钮 +
+  平移提示）——按票面裁定记录，不发明新 UI 行为；`TransformInspector`
+  的 `.id(session.activeLayerID)` 重建语义同理未建模（记录）。
+- **跨实体通道**（reader/转发，票 40 的 `opacity_slider()` 先例）：
+  `resize_brush`/`change_brush_hardness`/`opacity_digit` 经
+  `brush_header.read(cx).sliders()` / `gradient_header.read(cx).
+  opacity_slider()` 取实体；canvas Move 拖拽的字段回写经
+  `AppState::sync_transform_inputs` 转发 inspector 实体；Type 草稿按钮
+  的 inline 编辑器重绑经缝达 canvas 实体。
+
+**字段归属审计（2026-10-10，逐字段对照 Swift；实现照此执行）**：
+
+| state.rs 字段 | Swift 归属（已核） | 去向（落地） |
+|---|---|---|
+| `brush_sliders`×4 | BrushControls `@Bindable session`（无 @State——滑杆是 gpui 绑定替身） | brush 选项头实体私有（已落地）；`subscribe_sliders` 的 brush 切片随迁为 `BrushControlsView::subscribe_sliders` |
+| `wand_slider` | LassoControls 选项条（@Bindable） | lasso 选项头实体私有（已落地）；订阅切片随迁 |
+| `gradient_slider` | GradientControls（独立 View :3，无 @State） | gradient 选项头实体私有（已落地，实体落 navigation_tool_header.rs）；订阅切片随迁 |
+| `type_size_input`/`type_tracking_input`/`type_leading_input` | TypeControls（@Bindable，数字框走 ArrowStepper 全局） | TypeControls 实体私有（已落地）；`subscribe_inputs` 的 text_style 切片随迁 |
+| `transform_x/y/w/h/scale/rotation_input` | TransformInspector `@State text`/`stepper`/`@FocusState`（:82-84） | TransformInspector 实体私有（已落地）；transform_field_changed 订阅切片随迁 |
+| `welcome_width_input`/`welcome_height_input` | NewCanvasSheet `@State width/height`（:9-10） | welcome 实体私有（已落地）；`welcome_submit`/`welcome_size`/welcome 渲染与 drop handler 随迁 |
+| `status` | ContentView.statusBar（:311 内联，读 session 工具/undo 名） | status bar 视图实体私有（已落地）；`set_status` 转发（文案逐字保留） |
+| 工具轨道 + ColorPaletteControls | ContentView.toolRail 内联 + ColorPaletteControls（`@State choosingMaskBackground`:6） | 轨道随装配留 AppState（Swift 即 ContentView 计算属性，随票 43）；遮罩底色选择态 Rust 无对应字段，无随迁 |
+
+**测试**：912 全绿 = core 627 + app 175 + 集成 110；断言零改动（测试
+本就不经 AppState 触及这批字段/方法）；boot smoke 通过。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 41——浮动面板内容实体化）
 
 八个浮动面板的内容从 `PanelWidgets` 捆绑 + AppState 方法族改为独立
