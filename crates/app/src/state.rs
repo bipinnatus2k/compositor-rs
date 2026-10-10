@@ -441,6 +441,13 @@ impl ProjectWorkspaceView {
         state
             .subscriptions
             .push(cx.observe(&state.workspace, |_, _, cx| cx.notify()));
+        // The invalidation counter's root-notify tally (ticket 37): the
+        // observer fires once per delivered root invalidation — the count
+        // the scenario tests read. Debug-only; release drops it.
+        #[cfg(any(test, debug_assertions))]
+        state
+            .subscriptions
+            .push(cx.observe_self(|_, cx| invalidation_counter::root_notify(cx)));
         // `on_window_should_close` → `workspace.close_window` (two-phase):
         // a pending unsaved-changes dialog vetoes the close and presents
         // itself; once the flow completes the window closes for real.
@@ -854,6 +861,15 @@ impl ProjectWorkspaceView {
         cx.notify();
     }
 
+    /// The touch-without-notify variant: writes the repaint epoch when the
+    /// caller notifies separately (`apply_filter_preview`'s panel handlers
+    /// run `touch` right after, and the defringe sample paths notify
+    /// upstream) — the notify timing stays exactly as before the ticket-37
+    /// unification folded the inline `revision += 1` sites into here.
+    pub(crate) fn bump_revision(&mut self) {
+        self.revision += 1;
+    }
+
     pub fn notify_only(&mut self, cx: &mut Context<Self>) {
         cx.notify();
     }
@@ -1003,6 +1019,7 @@ impl ProjectWorkspaceView {
     /// since ticket 39, so the caller snapshots it into `gesture`; the
     /// preview branches and the branch order are unchanged.
     pub(crate) fn composite(&self, gesture: CanvasGesture, cx: &App) -> Option<Bitmap> {
+        invalidation_counter::composite(cx);
         let session = self.current_tab(cx).session.read(cx);
         let document = session.document.as_ref()?;
         // While the inline text editor is open, its draft's layer is held
@@ -1134,6 +1151,7 @@ impl ProjectWorkspaceView {
             || self.frame_image_rev != self.revision
             || self.frame_image_tab != tab_id
         {
+            invalidation_counter::frame_rebuild(cx);
             self.frame_image = Some(bgra_render_image(composite));
             self.frame_image_rev = self.revision;
             self.frame_image_tab = tab_id;
@@ -1337,7 +1355,7 @@ impl ProjectWorkspaceView {
             .build();
         let result = compositor_core::filters::run_filter(&job);
         self.preview = Some(Arc::new(result));
-        self.revision += 1;
+        self.bump_revision();
     }
 
     /// `sampleCameraRawDefringe` — centers the purple or green defringe range
@@ -1433,6 +1451,129 @@ fn straight_of(color: compositor_core::document::PaletteColor) -> [u8; 4] {
         (color.blue * 255.0).round() as u8,
         255,
     ]
+}
+
+/// The invalidation counter (ticket 37, ADR 0003 step G): a lightweight tally
+/// of the invalidation pipeline's recurring costs — delivered root
+/// invalidations, canvas composites, frame-image rebuilds and thumbnail
+/// regenerations. The scenario tests read it as the measure-first harness
+/// (baseline before the content key, after-numbers after); a debug overlay
+/// may read the same numbers. Release builds compile the empty stub so the
+/// call sites stay unconditional and the optimizer drops them.
+#[cfg(any(test, debug_assertions))]
+pub(crate) mod invalidation_counter {
+    use std::cell::Cell;
+
+    use gpui_kit::{App, Global};
+
+    /// The tallies as a gpui Global: every increment site runs against
+    /// `&App`, so the fields are `Cell`s. The global is absent outside the
+    /// scenario tests (`try_global`), so debug runs pay nothing.
+    #[derive(Default)]
+    pub(crate) struct InvalidationCounters {
+        /// Delivered root invalidations: one per update cycle that notifies
+        /// [`ProjectWorkspaceView`] (gpui coalesces same-cycle notifies).
+        pub(crate) root_notify: Cell<u64>,
+        /// Canvas composites ([`ProjectWorkspaceView::composite`], one per
+        /// canvas render).
+        pub(crate) composite: Cell<u64>,
+        /// Frame-image rebuilds (the `(tab_id, revision)` cache missing).
+        pub(crate) frame_rebuild: Cell<u64>,
+        /// Layer-row thumbnail regenerations (`LayersPanelView`).
+        pub(crate) thumbnail_regen: Cell<u64>,
+        /// Mask-thumbnail regenerations (`LayersPanelView`).
+        pub(crate) mask_thumbnail_regen: Cell<u64>,
+    }
+
+    impl Global for InvalidationCounters {}
+
+    impl InvalidationCounters {
+        /// A `(root_notify, composite, frame_rebuild, thumbnail_regen,
+        /// mask_thumbnail_regen)` snapshot.
+        #[cfg(test)]
+        pub(crate) fn snapshot(&self) -> [u64; 5] {
+            [
+                self.root_notify.get(),
+                self.composite.get(),
+                self.frame_rebuild.get(),
+                self.thumbnail_regen.get(),
+                self.mask_thumbnail_regen.get(),
+            ]
+        }
+
+        #[cfg(test)]
+        fn reset(&mut self) {
+            self.root_notify.set(0);
+            self.composite.set(0);
+            self.frame_rebuild.set(0);
+            self.thumbnail_regen.set(0);
+            self.mask_thumbnail_regen.set(0);
+        }
+    }
+
+    /// Installs a fresh counter (the scenario tests' first call); absent
+    /// counters make every increment a no-op, so debug runs pay nothing.
+    #[cfg(test)]
+    pub(crate) fn install(cx: &mut App) {
+        cx.set_global(InvalidationCounters::default());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset(cx: &mut App) {
+        cx.global_mut::<InvalidationCounters>().reset();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(cx: &App) -> [u64; 5] {
+        cx.global::<InvalidationCounters>().snapshot()
+    }
+
+    pub(crate) fn root_notify(cx: &App) {
+        if let Some(counters) = cx.try_global::<InvalidationCounters>() {
+            counters.root_notify.set(counters.root_notify.get() + 1);
+        }
+    }
+
+    pub(crate) fn composite(cx: &App) {
+        if let Some(counters) = cx.try_global::<InvalidationCounters>() {
+            counters.composite.set(counters.composite.get() + 1);
+        }
+    }
+
+    pub(crate) fn frame_rebuild(cx: &App) {
+        if let Some(counters) = cx.try_global::<InvalidationCounters>() {
+            counters.frame_rebuild.set(counters.frame_rebuild.get() + 1);
+        }
+    }
+
+    pub(crate) fn thumbnail_regen(cx: &App) {
+        if let Some(counters) = cx.try_global::<InvalidationCounters>() {
+            counters
+                .thumbnail_regen
+                .set(counters.thumbnail_regen.get() + 1);
+        }
+    }
+
+    pub(crate) fn mask_thumbnail_regen(cx: &App) {
+        if let Some(counters) = cx.try_global::<InvalidationCounters>() {
+            counters
+                .mask_thumbnail_regen
+                .set(counters.mask_thumbnail_regen.get() + 1);
+        }
+    }
+}
+
+/// The release stub: no counters, no global — the increment sites compile
+/// unchanged and optimize away. (`root_notify` has no release call site —
+/// its observer hook is debug-gated — so the stub omits it.)
+#[cfg(not(any(test, debug_assertions)))]
+pub(crate) mod invalidation_counter {
+    use gpui_kit::App;
+
+    pub(crate) fn composite(_: &App) {}
+    pub(crate) fn frame_rebuild(_: &App) {}
+    pub(crate) fn thumbnail_regen(_: &App) {}
+    pub(crate) fn mask_thumbnail_regen(_: &App) {}
 }
 
 /// Converts a premultiplied-RGBA bitmap into the BGRA texture GPUI expects.
@@ -1665,6 +1806,208 @@ mod tests {
             // calls must not all collapse onto one value.
             let seeds: std::collections::HashSet<u32> = (0..64).map(|_| time_seed()).collect();
             assert!(seeds.len() > 1, "seeds never varied: {seeds:?}");
+        }
+    }
+
+    /// The ticket-37 invalidation scenarios (ADR 0003 step G): the
+    /// measure-first harness. Each test drives one of the two notification
+    /// hot spots through the real entity tree (root → content → canvas +
+    /// layers panel), reads the invalidation counter, and pins the numbers
+    /// the ticket's landing record and the diff report carry.
+    mod invalidation_scenarios {
+        use super::super::{ProjectWorkspaceView, invalidation_counter};
+        use crate::ui::floating_panel::{PanelContent, panel_names};
+        use compositor_core::document::LayerMask;
+        use compositor_core::raster::{Bitmap, ImportedImage};
+        use compositor_core::session::EditorSession;
+        use gpui_kit::component::slider::{SliderEvent, SliderValue};
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{
+            AppContext as _, Bounds, Entity, TestAppContext, VisualTestContext, WindowBounds,
+            WindowOptions,
+        };
+
+        /// Slider-change events per drag scenario.
+        const EVENTS: usize = 5;
+        /// Asset layers in every scenario document.
+        const LAYERS: usize = 3;
+
+        /// The production window (gpui-kit `Root` around the root view) the
+        /// scenarios run in; returns it plus the root view entity.
+        fn open_scenario_window(
+            cx: &mut TestAppContext,
+        ) -> (Entity<ProjectWorkspaceView>, VisualTestContext) {
+            let (window, root) = cx.update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::maximized(None, cx))),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| cx.new(|cx| ProjectWorkspaceView::new(window, cx)),
+                )
+                .expect("open the scenario window")
+            });
+            (root, VisualTestContext::from_window(window, cx))
+        }
+
+        fn colored(color: [u8; 4]) -> ImportedImage {
+            ImportedImage::new(Bitmap::new_clearing(8, 8, color), "L")
+        }
+
+        /// The opening document with `LAYERS` asset layers (create_document
+        /// seeds "Layer 1"; one more `add_blank_layer` tops it up); the
+        /// bottom `masks` layers carry a revealing mask.
+        fn seed_layers(
+            cx: &mut gpui_kit::VisualTestContext,
+            session: &Entity<EditorSession>,
+            masks: usize,
+        ) {
+            session.update(cx, |session, _| {
+                session.create_document(64, 64, true);
+                for _ in 1..LAYERS {
+                    session.add_blank_layer();
+                }
+                let document = session.document.as_mut().unwrap();
+                for (index, layer) in document.layers.iter_mut().enumerate() {
+                    layer.asset = Some(colored([40, 40, (index * 70 + 40) as u8, 255]));
+                    if index < masks {
+                        layer.mask = Some(LayerMask::solid(true));
+                    }
+                }
+            });
+        }
+
+        /// The active tab's session entity, cloned out of the root.
+        fn active_session(
+            root: &Entity<ProjectWorkspaceView>,
+            cx: &impl gpui_kit::AppContext,
+        ) -> Entity<EditorSession> {
+            root.read_with(cx, |root, cx| {
+                root.workspace.read(cx).current().session.clone()
+            })
+        }
+
+        /// One full frame: invalidation delivered, every view re-rendered,
+        /// the caches refilled — the unit the counters tally.
+        fn render_frame(cx: &mut gpui_kit::VisualTestContext) {
+            cx.update(|window, cx| window.render_frame(cx));
+        }
+
+        /// Fires one real slider Change event at the Levels panel's first
+        /// slider (the path a drag produces: the panel's subscription runs
+        /// the shell's preview recompute).
+        fn fire_slider_change(
+            root: &Entity<ProjectWorkspaceView>,
+            cx: &mut gpui_kit::VisualTestContext,
+            value: f32,
+        ) {
+            let slider = root.read_with(cx, |root, cx| {
+                match root.panel_views.get(panel_names::LEVELS_PANEL) {
+                    Some(PanelContent::Levels(panel)) => panel.read(cx).sliders()[0].clone(),
+                    _ => panic!("the levels panel is not open"),
+                }
+            });
+            slider.update(cx, |_, cx| {
+                cx.emit(SliderEvent::Change(SliderValue::Single(value)));
+            });
+        }
+
+        /// Slider-drag scenario: N change events on the Levels panel over a
+        /// three-layer document. Each event delivers one root invalidation
+        /// and one frame (the same shape a real drag produces — one frame
+        /// per event). The slider changes preview state only — no layer
+        /// asset, transform, effect or canvas size moves — so the thumbnail
+        /// regenerations it forces are pure waste.
+        #[gpui_kit::test]
+        fn slider_drag_invalidation(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_layers(&mut cx, &session, 0);
+            root.update(&mut cx, |root, cx| root.open_levels_panel(cx));
+            render_frame(&mut cx); // warm the caches; the tallies start clean
+
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            for event in 0..EVENTS {
+                fire_slider_change(&root, &mut cx, 100.0 + event as f32);
+            }
+            let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            // Content-keyed thumbnails (ticket 37): a slider change touches
+            // none of the drawn inputs, so zero rows regenerate — the frame
+            // rebuild (the preview-driven, necessary cost) is unchanged.
+            // Baseline before the key: [5, 5, 5, 15, 0] — every event
+            // regenerated all three rows.
+            assert_eq!(
+                counts,
+                [EVENTS as u64, EVENTS as u64, EVENTS as u64, 0, 0],
+                "slider drag: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
+        }
+
+        /// Undo scenario: one pixel edit and its undo over a three-layer
+        /// document whose bottom layer carries a mask. The frame rebuild is
+        /// the necessary cost; the untouched rows' and the mask's thumbnail
+        /// regenerations are the waste the content key removes.
+        #[gpui_kit::test]
+        fn pixel_edit_and_undo_invalidation(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_layers(&mut cx, &session, 1);
+            render_frame(&mut cx); // warm the caches; the tallies start clean
+
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            // The pixel edit: one undo step replacing the active layer's
+            // pixels (the canonical `history_edit` + `touch` shape). One
+            // root invalidation, one frame.
+            root.update(&mut cx, |root, cx| {
+                root.history_edit(
+                    "Fill",
+                    |session| {
+                        if let Some(id) = session.active_layer_id
+                            && let Some(document) = session.document.as_mut()
+                            && let Some(layer) = document.layer_mut(id)
+                        {
+                            layer.asset = Some(colored([200, 60, 60, 255]));
+                        }
+                    },
+                    cx,
+                );
+                root.touch(cx);
+            });
+            let edit = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            // Content-keyed (ticket 37): only the edited row's asset pointer
+            // moved, so one row regenerates; the untouched rows and the mask
+            // thumbnail hit. Baseline before the key: [1, 1, 1, 3, 1].
+            assert_eq!(
+                edit,
+                [1, 1, 1, 1, 0],
+                "pixel edit: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
+
+            // The undo restores the pre-edit pixels; same per-frame shape.
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            root.update(&mut cx, |root, cx| {
+                root.workspace.update(cx, |workspace, cx| {
+                    workspace
+                        .current_mut()
+                        .session
+                        .update(cx, |session, _| session.undo())
+                });
+                root.touch(cx);
+            });
+            let undo = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            // The undo restores the pre-edit snapshot — the untouched layers'
+            // `Arc`s survive the round trip, so only the edited row's pixels
+            // really changed. Baseline before the key: [1, 1, 1, 3, 1].
+            assert_eq!(
+                undo,
+                [1, 1, 1, 1, 0],
+                "undo: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
         }
     }
 }

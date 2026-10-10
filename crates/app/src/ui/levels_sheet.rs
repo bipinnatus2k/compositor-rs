@@ -135,6 +135,14 @@ impl LevelsPanelView {
             .ok();
     }
 
+    /// The panel's five slider entities, input black → output white. Read
+    /// seam for the ticket-37 invalidation scenario tests, which fire real
+    /// `SliderEvent`s at the first slider (the path a drag produces).
+    #[cfg(test)]
+    pub(crate) fn sliders(&self) -> &[Entity<SliderState>] {
+        &self.sliders
+    }
+
     /// The Preview checkbox flipped (or Option-P): the shell's refresh path,
     /// which — unlike a slider change — repaints on the adjustment path too
     /// (`refresh_levels_preview`'s exact shape).

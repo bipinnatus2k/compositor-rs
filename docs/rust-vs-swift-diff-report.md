@@ -4,6 +4,59 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-10：废除 AppState 票 37——失效卫生：缩略图内容键控 + bypass 统一 + 失效仪表，ADR 0003 步 G）
+
+ADR 0003 票序 G（性能票，量测先行：数字来自票内新建的失效计数仪表，
+不是 wall-clock 工具）。原版对应：Swift 的 `CanvasThumbnail` 是纯函数
+枚举，图层列表每帧重画、由 Core View 层吸收成本；移植把缩略图画进
+GPUI 元素树后需要自己的失效卫生——此前唯一的卫生是全量 revision 戳
+（任何 `touch` 作废全部行缩略图）加 `mask_thumbnail_image` 的每帧无
+缓存重算。
+
+- **失效仪表（一物两用的验收 harness）**：`state.rs` `invalidation_counter`
+  gpui Global（`Cell<u64>`×5：root_notify / composite / frame_rebuild /
+  thumbnail_regen / mask_thumbnail_regen），`#[cfg(any(test,
+  debug_assertions))]` 真身 + release 空 stub（调用点无条件编译）；未安装
+  时全 no-op。root_notify 经根的 `observe_self`（gpui 把同周期多次
+  notify 合并一次，计数即送达的失效数）；两场景测试（滑杆拖动 / 像素
+  编辑 + undo）驱动真实实体树读数。仪表顺带核实：蒙版缩略图在零突变帧
+  也重算——每帧浪费坐实。
+- **缩略图内容键控**：`ui/native_layer_list.rs` `ThumbnailSource`——键 =
+  绘制函数的逐字输入清单：层分支 = 资产 `Arc::as_ptr`（移植既定身份
+  约定）+ `LayerTransform` 全值 + adjustment + effects + 文档尺寸；
+  蒙版分支 = mask 资产指针 + `mask_transform()` + 文档尺寸。非输入
+  （opacity/name/is_visible/blend/mask 有无/is_enabled/is_linked）由
+  测试锁定不进键。蒙版缩略图独立缓存（item 3）。revision 戳与经缝读根
+  revision 移除，缩略图失效与根纪元解耦。指针键的 ABA 暴露与 render.rs
+  既有缓存及 Swift CGImage 身份比较同款，按约定接受。
+- **bypass 统一**：票面 13 处为 ADR 时点行号，重扫实为 7 处（43 号票
+  重构后 content_view/navigation_tool_header 的站点消散）。
+  `sheets.rs`×5（`revision += 1; cx.notify()` ≡ touch）改 `touch(cx)`；
+  `apply_filter_preview` 尾（调用方各自 notify）折入新增
+  `bump_revision()`（touch-without-notify 变体，notify 时序逐字保留）。
+  落地后纪元只经 `touch` / `bump_revision` 写入，内联散写清零。
+- **前后数字**（N=5 滑杆事件、L=3 资产图层；计数序 root_notify /
+  composite / frame_rebuild / thumbnail_regen / mask_thumbnail_regen）：
+
+  | 场景 | 基线 | 落地后 |
+  | --- | --- | --- |
+  | 滑杆拖动（合计） | `[5, 5, 5, 15, 0]` | `[5, 5, 5, 0, 0]` |
+  | 像素编辑 | `[1, 1, 1, 3, 1]` | `[1, 1, 1, 1, 0]` |
+  | undo | `[1, 1, 1, 3, 1]` | `[1, 1, 1, 1, 0]` |
+
+  滑杆拖动的缩略图作废（每事件 L 次重生成）清零；像素编辑/undo 只
+  重生成被编辑行；蒙版缩略图零突变帧的重算消失。通知、合成与帧重建
+  路径不变（帧缓存 `(tab_id, revision)` 本票不动——合成驱动的必要
+  成本，作用域化留 Future work）。缩略图像素逐位不变（键改变的是缓存
+  何时重灌，不是画什么）；零用户可见行为变化。
+- **Future work**：帧缓存按内容作用域化；失效浮层（仪表的 debug 显示
+  半面）；若 profile 证实对话框拖动期 chrome 重渲染为热点，单个最热
+  对话框评估影子实体（ADR 0003 既定）。
+
+**测试**：919 全绿 = core 627 + app 182（175 存量断言零改动 + 7 新增）
++ 集成 110；门禁 fmt 零差异、typos 零报告、clippy 触及文件零警告、
+boot smoke 通过。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 43——workspace 实体化 + 双层 root + AppState 除名）
 
 收官大票（ADR 0003 票序 F）。`AppState` 除名为 `ProjectWorkspaceView`

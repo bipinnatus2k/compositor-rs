@@ -62,8 +62,7 @@ impl ProjectWorkspaceView {
                 SliderEvent::Change(value) | SliderEvent::Release(value) => value.start(),
             };
             this.refresh_jpeg_preview(cx);
-            this.revision += 1;
-            cx.notify();
+            this.touch(cx);
         });
         self.subscriptions.push(subscription);
         state
@@ -216,8 +215,7 @@ impl ProjectWorkspaceView {
                 self.preview = Some(base);
             }
         }
-        self.revision += 1;
-        cx.notify();
+        self.touch(cx);
     }
 
     /// Rebuilds the Levels preview after the Preview checkbox flips: unchecked
@@ -246,8 +244,7 @@ impl ProjectWorkspaceView {
                     session.preview_adjustment_editing(preview);
                 })
             });
-            self.revision += 1;
-            cx.notify();
+            self.touch(cx);
             return;
         }
         let Some(base) = self.preview_base.clone() else {
@@ -261,8 +258,7 @@ impl ProjectWorkspaceView {
         } else {
             self.preview = Some(base);
         }
-        self.revision += 1;
-        cx.notify();
+        self.touch(cx);
     }
 
     /// Writes the Hue/Saturation settings into the live preview —
@@ -296,8 +292,7 @@ impl ProjectWorkspaceView {
             adjusted = self.blend_adjusted(adjusted, cx);
             self.preview = Some(std::sync::Arc::new(adjusted));
         }
-        self.revision += 1;
-        cx.notify();
+        self.touch(cx);
     }
 
     // MARK: Effects panel

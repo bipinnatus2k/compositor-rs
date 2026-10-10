@@ -27,13 +27,15 @@ use gpui_kit::{
 };
 
 use compositor_core::adjustment::AdjustmentKind;
+use compositor_core::adjustment::LayerAdjustment;
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::document::ImageLayer;
-use compositor_core::effects::{LayerEffectKind, LayerEffectSelection};
+use compositor_core::effects::{LayerEffectKind, LayerEffectSelection, LayerEffects};
 use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
+use compositor_core::transform::LayerTransform;
 
-use crate::state::{ProjectWorkspaceView, bgra_render_image, slider};
+use crate::state::{ProjectWorkspaceView, bgra_render_image, invalidation_counter, slider};
 use crate::ui::{ClickHandler, Dropdown, MenuEntry, app_dispatch, text_label};
 
 const THUMB: f32 = 30.0;
@@ -151,6 +153,69 @@ fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTar
     }
 }
 
+/// What one cached thumbnail's pixels depend on — the drawn branch's exact
+/// input list, no more and no less (ticket 37's content key, replacing the
+/// app-wide revision stamp so unrelated mutations stop invalidating every
+/// row). Asset identity is `Arc::as_ptr` of the source image, the port's
+/// established identity convention (history.rs, render.rs: bitmaps are
+/// immutable, every pixel change allocates a fresh `Arc`); the transform,
+/// adjustment and effects compare by value exactly as `ImageLayer.==` does;
+/// `canvas` is the document size the canvas-shaped frame fits to. The two
+/// variants name the two producers: `layer_canvas_thumbnail` (Layer) and
+/// `mask_canvas_thumbnail` (Mask).
+// The size difference is the point: the key carries the drawn inputs by
+// value (a Box would put a heap hop on every key build for no gain — the
+// key lives in the map value and is compared, not copied around).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+enum ThumbnailSource {
+    Layer {
+        asset: usize,
+        transform: LayerTransform,
+        adjustment: Option<LayerAdjustment>,
+        effects: Option<LayerEffects>,
+        canvas: (usize, usize),
+    },
+    Mask {
+        asset: usize,
+        transform: LayerTransform,
+        canvas: (usize, usize),
+    },
+}
+
+/// The layer branch's content key: what [`compositor_core::render::
+/// layer_canvas_thumbnail`] reads — the pixels (asset identity), the
+/// adjustment and effects it applies over them, the placement, and the
+/// canvas size.
+fn layer_thumbnail_source(layer: &ImageLayer, canvas: (usize, usize)) -> ThumbnailSource {
+    ThumbnailSource::Layer {
+        asset: layer
+            .asset
+            .as_ref()
+            .map(|asset| std::sync::Arc::as_ptr(&asset.image) as usize)
+            .unwrap_or(0),
+        transform: layer.transform,
+        adjustment: layer.adjustment.clone(),
+        effects: layer.effects,
+        canvas,
+    }
+}
+
+/// The mask branch's content key: what [`compositor_core::render::
+/// mask_canvas_thumbnail`] reads — the mask's pixels (asset identity), its
+/// canvas placement ([`ImageLayer::mask_transform`]), and the canvas size.
+fn mask_thumbnail_source(layer: &ImageLayer, canvas: (usize, usize)) -> ThumbnailSource {
+    ThumbnailSource::Mask {
+        asset: layer
+            .mask
+            .as_ref()
+            .map(|mask| std::sync::Arc::as_ptr(&mask.asset.image) as usize)
+            .unwrap_or(0),
+        transform: layer.mask_transform(),
+        canvas,
+    }
+}
+
 /// The right panel as its own view entity (Swift `LayersPanel` — the
 /// header's blend/opacity controls, the layer list and the footer menu
 /// family; ADR 0003 step C, ticket 40). It observes the session so a
@@ -173,10 +238,15 @@ pub struct LayersPanelView {
     /// window.
     rename_input: Option<Entity<InputState>>,
     /// The cached thumbnail textures for one layer row, keyed by layer and
-    /// by whether the mask is the row's subject; values are (revision,
-    /// image). The revision epoch is the app shell's (ticket 39's field
-    /// audit) and is read through the seam as the cache key.
-    thumbnails: HashMap<(uuid::Uuid, bool), (u64, Arc<RenderImage>)>,
+    /// by whether the mask is the row's subject; values are (content key,
+    /// image). The key is what the thumbnail drawing reads (ticket 37) — a
+    /// mutation that touches none of it (a slider drag, an opacity change)
+    /// keeps the row cached.
+    thumbnails: HashMap<(uuid::Uuid, bool), (ThumbnailSource, Arc<RenderImage>)>,
+    /// The same content-key regime for the row's mask thumbnail (ticket 37
+    /// item 3: it recomputed on every render before). Keyed by layer id —
+    /// the mask thumbnail always draws the mask branch.
+    mask_thumbnails: HashMap<uuid::Uuid, (ThumbnailSource, Arc<RenderImage>)>,
     /// The active layer's opacity (Layers panel header,
     /// LayerAppearanceControls).
     opacity_slider: Entity<SliderState>,
@@ -205,6 +275,7 @@ impl LayersPanelView {
             app,
             rename_input: None,
             thumbnails: HashMap::new(),
+            mask_thumbnails: HashMap::new(),
             opacity_slider,
             subscriptions: Vec::new(),
             session_observer: None,
@@ -358,6 +429,9 @@ impl LayersPanelView {
 
     /// The cached thumbnail texture for one layer row, keyed by layer and by
     /// whether the mask is the row's subject (the mask thumbnail swaps in).
+    /// Validity is the drawing's content key (ticket 37), not the app-wide
+    /// revision: a mutation that changes none of the drawn inputs keeps
+    /// every row cached.
     fn thumbnail_image(
         &mut self,
         id: uuid::Uuid,
@@ -365,33 +439,36 @@ impl LayersPanelView {
         cx: &App,
     ) -> Option<Arc<RenderImage>> {
         let mask_selected = self.session.read(cx).is_mask_selected && layer.mask.is_some();
-        let revision = self
-            .app
-            .upgrade()
-            .map(|app| app.read(cx).revision)
-            .unwrap_or(0);
-        if let Some((rev, image)) = self.thumbnails.get(&(id, mask_selected))
-            && *rev == revision
+        let document = self.session.read(cx).document.as_ref()?;
+        let canvas = (document.width, document.height);
+        let source = if mask_selected {
+            mask_thumbnail_source(layer, canvas)
+        } else {
+            layer_thumbnail_source(layer, canvas)
+        };
+        if let Some((cached, image)) = self.thumbnails.get(&(id, mask_selected))
+            && *cached == source
         {
             return Some(image.clone());
         }
-        let document = self.session.read(cx).document.as_ref()?;
-        let canvas =
-            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
         // CanvasThumbnail: the pixels (or the mask) sit on a canvas-shaped
         // frame, whatever the layer's own bounds.
         let thumbnail = if mask_selected {
             compositor_core::render::mask_canvas_thumbnail(
                 layer.mask.as_ref()?,
                 &layer.mask_transform(),
-                canvas,
+                compositor_core::geometry::CGSize::new(canvas.0 as f64, canvas.1 as f64),
             )?
         } else {
-            compositor_core::render::layer_canvas_thumbnail(layer, canvas)?
+            compositor_core::render::layer_canvas_thumbnail(
+                layer,
+                compositor_core::geometry::CGSize::new(canvas.0 as f64, canvas.1 as f64),
+            )?
         };
         let image = bgra_render_image(&thumbnail);
+        invalidation_counter::thumbnail_regen(cx);
         self.thumbnails
-            .insert((id, mask_selected), (revision, image.clone()));
+            .insert((id, mask_selected), (source, image.clone()));
         Some(image)
     }
 
@@ -1477,18 +1554,33 @@ impl LayersPanelView {
     /// on a canvas-shaped frame filled with the mask's edge tone
     /// (`CanvasThumbnail.mask`, render.rs mask_canvas_thumbnail) — the same
     /// producer `thumbnail_image` uses when the mask is the row's subject.
+    /// Cached under the mask branch's content key (ticket 37 item 3): the
+    /// inputs differ from the row thumbnail's, so the key is derived
+    /// separately.
     fn mask_thumbnail_image(
-        &self,
+        &mut self,
         layer: &ImageLayer,
-        cx: &gpui_kit::App,
+        cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
         let mask = layer.mask.as_ref()?;
         let document = self.session.read(cx).document.as_ref()?;
-        let canvas =
-            compositor_core::geometry::CGSize::new(document.width as f64, document.height as f64);
-        let thumbnail =
-            compositor_core::render::mask_canvas_thumbnail(mask, &layer.mask_transform(), canvas)?;
-        Some(crate::state::bgra_render_image(&thumbnail))
+        let canvas = (document.width, document.height);
+        let source = mask_thumbnail_source(layer, canvas);
+        if let Some((cached, image)) = self.mask_thumbnails.get(&layer.id)
+            && *cached == source
+        {
+            return Some(image.clone());
+        }
+        let thumbnail = compositor_core::render::mask_canvas_thumbnail(
+            mask,
+            &layer.mask_transform(),
+            compositor_core::geometry::CGSize::new(canvas.0 as f64, canvas.1 as f64),
+        )?;
+        let image = bgra_render_image(&thumbnail);
+        invalidation_counter::mask_thumbnail_regen(cx);
+        self.mask_thumbnails
+            .insert(layer.id, (source, image.clone()));
+        Some(image)
     }
 }
 
@@ -1550,6 +1642,328 @@ mod tests {
     use compositor_core::selection::SelectionMode;
     use compositor_core::session::EditorSession;
     use gpui_kit::Modifiers;
+
+    /// The thumbnail content key's semantics (ticket 37), driven through the
+    /// real panel entity: an unrelated session mutation keeps the rows
+    /// cached, an asset swap or a transform change misses. The panel's
+    /// `app` seam is inert here (`new_invalid`) — `thumbnail_image` no
+    /// longer reads the revision through it.
+    mod content_key {
+        use super::super::{
+            LayersPanelView, ThumbnailSource, layer_thumbnail_source, mask_thumbnail_source,
+        };
+        use crate::state::invalidation_counter;
+        use compositor_core::adjustment::{AdjustmentKind, LayerAdjustment};
+        use compositor_core::document::{ImageLayer, LayerMask};
+        use compositor_core::effects::{LayerEffects, StrokeEffect};
+        use compositor_core::geometry::CGPoint;
+        use compositor_core::raster::{Bitmap, ImportedImage};
+        use compositor_core::session::EditorSession;
+        use gpui_kit::{AppContext as _, Entity, TestAppContext, WeakEntity};
+
+        fn asset_layer(color: [u8; 4]) -> ImageLayer {
+            ImageLayer::with_asset(
+                ImportedImage::new(Bitmap::new_clearing(8, 8, color), "L"),
+                CGPoint::ZERO,
+            )
+        }
+
+        /// A one-layer document on its own session entity plus a panel
+        /// watching it; returns (session, panel, layer id).
+        fn panel_with_layer(
+            cx: &mut TestAppContext,
+            mask: bool,
+        ) -> (Entity<EditorSession>, Entity<LayersPanelView>, uuid::Uuid) {
+            let session = cx.new(|_| {
+                let mut session = EditorSession::new();
+                session.create_document(32, 32, true);
+                session
+            });
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                let mut layer = asset_layer([255, 0, 0, 255]);
+                if mask {
+                    layer.mask = Some(LayerMask::solid(true));
+                }
+                let id = layer.id;
+                document.layers[0] = layer;
+                id
+            });
+            let panel =
+                cx.new(|cx| LayersPanelView::new(session.clone(), WeakEntity::new_invalid(), cx));
+            let id = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].id
+            });
+            (session, panel, id)
+        }
+
+        fn tally(cx: &mut TestAppContext) -> [u64; 5] {
+            cx.update(|cx| invalidation_counter::snapshot(cx))
+        }
+
+        /// The two caches hit on unchanged content and keep hitting across
+        /// an unrelated session mutation (an opacity change — not a drawn
+        /// input; the old revision stamp invalidated here).
+        #[gpui_kit::test]
+        fn unrelated_mutations_keep_the_rows_cached(cx: &mut TestAppContext) {
+            cx.update(invalidation_counter::install);
+            let (session, panel, id) = panel_with_layer(cx, false);
+            let layer = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+
+            panel.update(cx, |panel, cx| {
+                assert!(panel.thumbnail_image(id, &layer, cx).is_some());
+            });
+            assert_eq!(tally(cx), [0, 0, 0, 1, 0], "first draw regenerates");
+            panel.update(cx, |panel, cx| {
+                assert!(panel.thumbnail_image(id, &layer, cx).is_some());
+            });
+            assert_eq!(tally(cx), [0, 0, 0, 1, 0], "same content hits");
+
+            session.update(cx, |session, _| session.set_layer_opacity(0.5));
+            panel.update(cx, |panel, cx| {
+                assert!(panel.thumbnail_image(id, &layer, cx).is_some());
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 1, 0],
+                "an opacity change is not a drawn input"
+            );
+        }
+
+        /// An asset swap misses (the pixels changed); a transform change
+        /// misses (the drawing places the pixels on the canvas frame).
+        #[gpui_kit::test]
+        fn asset_swaps_and_transform_changes_miss(cx: &mut TestAppContext) {
+            cx.update(invalidation_counter::install);
+            let (session, panel, id) = panel_with_layer(cx, false);
+            let layer = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &layer, cx);
+            });
+            assert_eq!(tally(cx), [0, 0, 0, 1, 0]);
+
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                document.layers[0].asset = Some(ImportedImage::new(
+                    Bitmap::new_clearing(8, 8, [0, 255, 0, 255]),
+                    "L",
+                ));
+            });
+            let swapped = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &swapped, cx);
+            });
+            assert_eq!(tally(cx), [0, 0, 0, 2, 0], "an asset swap misses");
+
+            session.update(cx, |session, _| {
+                session.document.as_mut().unwrap().layers[0]
+                    .transform
+                    .origin
+                    .x += 5.0;
+            });
+            let moved = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &moved, cx);
+            });
+            assert_eq!(tally(cx), [0, 0, 0, 3, 0], "a transform change misses");
+        }
+
+        /// The mask thumbnail caches under its own key: mask pixel and
+        /// placement swaps miss, the layer's own pixels are not an input
+        /// (and the other way round), `is_enabled` is not an input.
+        #[gpui_kit::test]
+        fn mask_thumbnails_cache_on_their_own_key(cx: &mut TestAppContext) {
+            cx.update(invalidation_counter::install);
+            let (session, panel, id) = panel_with_layer(cx, true);
+            let layer = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &layer, cx);
+                panel.mask_thumbnail_image(&layer, cx);
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 1, 1],
+                "first draw regenerates row and mask"
+            );
+
+            // The layer's pixels swap: the mask thumbnail is unaffected.
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                document.layers[0].asset = Some(ImportedImage::new(
+                    Bitmap::new_clearing(8, 8, [0, 0, 255, 255]),
+                    "L",
+                ));
+            });
+            let swapped_layer = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &swapped_layer, cx);
+                panel.mask_thumbnail_image(&swapped_layer, cx);
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 2, 1],
+                "the mask branch does not read the layer asset"
+            );
+
+            // The mask's pixels swap: the mask thumbnail misses, the row
+            // thumbnail (the layer branch, the mask not selected) hits.
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                let layer = &mut document.layers[0];
+                let mask = layer.mask.as_mut().unwrap();
+                mask.asset = ImportedImage::new(
+                    Bitmap::new_clearing(8, 8, [128, 128, 128, 255]),
+                    "Layer Mask",
+                );
+            });
+            let swapped_mask = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &swapped_mask, cx);
+                panel.mask_thumbnail_image(&swapped_mask, cx);
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 2, 2],
+                "a mask pixel swap misses only the mask cache"
+            );
+
+            // The mask moved apart from its layer: its placement is drawn.
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                let layer = &mut document.layers[0];
+                let mask = layer.mask.as_mut().unwrap();
+                let mut placement = layer.transform;
+                placement.origin.x += 10.0;
+                mask.placement = Some(placement);
+            });
+            let moved_mask = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &moved_mask, cx);
+                panel.mask_thumbnail_image(&moved_mask, cx);
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 2, 3],
+                "a mask placement change misses the mask cache"
+            );
+
+            // Disabling the mask dims the row (outside the image) — the
+            // drawing does not read it, the key must not either.
+            session.update(cx, |session, _| {
+                let document = session.document.as_mut().unwrap();
+                document.layers[0].mask.as_mut().unwrap().is_enabled = false;
+            });
+            let disabled = session.read_with(cx, |session, _| {
+                session.document.as_ref().unwrap().layers[0].clone()
+            });
+            panel.update(cx, |panel, cx| {
+                panel.thumbnail_image(id, &disabled, cx);
+                panel.mask_thumbnail_image(&disabled, cx);
+            });
+            assert_eq!(
+                tally(cx),
+                [0, 0, 0, 2, 3],
+                "is_enabled is not a drawn input"
+            );
+        }
+
+        /// Locks the key's input lists exactly: everything the drawing reads
+        /// changes the key, and the layer fields it does not read (opacity,
+        /// name, visibility, blend mode, the mask as a whole) do not.
+        #[test]
+        fn keys_track_exactly_the_drawn_inputs() {
+            let canvas = (32, 32);
+            let layer = asset_layer([255, 0, 0, 255]);
+            let base = layer_thumbnail_source(&layer, canvas);
+            assert_eq!(base, layer_thumbnail_source(&layer, canvas));
+
+            // Canvas size: the canvas-shaped framing changes.
+            assert_ne!(base, layer_thumbnail_source(&layer, (48, 32)));
+            // Transform: the placement changes.
+            let mut moved = layer.clone();
+            moved.transform.rotation = 90.0;
+            assert_ne!(base, layer_thumbnail_source(&moved, canvas));
+            // Adjustment: applied over the pixels.
+            let mut adjusted = layer.clone();
+            adjusted.adjustment = Some(LayerAdjustment::new(AdjustmentKind::Levels));
+            assert_ne!(base, layer_thumbnail_source(&adjusted, canvas));
+            // Effects: drawn around the pixels (the session normalizes
+            // empty effect sets to nil, so a real kind is the honest shape).
+            let mut effected = layer.clone();
+            effected.effects = Some(LayerEffects {
+                stroke: Some(StrokeEffect::default()),
+                ..Default::default()
+            });
+            assert_ne!(base, layer_thumbnail_source(&effected, canvas));
+            // Not inputs: opacity, name, visibility, blend mode, mask.
+            let mut cosmetic = layer.clone();
+            cosmetic.opacity = 0.5;
+            cosmetic.name = "renamed".into();
+            cosmetic.is_visible = false;
+            cosmetic.blend_mode = compositor_core::blend::LayerBlendMode::Multiply;
+            cosmetic.mask = Some(LayerMask::solid(true));
+            assert_eq!(
+                base,
+                layer_thumbnail_source(&cosmetic, canvas),
+                "the layer branch reads none of the cosmetic fields"
+            );
+
+            // The mask key: placement moves it, the layer transform feeds it
+            // while the mask carries none of its own...
+            let mut masked = layer.clone();
+            masked.mask = Some(LayerMask::solid(true));
+            let mask_base = mask_thumbnail_source(&masked, canvas);
+            assert_eq!(mask_base, mask_thumbnail_source(&masked, canvas));
+            // ...so a LAYER move moves the mask key too (mask_transform
+            // falls back to the layer transform).
+            let mut layer_moved = masked.clone();
+            layer_moved.transform.origin.y += 3.0;
+            assert_ne!(
+                mask_base,
+                mask_thumbnail_source(&layer_moved, canvas),
+                "an unplaced mask draws at the layer's transform"
+            );
+            // The mask key does not read the layer's pixels.
+            let mut swapped = masked.clone();
+            swapped.asset = Some(ImportedImage::new(
+                Bitmap::new_clearing(8, 8, [0, 255, 0, 255]),
+                "L",
+            ));
+            assert_eq!(mask_base, mask_thumbnail_source(&swapped, canvas));
+        }
+
+        /// The key variants never cross: a layer source and a mask source
+        /// for the same layer differ even with identical pointers and
+        /// transform (the map slots are separate, but the value guard holds).
+        #[test]
+        fn layer_and_mask_sources_never_collapse() {
+            let canvas = (32, 32);
+            let mut layer = asset_layer([255, 0, 0, 255]);
+            layer.mask = Some(LayerMask::solid(true));
+            let layer_source = layer_thumbnail_source(&layer, canvas);
+            let mask_source = mask_thumbnail_source(&layer, canvas);
+            assert_ne!(layer_source, mask_source);
+            assert!(matches!(layer_source, ThumbnailSource::Layer { .. }));
+            assert!(matches!(mask_source, ThumbnailSource::Mask { .. }));
+        }
+    }
 
     /// The footer mask button's three retired states (LayerMaskMenu.swift):
     /// no active layer, a layer already carrying a mask, or a session that
