@@ -522,6 +522,26 @@ Option 首个拖动帧经 `begin_duplicate_transform` 转复制拖动
   了。`LayerTransform::rounded` 本身已移植（transform.rs），补一行即可；
   随变换柄接线票一并处理。
 
+## 修复进度（2026-10-11：图层面板行序修复——`hierarchy_entries` 双向反序 bug）
+
+**用户报告**：图层面板顺序与原版相反（原版顶层/新建图层在列表最前，
+底层在最后）。根因在 core `CanvasDocument::hierarchy_entries`
+（`LayerHierarchy.entries` 移植，8fde34f 引入）：栈模拟递归时条目追加
+写在了推栈循环里——循环以 `.rev()` 遍历（为了让 LIFO 栈先访问首个兄
+弟），追加顺序恰好抵消 `top_first` 的反转。后果双向：`top_first=true`
+（面板行序）产出**底→顶**（面板颠倒），`top_first=false`
+（`layer_groups.rs` 重排序辅助「保持相对堆叠」）产出**顶→底**（同样
+反）。`visible_layers` 零消费方、`render_layers` 走独立的
+`visit_depth_first`（顺序正确）——爆炸半径止于面板行序与重排序辅助。
+
+修复 = 弃栈改递归，逐行镜像 Swift `visit(_:)`（emit 后先下潜再下一兄
+弟，含 `guard depth <= 64` 守卫——旧实现缺守卫，一并补齐）。
+`layer_groups.rs:111`（重排序「层次序」输入）随之从错误反序回归数组
+序——全量测试零破坏（重排序断言按面板序约定自洽，未锁该辅助的内部顺
+序）。新增语义测试：平铺反序/组内嵌/折叠省略/`topFirst:false` 数组序/
+深度守卫（65 层截断）。App 侧行注释（native_layer_list.rs「top_first
+reverses siblings」）的等价性声明自此成立。
+
 ## 修复进度（2026-09-27 第二十轮：标尺参考线/像素移动/工具默认值/快捷键设置 UI/测试扩容）
 
 三个方向并行（标尺参考线+PixelMove / ToolDefaults+快捷键设置 UI / 会话测试套件），主线完成接线与收尾。测试 659 → **748** 全绿（core lib 575 + 集成 104 + app lib 69）。

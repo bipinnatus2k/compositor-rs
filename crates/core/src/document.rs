@@ -738,10 +738,12 @@ impl CanvasDocument {
         visible
     }
 
-    /// `LayerHierarchy.entries`: depth-first, parents before children,
-    /// siblings in array order (top first reverses siblings only). Groups list
-    /// even when collapsed; their children are then omitted. An invisible
-    /// folder marks its subtree invisible without hiding the folder itself.
+    /// `LayerHierarchy.entries` (Document/LayerGroups.swift:9-30): depth-first,
+    /// a group's rows directly under it, siblings in array order — or reversed
+    /// when `top_first` (the Layers panel's rows, the document's top-to-bottom).
+    /// Collapsed groups list but omit their children; an invisible folder marks
+    /// its subtree invisible without hiding the folder itself. The recursion
+    /// mirrors Swift's `visit(_:)` including its depth ≤ 64 guard.
     pub fn hierarchy_entries(
         &self,
         top_first: bool,
@@ -753,28 +755,7 @@ impl CanvasDocument {
             children.entry(layer.parent_id).or_default().push(layer);
         }
         let mut out: Vec<HierarchyEntry<'_>> = Vec::new();
-        let mut stack = vec![(None, 0usize, true)];
-        while let Some((parent, depth, visible)) = stack.pop() {
-            let Some(siblings) = children.get(&parent) else {
-                continue;
-            };
-            let mut ordered: Vec<&ImageLayer> = siblings.to_vec();
-            if top_first {
-                ordered.reverse();
-            }
-            // Push in reverse so the first sibling is visited first.
-            for layer in ordered.iter().rev() {
-                let effective = visible && layer.is_visible;
-                out.push(HierarchyEntry {
-                    layer,
-                    depth,
-                    visible: effective,
-                });
-                if layer.is_group && !collapsed.contains(&layer.id) {
-                    stack.push((Some(layer.id), depth + 1, effective));
-                }
-            }
-        }
+        visit_hierarchy(&children, None, 0, true, top_first, collapsed, &mut out);
         out
     }
 
@@ -812,6 +793,53 @@ impl CanvasDocument {
             }
         }
         result
+    }
+}
+
+/// One `visit(_:)` frame of Swift's `LayerHierarchy.entries`
+/// (Document/LayerGroups.swift:16-27): emit the sibling, then descend into
+/// it before the next sibling — the interleaving the former stack emulation
+/// lost (its entries were appended in push order, cancelling `top_first`
+/// and reversing the panel rows).
+fn visit_hierarchy<'a>(
+    children: &std::collections::HashMap<Option<Uuid>, Vec<&'a ImageLayer>>,
+    parent: Option<Uuid>,
+    depth: usize,
+    visible: bool,
+    top_first: bool,
+    collapsed: &std::collections::HashSet<Uuid>,
+    out: &mut Vec<HierarchyEntry<'a>>,
+) {
+    // `guard depth <= 64 else { return }`.
+    if depth > 64 {
+        return;
+    }
+    let Some(siblings) = children.get(&parent) else {
+        return;
+    };
+    let ordered: Vec<&ImageLayer> = if top_first {
+        siblings.iter().rev().copied().collect()
+    } else {
+        siblings.to_vec()
+    };
+    for layer in ordered {
+        let effective = visible && layer.is_visible;
+        out.push(HierarchyEntry {
+            layer,
+            depth,
+            visible: effective,
+        });
+        if layer.is_group && !collapsed.contains(&layer.id) {
+            visit_hierarchy(
+                children,
+                Some(layer.id),
+                depth + 1,
+                effective,
+                top_first,
+                collapsed,
+                out,
+            );
+        }
     }
 }
 
@@ -1050,6 +1078,64 @@ mod tests {
         assert_eq!(ids.len(), 3);
     }
 
+    /// `LayerHierarchy.entries(topFirst: true)` — the Layers panel's rows.
+    /// Document order is bottom-to-top, so the flat rows come out top first;
+    /// a group's children sit directly under it; a collapsed group omits
+    /// them; `topFirst: false` (the reorder helpers) keeps array order.
+    #[test]
+    fn hierarchy_entries_order() {
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut bottom = ImageLayer::blank("Bottom", doc.size());
+        bottom.name = "Bottom".into();
+        let mut group = ImageLayer::blank("Group", doc.size());
+        group.is_group = true;
+        let mut child = ImageLayer::blank("Child", doc.size());
+        child.parent_id = Some(group.id);
+        let top = ImageLayer::blank("Top", doc.size());
+        let group_id = group.id;
+        // Document order (bottom-to-top): Bottom, Group, Child, Top.
+        doc.layers = vec![bottom, group, child, top];
+        let no_collapse = std::collections::HashSet::new();
+
+        let names = |entries: Vec<crate::document::HierarchyEntry>| -> Vec<String> {
+            entries.iter().map(|e| e.layer.name.clone()).collect()
+        };
+        // Panel order (top first): Top, then the group with its child under
+        // it, then the bottom layer.
+        assert_eq!(
+            names(doc.hierarchy_entries(true, &no_collapse)),
+            ["Top", "Group", "Child", "Bottom"]
+        );
+        // Array order (top_first false — the reorder helpers' semantics).
+        assert_eq!(
+            names(doc.hierarchy_entries(false, &no_collapse)),
+            ["Bottom", "Group", "Child", "Top"]
+        );
+        // A collapsed group lists itself only.
+        let collapsed: std::collections::HashSet<Uuid> = [group_id].into_iter().collect();
+        assert_eq!(
+            names(doc.hierarchy_entries(true, &collapsed)),
+            ["Top", "Group", "Bottom"]
+        );
+    }
+
+    /// The recursion's depth guard (`guard depth <= 64`): a chain deeper
+    /// than 64 stops growing rows instead of recursing without bound.
+    #[test]
+    fn hierarchy_entries_depth_guard() {
+        let mut doc = CanvasDocument::new(10, 10);
+        let mut parent: Option<Uuid> = None;
+        for index in 0..70 {
+            let mut layer = ImageLayer::blank(format!("L{index}"), doc.size());
+            layer.is_group = true;
+            layer.parent_id = parent;
+            parent = Some(layer.id);
+            doc.layers.push(layer);
+        }
+        // Rows 0…64 emit (65 entries); the 65th nesting level is refused.
+        assert_eq!(doc.hierarchy_entries(false, &Default::default()).len(), 65);
+    }
+
     #[test]
     fn layer_mask_placement_logic() {
         let mut layer = ImageLayer::blank("L", CGSize::new(100.0, 100.0));
@@ -1088,8 +1174,10 @@ mod tests {
         let style = LayerTextStyle::default();
         assert!(style.is_valid());
         assert_eq!(style.line_height(), 72.0 * 1.2);
-        let mut big = LayerTextStyle::default();
-        big.font_size = 5000.0;
+        let big = LayerTextStyle {
+            font_size: 5000.0,
+            ..LayerTextStyle::default()
+        };
         assert!(!big.is_valid());
     }
 
