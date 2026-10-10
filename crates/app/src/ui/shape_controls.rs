@@ -15,8 +15,8 @@ use crate::ui::{Dropdown, app_dispatch, text_label};
 /// The shape tool's option bar (`ShapeControls.swift`): a view entity since
 /// ticket 42. It carries no widget state of its own (Swift's bar is
 /// `@Bindable session` only); only in the render tree while the shape tool
-/// is active, so it keeps no session observer, and its session field is
-/// re-pointed on tab changes by [`ProjectWorkspaceView::sync_session_observer`].
+/// is active, so it keeps no session observer — the per-tab `ContentView`
+/// rebuild hands it the fresh session at construction (ticket 43).
 pub struct ShapeControlsView {
     /// The active tab's session — the kind readout speaks to it directly.
     session: Entity<EditorSession>,

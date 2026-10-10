@@ -76,6 +76,33 @@ session/文档镜像不再有第二个名字。
 `cargo clippy --all --all-targets` 退出码 0 且 app crate 零警告；
 boot smoke 通过（窗口开启、渲染、存活）。
 
+**合并双轴 review 补课（41+42+43，2026-10-10；零硬违规，五项披露）**：
+
+1. **MenuBar 保持吃活动 session**（票 43 票面原写「改吃 workspace
+   实体」）——裁定为更优镜像：Swift `.commands` 的
+   `applicationDelegate.session = workspace.current.session`
+   （CompositorApp.swift:7）就是每帧解析的计算属性，根渲染期解析同构；
+   票面文字过度指定，按实现修正记录。
+2. **ui.rs 六适配器为「改名终形」**：`WeakEntity<AppState>` →
+   `WeakEntity<ProjectWorkspaceView>` 签名同形重写后，适配器已是普通
+   的根视图父回调（组件上报突变的合法形态），过渡缝语义终结；ADR 0003
+   后果段「退役」措辞按此解释，44 号票 ADR 定稿时统一。
+3. **sync_content 亚帧窗口（低危留档）**：切 tab 突变与下一帧渲染之间
+   派发的事件仍路由到将死的旧 ContentView 子实体（如把新 tab 的数值
+   写进旧滑杆——即弃实体、化妆性）；`can_switch` 覆盖交互态但不覆盖此
+   亚帧窗。44 定稿时评估是否加 selected_id 门。
+4. **行为变化（朝 parity，review 追认）**：滑杆/输入框 seeding 从
+   「实体持久 + `set_session` 不重播」（过渡期偏差——切 tab 后滑杆显示
+   旧 tab 值）变为「随 ContentView 每 tab 重建重播」（ToolDefaults 于
+   `ProjectTab::new` 先应用，范围与次序逐字同旧构造）；状态条文案随切
+   tab 重置。两者均为 Swift `.id` 重建的真实语义。
+5. **三面板 `session` 死字段豁免理由刷新**（levels/hue_saturation/
+   filter，41 落地时写「留待 43 重建」）：43 后面板留根、字段确无读取
+   点，注释改为「house 视图实体惯例保持 + 44 清理候选」；同批修正
+   shape_controls/levels_sheet 两处指向已退役 `sync_session_observer`
+   的失效 doc 链接，及票 41 落地记录的「search 随迁」失实（Swift
+   `@State search` 在 Rust 移植中本无对应物）。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 42——工具头族 / welcome / status 实体化）
 
 工具头族、welcome 表单与状态条从 AppState 字段 + 方法族改为独立 view

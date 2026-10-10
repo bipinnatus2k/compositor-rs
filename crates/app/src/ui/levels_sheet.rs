@@ -45,12 +45,14 @@ pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
 /// stay on the shell. The entity exists exactly while the panel is open —
 /// created by `ProjectWorkspaceView::open_levels_panel`, dropped on close — so its
 /// session can never go stale (tab switches are blocked while any panel is
-/// open, and `sync_session_observer` does not observe panels).
+/// open, and the root's workspace observation does not reach panels).
 pub struct LevelsPanelView {
     /// The session the panel opened on. Unread today — the handlers funnel
-    /// through the shell seam, and tab switches are blocked while a panel
-    /// is open so it can never go stale; kept for ticket 43's per-tab
-    /// rebuild.
+    /// through the shell seam, and the panel's lifetime sits inside one
+    /// modal session (tab switches blocked) so it can never go stale.
+    /// Carried for the house view-entity convention (every view holds its
+    /// session; the views that read it do); removal is a ticket-44 cleanup
+    /// candidate.
     #[allow(dead_code)]
     session: Entity<EditorSession>,
     /// The root view (the window shell): the preview recomputes and

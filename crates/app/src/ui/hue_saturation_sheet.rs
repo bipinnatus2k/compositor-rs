@@ -32,9 +32,10 @@ use crate::ui::sheets::panel_value;
 /// can never go stale (tab switches are blocked while any panel is open).
 pub struct HueSaturationPanelView {
     /// The session this panel edits. Unread today — every interaction
-    /// funnels through the shell seam, and tab switches are blocked while a
-    /// panel is open so it can never go stale; kept for ticket 43's per-tab
-    /// rebuild.
+    /// funnels through the shell seam, and the panel's lifetime sits inside
+    /// one modal session (tab switches blocked) so it can never go stale.
+    /// Carried for the house view-entity convention; removal is a ticket-44
+    /// cleanup candidate.
     #[allow(dead_code)]
     session: Entity<EditorSession>,
     /// The root view (the window shell): the preview recompute and
