@@ -32,8 +32,8 @@ use compositor_core::document::{PaletteColor, PickerHSB};
 use compositor_core::session::{ColorPickerTarget, EditorSession};
 
 use crate::state::ProjectWorkspaceView;
-use crate::ui::floating_panel::{panel_on_click, panel_on_drag_move, panel_on_press};
-use crate::ui::{ClickHandler, DragMoveHandler, PressHandler, text_label};
+use crate::ui::floating_panel::{panel_on_drag_move, panel_on_press};
+use crate::ui::{ClickHandler, DragMoveHandler, PressHandler, app_on_click, text_label};
 
 /// `fieldSize` (ColorPickerSheet.swift): the SV field's edge and the hue
 /// strip's length, in points.
@@ -190,15 +190,6 @@ impl ColorPickerPanelView {
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.touch(cx)).ok();
     }
-
-    /// OK/Cancel (ColorPickerSheet.swift:24-27): the shell's commit/close
-    /// flow reads the hex field first, then the session writes (or drops)
-    /// the color.
-    fn close(&mut self, commit: bool, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.close_color_picker_ui(commit, cx))
-            .ok();
-    }
 }
 
 impl Render for ColorPickerPanelView {
@@ -235,11 +226,11 @@ impl Render for ColorPickerPanelView {
                     panel.hue_drag(event.position, window, cx);
                 })),
         )
-        .with_on_ok(panel_on_click(&this, |panel, _, _, cx| {
-            panel.close(true, cx)
+        .with_on_ok(app_on_click(&self.app, |root, _, _, cx| {
+            root.close_color_picker_ui(true, cx)
         }))
-        .with_on_cancel(panel_on_click(&this, |panel, _, _, cx| {
-            panel.close(false, cx)
+        .with_on_cancel(app_on_click(&self.app, |root, _, _, cx| {
+            root.close_color_picker_ui(false, cx)
         }))
         .into_any_element()
     }

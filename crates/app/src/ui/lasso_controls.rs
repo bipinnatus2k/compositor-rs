@@ -124,26 +124,10 @@ impl AmountPanelView {
         )
         .is_some()
     }
-
-    /// The panel's commit/cancel routes: the footer's OK/Cancel are
-    /// panel-entity callbacks that reach the shell's pipelines through the
-    /// seam (ticket 41's ruling 4).
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.cancel_amount_panel(cx))
-            .ok();
-    }
-
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.confirm_amount_panel(cx))
-            .ok();
-    }
 }
 
 impl Render for AmountPanelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.entity().downgrade();
         let maximum = amount_maximum(self.operation);
         let cx_app: &gpui_kit::App = cx;
         let valid = self.input_valid(cx_app);
@@ -174,10 +158,10 @@ impl Render for AmountPanelView {
         };
         let footer = panel_footer(
             panel_names::SELECTION_AMOUNT_PANEL,
-            &this,
+            &self.app,
             !valid,
-            |panel, _, cx| panel.cancel(cx),
-            |panel, _, cx| panel.confirm(cx),
+            |root, _, cx| root.cancel_amount_panel(cx),
+            |root, _, cx| root.confirm_amount_panel(cx),
         );
         panel_body_frame(body.into_any_element(), footer)
     }

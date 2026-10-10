@@ -131,6 +131,21 @@ boot smoke 通过（窗口开启、渲染、存活）。
 
 **合并双轴 review 补课（41+42+43，2026-10-10；零硬违规，五项披露）**：
 
+**面板双租约崩溃修复（2026-10-11，用户报告）**：票 41 实体化后，面板
+实体的回调（曲线拖拽、滑杆事件——运行在面板租约内）经缝调用根的
+`apply_filter_preview`，根又经 `filter_seed_from_panel` 读回同一
+FilterPanelView → gpui 双租约 panic（拖曲线点即崩）。同族审计发现另三
+处潜伏：filter/amount 页脚 OK 的 `filter_view()`/`amount_view()` 读、
+picker 页脚 OK 的 hex 读（页脚原为面板实体回调）。修复 = 两条机制：
+①面板租约内必经的管线改**传值**——`apply_filter_preview` 增加 `seed`
+参数（面板自带），`filter_seed_from_panel` 注明仅限根起点流程；②触发
+根读面板的控件改**根分发**——`panel_footer` 的 OK/Cancel 改经根句柄
+裸闭包（根上下文无面板租约，页脚读面板合法），六个面板侧转发器删除，
+picker 页脚同改。重入规则沉淀进 ADR 0003 偏差记录；三个回归测试锁在
+`state.rs::panel_reentrancy_tests`（面板内重入 apply ×2 + 根 ctx
+confirm）。`apply_camera_raw_auto_white_balance` 的零调用者为 41 前
+既有缺口（按钮从未接线），非本系列回归，留档。
+
 1. **MenuBar 保持吃活动 session**（票 43 票面原写「改吃 workspace
    实体」）——裁定为更优镜像：Swift `.commands` 的
    `applicationDelegate.session = workspace.current.session`

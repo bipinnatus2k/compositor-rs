@@ -1305,7 +1305,12 @@ impl ProjectWorkspaceView {
     }
 
     /// The open filter panel's noise seed (`FilterEdit.seed`, drawn at
-    /// panel open); a fresh seed when no panel is open.
+    /// panel open); a fresh seed when no panel is open. **Only call from a
+    /// context where the panel entity is not being updated** — the shell's
+    /// own flows (the canvas defringe sample, Auto white balance). The
+    /// panel's own sliders and curve drags pass `FilterPanelView::seed`
+    /// through the seam instead (reading the panel from inside its update
+    /// double-leases it).
     pub(crate) fn filter_seed_from_panel(&self, cx: &App) -> u32 {
         match self
             .panel_views
@@ -1317,10 +1322,17 @@ impl ProjectWorkspaceView {
     }
 
     /// Runs `filter` over the preview base and shows it live on canvas.
+    /// `seed` is the panel's open-time noise seed (`FilterEdit.seed`,
+    /// Filters.swift:223) — passed in, never read back from the panel here:
+    /// this pipeline runs inside the filter panel's own entity update when
+    /// its sliders and curve drags call it, and reading the panel entity
+    /// then would double-lease it (the panel hands its values over; the
+    /// shell reads the panel only from root-originated contexts).
     pub fn apply_filter_preview(
         &mut self,
         kind: FilterKind,
         settings: FilterSettings,
+        seed: u32,
         cx: &mut Context<Self>,
     ) {
         // Editing an adjustment layer: the settings go to the session's
@@ -1348,10 +1360,7 @@ impl ProjectWorkspaceView {
         let selection = self.selection_clip(cx);
         let job = FilterJob::builder(kind, &base, settings)
             .with_selection(selection)
-            // The seed was drawn when the panel opened and is reused for the
-            // committed pixels, so the preview is exactly what lands
-            // (FilterEdit.seed, Filters.swift:223).
-            .with_seed(self.filter_seed_from_panel(cx))
+            .with_seed(seed)
             .build();
         let result = compositor_core::filters::run_filter(&job);
         self.preview = Some(Arc::new(result));
@@ -1382,7 +1391,9 @@ impl ProjectWorkspaceView {
             hue,
         );
         self.camera_raw_samples_defringe = false;
-        self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
+        // Root context (the canvas click): reading the panel here is legal.
+        let seed = self.filter_seed_from_panel(cx);
+        self.apply_filter_preview(FilterKind::CameraRaw, settings, seed, cx);
     }
 
     /// `updateCameraRawReadout` — the RGB under the pointer; outside the
@@ -1428,7 +1439,8 @@ impl ProjectWorkspaceView {
             settings.camera_raw.temperature = temperature;
             settings.camera_raw.tint = tint;
         }
-        self.apply_filter_preview(FilterKind::CameraRaw, settings, cx);
+        let seed = self.filter_seed_from_panel(cx);
+        self.apply_filter_preview(FilterKind::CameraRaw, settings, seed, cx);
     }
 
     // MARK: Keys
@@ -2008,6 +2020,130 @@ mod tests {
                 [1, 1, 1, 1, 0],
                 "undo: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
             );
+        }
+    }
+
+    /// The panel double-lease rule (the crash a curves drag exposed): a
+    /// panel-entity callback may not re-enter the shell for a read of the
+    /// same panel — the shell reads a panel only where no lease on it is
+    /// held (root-originated flows), and the panel's own update hands its
+    /// values over through the seam.
+    #[cfg(test)]
+    mod panel_reentrancy_tests {
+        use super::super::ProjectWorkspaceView;
+        use crate::ui::floating_panel::{PanelContent, panel_names};
+        use compositor_core::filters::FilterKind;
+        use compositor_core::raster::ImportedImage;
+        use gpui_kit::{
+            AppContext as _, Bounds, Entity, TestAppContext, VisualTestContext, WindowBounds,
+            WindowOptions,
+        };
+
+        /// The production window the re-entrancy scenarios run in.
+        fn open_scenario_window(
+            cx: &mut TestAppContext,
+        ) -> (Entity<ProjectWorkspaceView>, VisualTestContext) {
+            cx.update(gpui_kit::init);
+            let (window, root) = cx.update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::maximized(None, cx))),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| cx.new(|cx| ProjectWorkspaceView::new(window, cx)),
+                )
+                .expect("open the scenario window")
+            });
+            (root, VisualTestContext::from_window(window, cx))
+        }
+
+        /// A document with one image layer, so `begin_preview` has pixels to
+        /// capture when the filter panel opens.
+        fn open_filter_panel(
+            root: &Entity<ProjectWorkspaceView>,
+            kind: FilterKind,
+            cx: &mut VisualTestContext,
+        ) {
+            root.update(cx, |root, cx| {
+                root.workspace.update(cx, |workspace, cx| {
+                    workspace.current_mut().session.update(cx, |session, _| {
+                        session.create_document(64, 64, true);
+                        session.insert_image(
+                            ImportedImage::new(
+                                compositor_core::raster::Bitmap::new_clearing(
+                                    64,
+                                    64,
+                                    [40, 60, 200, 255],
+                                ),
+                                "L",
+                            ),
+                            None,
+                        );
+                    })
+                });
+                root.open_filter_panel(kind, cx);
+            });
+        }
+
+        fn filter_panel(
+            root: &Entity<ProjectWorkspaceView>,
+            cx: &VisualTestContext,
+        ) -> Entity<crate::ui::filter_sheet::FilterPanelView> {
+            root.read_with(cx, |root, _| {
+                match root.panel_views.get(panel_names::FILTER_PANEL) {
+                    Some(PanelContent::Filter(panel)) => panel.clone(),
+                    _ => panic!("the filter panel is not open"),
+                }
+            })
+        }
+
+        /// The curves drag's re-entrant path (the reported crash): the panel
+        /// computes its settings and hands them — with its seed — across the
+        /// seam, so the shell's preview pipeline never reads the panel from
+        /// inside the panel's own update.
+        #[gpui_kit::test]
+        fn curves_preview_reentry_from_the_panel_does_not_double_lease(cx: &mut TestAppContext) {
+            let (root, mut cx) = open_scenario_window(cx);
+            open_filter_panel(&root, FilterKind::Curves, &mut cx);
+            let panel = filter_panel(&root, &cx);
+            panel.update(&mut cx, |panel, cx| panel.apply_curves_preview(cx));
+            cx.update(|_, cx| {
+                let root = root.read(cx);
+                assert!(
+                    root.preview.is_some(),
+                    "the curves preview ran through the seam"
+                );
+            });
+        }
+
+        /// A filter slider's re-entrant path, same seam shape as the drag.
+        #[gpui_kit::test]
+        fn filter_slider_reentry_from_the_panel_does_not_double_lease(cx: &mut TestAppContext) {
+            let (root, mut cx) = open_scenario_window(cx);
+            open_filter_panel(&root, FilterKind::GaussianBlur, &mut cx);
+            let panel = filter_panel(&root, &cx);
+            panel.update(&mut cx, |panel, cx| panel.slider_changed(12.0, cx));
+            cx.update(|_, cx| {
+                let root = root.read(cx);
+                assert!(root.preview.is_some(), "the slider preview ran");
+            });
+        }
+
+        /// The footer's OK dispatches through the root (no panel lease), so
+        /// the shell's confirm reads the panel's live kind label legally.
+        #[gpui_kit::test]
+        fn filter_confirm_from_the_root_context_reads_the_panel(cx: &mut TestAppContext) {
+            let (root, mut cx) = open_scenario_window(cx);
+            open_filter_panel(&root, FilterKind::GaussianBlur, &mut cx);
+            root.update(&mut cx, |root, cx| root.confirm_filter_panel(cx));
+            cx.update(|_, cx| {
+                let root = root.read(cx);
+                assert!(
+                    !root.panel_views.contains_key(panel_names::FILTER_PANEL),
+                    "the confirm closed the panel"
+                );
+            });
         }
     }
 }

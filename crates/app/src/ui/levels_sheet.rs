@@ -207,21 +207,6 @@ impl LevelsPanelView {
         }
         self.slider_changed(values[0], cx);
     }
-
-    /// The panel's commit/cancel routes: the footer's OK/Cancel are
-    /// panel-entity callbacks that reach the shell's pipelines through the
-    /// seam (ticket 41's ruling 4).
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.cancel_levels_panel(cx))
-            .ok();
-    }
-
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.confirm_levels_panel(cx))
-            .ok();
-    }
 }
 
 impl Render for LevelsPanelView {
@@ -343,10 +328,10 @@ impl Render for LevelsPanelView {
             .into_any_element();
         let footer = panel_footer(
             panel_names::LEVELS_PANEL,
-            &this,
+            &self.app,
             false,
-            |panel, _, cx| panel.cancel(cx),
-            |panel, _, cx| panel.confirm(cx),
+            |root, _, cx| root.cancel_levels_panel(cx),
+            |root, _, cx| root.confirm_levels_panel(cx),
         );
         panel_body_frame(body, footer)
     }

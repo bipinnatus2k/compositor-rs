@@ -124,21 +124,6 @@ impl HueSaturationPanelView {
             .update(cx, |app, cx| app.apply_hue_saturation_preview(settings, cx))
             .ok();
     }
-
-    /// The panel's commit/cancel routes: the footer's OK/Cancel are
-    /// panel-entity callbacks that reach the shell's pipelines through the
-    /// seam (ticket 41's ruling 4).
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.cancel_hue_saturation_panel(cx))
-            .ok();
-    }
-
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.confirm_hue_saturation_panel(cx))
-            .ok();
-    }
 }
 
 impl Render for HueSaturationPanelView {
@@ -174,10 +159,10 @@ impl Render for HueSaturationPanelView {
                 .into_any_element();
         let footer = panel_footer(
             panel_names::ADJUSTMENT_PANEL,
-            &this,
+            &self.app,
             false,
-            |panel, _, cx| panel.cancel(cx),
-            |panel, _, cx| panel.confirm(cx),
+            |root, _, cx| root.cancel_hue_saturation_panel(cx),
+            |root, _, cx| root.confirm_hue_saturation_panel(cx),
         );
         panel_body_frame(body, footer)
     }

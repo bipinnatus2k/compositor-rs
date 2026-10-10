@@ -138,6 +138,13 @@ parked 的 37 号票（history/对话框拆实体）卡在一个死结：单 Ren
   - **sync_content 亚帧窗口**（review 披露 ⑧，低危留档）：切 tab 突变
     与下一帧渲染之间派发的事件仍路由到将死的旧 ContentView 子实体
     （化妆性）；`can_switch` 覆盖交互态但不覆盖此亚帧窗。
+  - **面板重入规则（2026-10-11 崩溃修复沉淀，长期约束）**：面板实体的
+    回调（`cx.listener`/`panel_on*`，运行在面板租约内）不得让根再读/更
+    新同一面板实体——gpui 双租约即 panic。两条合法出路：面板把值经缝
+    传过去（filter 的 settings+seed），或控件改经根句柄裸闭包分发
+    （`app_on_click`，根上下文无面板租约，根侧读面板合法）。页脚
+    OK/Cancel 已定为根分发（`panel_footer`），回归测试锁在
+    `state.rs::panel_reentrancy_tests`。
   - **窗口级留根项**：模态 sheet 宿主、面板宿主 + panel_views、帧缓存、
     preview 族、pending_save/delete_ask_ids、~130 on_action 注册与流
     方法（Swift 对应物散布在 .commands/ContentView @State/对话框对象，

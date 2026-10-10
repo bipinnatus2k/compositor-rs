@@ -149,9 +149,13 @@ impl FilterPanelView {
             settings.curves = editor.settings.clone();
         }
         let kind = compositor_core::filters::FilterKind::Curves;
+        // The seed rides the seam as a value: this runs inside this panel's
+        // own update, and the shell reading the panel back would
+        // double-lease it.
+        let seed = self.seed;
         self.app
             .update(cx, |app, cx| {
-                app.apply_filter_preview(kind, settings, cx);
+                app.apply_filter_preview(kind, settings, seed, cx);
                 app.touch(cx);
             })
             .ok();

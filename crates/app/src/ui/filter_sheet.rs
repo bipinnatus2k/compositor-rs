@@ -65,7 +65,9 @@ pub struct FilterPanelView {
     /// The noise seed drawn when the panel opened: fixed for the session so
     /// changing Amount doesn't reshuffle the pattern, shared by the preview
     /// and the committed pixels (FilterEdit.seed, Filters.swift:223).
-    seed: u32,
+    /// `pub(crate)`: the curves gesture impl block lives in
+    /// curves_controls.rs and passes it through the seam with the settings.
+    pub(crate) seed: u32,
     subscriptions: Vec<Subscription>,
 }
 
@@ -166,13 +168,18 @@ impl FilterPanelView {
     /// A slider moved (or a noise checkbox flipped): the shell recomputes
     /// the live preview from this panel's settings (`apply_slider`'s filter
     /// and CameraRaw branches, `refresh_filter_preview` — one path, since
-    /// the old tails agreed).
-    fn slider_changed(&mut self, _value: f32, cx: &mut Context<Self>) {
+    /// the old tails agreed). `pub(crate)`: the re-entrancy regression test
+    /// drives it directly (state.rs's panel_reentrancy_tests).
+    pub(crate) fn slider_changed(&mut self, _value: f32, cx: &mut Context<Self>) {
         let kind = self.kind;
         let settings = self.filter_settings(cx);
+        // The seed rides the seam as a value: this runs inside this panel's
+        // own update (the shell reading the panel back would double-lease
+        // it).
+        let seed = self.seed;
         self.app
             .update(cx, |app, cx| {
-                app.apply_filter_preview(kind, settings, cx);
+                app.apply_filter_preview(kind, settings, seed, cx);
                 app.touch(cx);
             })
             .ok();
@@ -230,21 +237,6 @@ impl FilterPanelView {
     /// The open filter's label, for the commit's undo name.
     pub(crate) fn kind_label(&self) -> &'static str {
         self.kind.label()
-    }
-
-    /// The panel's commit/cancel routes: the footer's OK/Cancel are
-    /// panel-entity callbacks that reach the shell's pipelines through the
-    /// seam (ticket 41's ruling 4).
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.cancel_filter_panel(cx))
-            .ok();
-    }
-
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.confirm_filter_panel(cx))
-            .ok();
     }
 }
 
@@ -471,10 +463,10 @@ impl Render for FilterPanelView {
         }
         let footer = panel_footer(
             panel_names::FILTER_PANEL,
-            &this,
+            &self.app,
             false,
-            |panel, _, cx| panel.cancel(cx),
-            |panel, _, cx| panel.confirm(cx),
+            |root, _, cx| root.cancel_filter_panel(cx),
+            |root, _, cx| root.confirm_filter_panel(cx),
         );
         panel_body_frame(body.into_any_element(), footer)
     }

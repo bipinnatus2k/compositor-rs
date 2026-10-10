@@ -320,21 +320,6 @@ impl EffectsPanelView {
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.touch(cx)).ok();
     }
-
-    /// The panel's commit/cancel routes: the footer's OK/Cancel are
-    /// panel-entity callbacks that reach the shell's pipelines through the
-    /// seam (ticket 41's ruling 4).
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.cancel_effects_panel(cx))
-            .ok();
-    }
-
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |app, cx| app.confirm_effects_panel(cx))
-            .ok();
-    }
 }
 
 impl Render for EffectsPanelView {
@@ -460,10 +445,10 @@ impl Render for EffectsPanelView {
         }
         let footer = panel_footer(
             panel_names::EFFECTS_PANEL,
-            &this,
+            &self.app,
             false,
-            |panel, _, cx| panel.cancel(cx),
-            |panel, _, cx| panel.confirm(cx),
+            |root, _, cx| root.cancel_effects_panel(cx),
+            |root, _, cx| root.confirm_effects_panel(cx),
         );
         panel_body_frame(body.into_any_element(), footer)
     }

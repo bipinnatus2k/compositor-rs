@@ -1117,21 +1117,30 @@ impl RenderOnce for PanelFooter {
 
 /// The Cancel/OK footer a panel view renders below its body (Swift's
 /// `HStack { Cancel; Spacer; OK }`): OK runs the commit branch, Cancel —
-/// like the ✕ — the cancel branch, both as panel-entity callbacks that route
-/// to the shell's pipelines through the panel's seam (ticket 41).
-pub(crate) fn panel_footer<E: 'static>(
+/// like the ✕ — the cancel branch. Both dispatch through the ROOT handle,
+/// not the panel's: the shell's confirm/cancel pipelines read the open
+/// panel's live values (the filter's settings and seed, the amount, the
+/// picker's hex), and a footer handler running inside the panel's own
+/// entity update would double-lease the panel when the shell reads it back
+/// (the crash the curves drag exposed). A plain root-dispatched closure
+/// runs in the root's context with no panel lease, so those reads are
+/// legal — the re-entrancy rule: a panel-entity callback may not re-enter
+/// the shell for a read of the same panel; hand values over or dispatch
+/// through the root.
+pub(crate) fn panel_footer(
     name: &'static str,
-    panel: &WeakEntity<E>,
+    root: &WeakEntity<ProjectWorkspaceView>,
     ok_disabled: bool,
-    on_cancel: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
-    on_ok: impl Fn(&mut E, &mut Window, &mut Context<E>) + 'static,
+    on_cancel: impl Fn(&mut ProjectWorkspaceView, &mut Window, &mut Context<ProjectWorkspaceView>)
+    + 'static,
+    on_ok: impl Fn(&mut ProjectWorkspaceView, &mut Window, &mut Context<ProjectWorkspaceView>) + 'static,
 ) -> PanelFooter {
     PanelFooter::new(name, ok_disabled)
-        .with_on_cancel(panel_on_click(panel, move |panel, _, window, cx| {
-            on_cancel(panel, window, cx)
+        .with_on_cancel(crate::ui::app_on_click(root, move |root, _, window, cx| {
+            on_cancel(root, window, cx)
         }))
-        .with_on_ok(panel_on_click(panel, move |panel, _, window, cx| {
-            on_ok(panel, window, cx)
+        .with_on_ok(crate::ui::app_on_click(root, move |root, _, window, cx| {
+            on_ok(root, window, cx)
         }))
 }
 
