@@ -5,10 +5,10 @@ use gpui_kit::component::input::Input;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, px};
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on};
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The Trim sheet's body: the Based On dropdown, the four side
     /// checkboxes and the tolerance field.
     pub(crate) fn trim_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -97,7 +97,8 @@ impl AppState {
 /// One side checkbox's write-back: only that side's flag flips.
 fn make_side_handler(
     index: usize,
-) -> impl Fn(&mut AppState, bool, &mut Window, &mut Context<AppState>) + 'static {
+) -> impl Fn(&mut ProjectWorkspaceView, bool, &mut Window, &mut Context<ProjectWorkspaceView>) + 'static
+{
     move |state, checked, _, cx| {
         if let Some(sheet) = state.sheet.as_mut() {
             sheet.sides[index] = checked;

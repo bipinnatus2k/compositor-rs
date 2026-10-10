@@ -10,10 +10,10 @@ use gpui_kit::{
 };
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::{AppCallback, LabeledCheckbox, app_on};
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The Canvas Size sheet's body: width/height fields, the Relative
     /// checkbox and the anchor grid (which corner grows toward).
     pub(crate) fn canvas_size_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {

@@ -26,7 +26,7 @@ use gpui_kit::{
     RenderOnce, SharedString, Styled, WeakEntity, Window, anchored, canvas, div, point, px,
 };
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::{
     AppCallback, ClickHandler, DragMoveHandler, DragUpHandler, PressHandler, text_label,
 };
@@ -850,11 +850,14 @@ pub(crate) fn panel_on_drag_up<E: 'static>(
     })
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     // MARK: Opening
     /// Keeps the workspace's tab-switch guard in step with the panel stack.
-    pub(crate) fn sync_panel_guard(&mut self) {
-        self.workspace.ui_panels_open = !self.panels.open_panels().is_empty();
+    /// The workspace is an entity (ticket 43), so the flag write goes
+    /// through its update.
+    pub(crate) fn sync_panel_guard(&mut self, cx: &mut Context<Self>) {
+        let open = !self.panels.open_panels().is_empty();
+        self.workspace.update(cx, |ws, _| ws.ui_panels_open = open);
     }
 
     /// The title-bar ✕ and Esc route here (`onClose` semantics = Cancel).
@@ -910,7 +913,7 @@ impl AppState {
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -1008,14 +1011,15 @@ impl AppState {
         // impl covers the body and the footer.
         let content = self.panel_views.get(name)?.element();
 
-        let on_close =
-            move |state: &mut AppState, _window: &mut Window, cx: &mut Context<AppState>| {
-                state.cancel_panel(name, cx);
-            };
-        let on_moved = move |state: &mut AppState,
+        let on_close = move |state: &mut ProjectWorkspaceView,
+                             _window: &mut Window,
+                             cx: &mut Context<ProjectWorkspaceView>| {
+            state.cancel_panel(name, cx);
+        };
+        let on_moved = move |state: &mut ProjectWorkspaceView,
                              position: Point<Pixels>,
                              _window: &mut Window,
-                             cx: &mut Context<AppState>| {
+                             cx: &mut Context<ProjectWorkspaceView>| {
             state
                 .panels
                 .remember_position(name, f32::from(position.x), f32::from(position.y));
@@ -1034,7 +1038,11 @@ impl AppState {
     /// (canvas view state since ticket 39); before the first layout pass it
     /// falls back to the window's center.
     fn panel_canvas_center(&self, window: &mut Window, cx: &App) -> (f32, f32) {
-        let canvas_bounds = self.canvas_view.read(cx).canvas_bounds;
+        let canvas_bounds = self
+            .content
+            .as_ref()
+            .map(|content| content.read(cx).canvas_view.read(cx).canvas_bounds)
+            .unwrap_or_default();
         let (w, h) = (
             f32::from(canvas_bounds.size.width),
             f32::from(canvas_bounds.size.height),

@@ -6,9 +6,10 @@
 //! ticket 39): one `EditorCanvasView` entity per window holds the gesture
 //! state machines and the inline text editor, exactly where the Swift NSView
 //! keeps its plain private vars (EditorCanvas.swift:35-97). The window shell
-//! (`AppState`, the transitional root) keeps the commit/preview/status
+//! (`ProjectWorkspaceView`) keeps the commit/preview/status
 //! pipelines and the frame cache; the canvas reaches them through its
-//! `app: WeakEntity<AppState>` seam until tickets 40/43 reshape it.
+//! `app: WeakEntity<ProjectWorkspaceView>` seam (renamed with the root,
+//! ticket 43).
 
 use std::sync::Arc;
 
@@ -38,11 +39,11 @@ use crate::canvas::inline_text_editor::{
     inline_text_box, inline_text_box_corners, inline_text_key, inline_text_measured_size,
     inline_text_overflows, inline_text_resize,
 };
-use crate::state::{AppState, RULER_SIZE};
+use crate::state::{ProjectWorkspaceView, RULER_SIZE};
 
 /// What the pointer is currently doing on the canvas. Canvas-private state,
-/// mirroring `CanvasView`'s plain private drag vars (they die with the view;
-/// the per-tab rebuild lands with ticket 43).
+/// mirroring `CanvasView`'s plain private drag vars (they die with the
+/// view, which the per-tab rebuild replaces — ticket 43).
 pub(crate) enum CanvasDrag {
     /// Hand tool or middle-mouse panning. `last` is the previous event
     /// position: each move translates the session viewport by the delta
@@ -97,7 +98,7 @@ pub(crate) enum CanvasDrag {
 }
 
 /// The canvas-side gesture snapshot the app-side preview pipeline reads
-/// while compositing the displayed frame ([`AppState::composite`]'s drag
+/// while compositing the displayed frame ([`ProjectWorkspaceView::composite`]'s drag
 /// branches; borrowed per frame — the drag itself never leaves the canvas
 /// entity, ticket 39's field audit).
 #[derive(Clone, Copy)]
@@ -142,18 +143,18 @@ pub struct CanvasScene {
 
 /// The canvas view (`CanvasView`): paints the document and owns every
 /// pointer/keyboard gesture with it, plus the inline text editor overlay.
-/// Created by `AppState::new`; its `session` field is re-pointed on tab
-/// changes by `AppState::sync_session_observer` (the per-tab rebuild lands
-/// with ticket 43).
+/// Created by the per-tab content build (`ContentView::new`, ticket 43);
+/// a tab switch rebuilds the whole content, so the canvas's session and
+/// drag state are always the active tab's.
 pub struct EditorCanvasView {
     /// The active tab's session — the view transform, the document and the
     /// gesture state machines all read and write it (Swift `CanvasView`
     /// holds its session reference the same way).
     pub(crate) session: Entity<EditorSession>,
-    /// The window shell (the transitional root): commit/preview/status
+    /// The root view (the window shell): commit/preview/status
     /// pipelines and the frame cache stay there (ADR 0003 step B). No
-    /// AppState dependencies beyond what the moved handlers already used.
-    pub(crate) app: WeakEntity<AppState>,
+    /// ProjectWorkspaceView dependencies beyond what the moved handlers already used.
+    pub(crate) app: WeakEntity<ProjectWorkspaceView>,
     /// The gesture in progress (`CanvasView`'s plain private drag vars).
     pub(crate) drag: Option<CanvasDrag>,
     /// The tool saved while Space temporarily turns the canvas into the Hand
@@ -197,12 +198,12 @@ pub struct EditorCanvasView {
 impl EditorCanvasView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // The inline editor's NSTextView counterpart: built here because an
-        // input state needs the window — the same shape `AppState::new` used
+        // input state needs the window — the same shape `ProjectWorkspaceView::new` used
         // when the field lived there (moved with the canvas, ticket 39).
         let inline_text_input = cx.new(|cx| TextareaState::new(window, cx).default_value(""));
         let mut canvas = EditorCanvasView {
@@ -228,7 +229,7 @@ impl EditorCanvasView {
 
     /// The inline editor's two-way binding, input → session: typing writes
     /// into the draft (`textDidChange`). Mirrors the subscription
-    /// `AppState::subscribe_inputs` used to carry; it moved here because the
+    /// `ProjectWorkspaceView::subscribe_inputs` used to carry; it moved here because the
     /// input entity did (ticket 39).
     fn subscribe_inline_text(&mut self, cx: &mut Context<Self>) {
         let inline = self.inline_text_input.clone();
@@ -245,7 +246,7 @@ impl EditorCanvasView {
     }
 
     /// The canvas's route to the app-side repaint epoch (`touch`): the
-    /// frame cache and `revision` stay on AppState (ticket 39's field
+    /// frame cache and `revision` stay on ProjectWorkspaceView (ticket 39's field
     /// audit), so a gesture that changed the session asks the shell through
     /// the seam.
     pub(crate) fn touch(&mut self, cx: &mut Context<Self>) {
@@ -254,7 +255,7 @@ impl EditorCanvasView {
 
     /// The active tab's view transform (`CanvasViewport` is `Copy`). Reads
     /// this view's session directly, mirroring Swift's `session.viewport`
-    /// reads; the app-side twins (`AppState`'s `canvas_viewport` family)
+    /// reads; the app-side twins (`ProjectWorkspaceView`'s `canvas_viewport` family)
     /// serve the app callers on the same session entity.
     pub(crate) fn canvas_viewport(&self, cx: &App) -> CanvasViewport {
         self.session.read(cx).viewport
@@ -298,7 +299,11 @@ impl Render for EditorCanvasView {
         if self.session.read(cx).document.is_none() {
             return self
                 .app
-                .update(cx, |app, _| app.render_welcome().into_any_element())
+                .update(cx, |app, cx| {
+                    app.render_welcome(cx)
+                        .map(|welcome| welcome.into_any_element())
+                        .unwrap_or_else(|| div().into_any_element())
+                })
                 .unwrap_or_else(|_| div().into_any_element());
         }
         let gesture = CanvasGesture {
@@ -314,7 +319,7 @@ impl Render for EditorCanvasView {
             .flatten();
         let image = composite.as_ref().and_then(|composite| {
             self.app
-                .update(cx, |app, _| Some(app.frame_image(composite)))
+                .update(cx, |app, cx| Some(app.frame_image(composite, cx)))
                 .ok()
                 .flatten()
         });
@@ -1425,7 +1430,7 @@ pub(crate) fn blur_mask_sample(document: &CanvasDocument, layer: &ImageLayer) ->
     Some(canvas)
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     fn commit_stroke(
         &mut self,
         mut edit: RasterEdit,
@@ -1438,7 +1443,14 @@ impl AppState {
         // Spot Healing: the wash was only ever a preview; the stroke ends by
         // rebuilding the painted area from nearby texture (HealPixels.c).
         if edit.settings.healing {
-            let mode = match self.tab().session.read(cx).spot_healing_mode {
+            let mode = match self
+                .workspace
+                .read(cx)
+                .current()
+                .session
+                .read(cx)
+                .spot_healing_mode
+            {
                 SpotHealingMode::ContentAware => 0,
                 SpotHealingMode::CreateTexture => 1,
                 SpotHealingMode::ProximityMatch => 2,
@@ -1464,9 +1476,11 @@ impl AppState {
             "Paint Mask"
         } else if erasing {
             "Erase"
-        } else if self.tab().session.read(cx).tool == NavigationTool::Blur {
+        } else if self.workspace.read(cx).current().session.read(cx).tool == NavigationTool::Blur {
             "Blur"
-        } else if self.tab().session.read(cx).tool == NavigationTool::CloneStamp {
+        } else if self.workspace.read(cx).current().session.read(cx).tool
+            == NavigationTool::CloneStamp
+        {
             "Clone Stamp"
         } else {
             "Brush Stroke"
@@ -1486,7 +1500,7 @@ impl AppState {
         _rect: CGRect,
         cx: &App,
     ) -> compositor_core::document::LayerShape {
-        let session = self.current_tab().session.read(cx);
+        let session = self.current_tab(cx).session.read(cx);
         let kind = session.shape_kind;
         let color = session.palette_color(false);
         compositor_core::document::LayerShape {
@@ -1566,48 +1580,58 @@ impl AppState {
 
     /// Tab cycles the active tool's mode.
     pub fn cycle_tool_mode(&mut self, cx: &mut Context<Self>) {
-        if self.tab().session.read(cx).tool == NavigationTool::Shape {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.toggle_shape_kind());
+        if self.workspace.read(cx).current().session.read(cx).tool == NavigationTool::Shape {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.toggle_shape_kind())
+            });
             self.touch(cx);
             return;
         }
-        match self.tab().session.read(cx).tool {
-            NavigationTool::Marquee => self
-                .tab()
-                .session
-                .update(cx, |session, _| session.toggle_marquee_kind()),
-            NavigationTool::Lasso => self
-                .tab()
-                .session
-                .update(cx, |session, _| session.toggle_lasso_kind()),
+        match self.workspace.read(cx).current().session.read(cx).tool {
+            NavigationTool::Marquee => self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.toggle_marquee_kind())
+            }),
+            NavigationTool::Lasso => self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.toggle_lasso_kind())
+            }),
             NavigationTool::Wand => {
-                self.tab().session.update(cx, |session, _| {
-                    session.wand_mode = match session.wand_mode {
-                        compositor_core::selection::WandMode::Wand => {
-                            compositor_core::selection::WandMode::Object
-                        }
-                        compositor_core::selection::WandMode::Object => {
-                            compositor_core::selection::WandMode::Wand
-                        }
-                    };
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.wand_mode = match session.wand_mode {
+                            compositor_core::selection::WandMode::Wand => {
+                                compositor_core::selection::WandMode::Object
+                            }
+                            compositor_core::selection::WandMode::Object => {
+                                compositor_core::selection::WandMode::Wand
+                            }
+                        };
+                    })
                 });
             }
             NavigationTool::Brush => {
-                self.tab().session.update(cx, |session, _| {
-                    session.brush_mode = match session.brush_mode {
-                        BrushToolMode::Paint => BrushToolMode::Erase,
-                        BrushToolMode::Erase => BrushToolMode::Paint,
-                    };
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.brush_mode = match session.brush_mode {
+                            BrushToolMode::Paint => BrushToolMode::Erase,
+                            BrushToolMode::Erase => BrushToolMode::Paint,
+                        };
+                    })
                 });
             }
             NavigationTool::Gradient => {
-                self.tab().session.update(cx, |session, _| {
-                    session.gradient_settings.shape = match session.gradient_settings.shape {
-                        GradientShape::Linear => GradientShape::Radial,
-                        GradientShape::Radial => GradientShape::Linear,
-                    };
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.gradient_settings.shape = match session.gradient_settings.shape {
+                            GradientShape::Linear => GradientShape::Radial,
+                            GradientShape::Radial => GradientShape::Linear,
+                        };
+                    })
                 });
             }
             _ => {}
@@ -1620,7 +1644,15 @@ impl AppState {
     /// then the floating panels (each panel's cancel is its `onClose`
     /// semantics), then a modal sheet, then the canvas edits.
     pub fn cancel_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab().session.read(cx).color_picker.is_some() {
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .color_picker
+            .is_some()
+        {
             self.close_color_picker_ui(false, cx);
             return;
         }
@@ -1635,31 +1667,37 @@ impl AppState {
             return;
         }
         if self
-            .tab()
-            .session
-            .update(cx, |session, _| session.lasso_draft.take())
+            .workspace
+            .update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.lasso_draft.take())
+            })
             .is_some()
         {
             self.touch(cx);
             return;
         }
         // The Type tool's box drag preview dies with the gesture (the box
-        // rect is canvas state since ticket 39).
-        if self
-            .canvas_view
-            .update(cx, |canvas, _| canvas.text_box_rect.take())
-            .is_some()
-        {
+        // rect is canvas state since ticket 39; the canvas is the active
+        // tab content's child, ticket 43).
+        let text_box_open = self.content.as_ref().and_then(|content| {
+            let canvas = content.read(cx).canvas_view.clone();
+            canvas.update(cx, |canvas, _| canvas.text_box_rect.take())
+        });
+        if text_box_open.is_some() {
             self.touch(cx);
             return;
         }
-        if self.tab().session.update(cx, |session, _| {
-            if session.crop_drag.take().is_some() {
-                session.crop_rect = None;
-                true
-            } else {
-                false
-            }
+        if self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                if session.crop_drag.take().is_some() {
+                    session.crop_rect = None;
+                    true
+                } else {
+                    false
+                }
+            })
         }) {
             self.touch(cx);
             return;
@@ -1667,63 +1705,82 @@ impl AppState {
         // Escape kills a guide drag before it reaches the transform edit
         // (EditorCanvas.keyDown's `guideDrag != nil` branch).
         if self
-            .tab()
-            .session
-            .update(cx, |session, _| session.guide_drag.take())
+            .workspace
+            .update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.guide_drag.take())
+            })
             .is_some()
         {
             self.touch(cx);
             return;
         }
-        if self.tab().session.update(cx, |session, _| {
-            if session.pixel_move.take().is_some() {
-                session.cancel_pixel_move();
-                true
-            } else {
-                false
-            }
+        if self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                if session.pixel_move.take().is_some() {
+                    session.cancel_pixel_move();
+                    true
+                } else {
+                    false
+                }
+            })
         }) {
             self.touch(cx);
             return;
         }
-        if self.tab().session.update(cx, |session, _| {
-            if session.selection_move_origin.take().is_some() {
-                session.end_selection_move();
-                true
-            } else {
-                false
-            }
+        if self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                if session.selection_move_origin.take().is_some() {
+                    session.end_selection_move();
+                    true
+                } else {
+                    false
+                }
+            })
         }) {
             self.touch(cx);
             return;
         }
         if self
-            .tab()
-            .session
-            .update(cx, |session, _| session.transform_edit.take())
+            .workspace
+            .update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.transform_edit.take())
+            })
             .is_some()
         {
             self.touch(cx);
             return;
         }
         if self
-            .tab()
-            .session
-            .update(cx, |session, _| session.crop_rect.take())
+            .workspace
+            .update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.crop_rect.take())
+            })
             .is_some()
         {
             self.touch(cx);
             return;
         }
         if self
-            .tab()
-            .session
-            .update(cx, |session, _| session.renaming_layer_id.take())
+            .workspace
+            .update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.renaming_layer_id.take())
+            })
             .is_some()
         {
-            // The rename field is the layers panel's (ticket 40).
-            self.layers_panel
-                .update(cx, |panel, _| panel.discard_rename_input());
+            // The rename field is the layers panel's (ticket 40; the panel
+            // is the active tab content's child, ticket 43).
+            if let Some(content) = self.content.as_ref() {
+                let panel = content.read(cx).layers_panel.clone();
+                panel.update(cx, |panel, _| panel.discard_rename_input());
+            }
             self.touch(cx);
         }
     }
@@ -2045,7 +2102,7 @@ impl EditorCanvasView {
     /// The keys that route into shell-side pipelines (the text-style edits,
     /// the tool sliders' opacity digits) do so through the seam; the digit
     /// arm needs the window for the slider writes, so it is reported back to
-    /// the window listener, which runs `AppState::opacity_digit`.
+    /// the window listener, which runs `ProjectWorkspaceView::opacity_digit`.
     pub fn canvas_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -2091,7 +2148,7 @@ impl EditorCanvasView {
             cx.stop_propagation();
             return None;
         }
-        // `AppState::canvas_keys_active`'s two conjuncts, evaluated here:
+        // `ProjectWorkspaceView::canvas_keys_active`'s two conjuncts, evaluated here:
         // the sheet flag is shell state; the focused-input check reads the
         // window (the gate itself stays shell-side for the hotkey wrapper).
         let sheet_open = self
@@ -2820,7 +2877,7 @@ fn nice_tick(rough: f64) -> f64 {
 fn install_drag_events(
     canvas_move: &gpui_kit::WeakEntity<EditorCanvasView>,
     canvas_up: &gpui_kit::WeakEntity<EditorCanvasView>,
-    app: &gpui_kit::WeakEntity<AppState>,
+    app: &gpui_kit::WeakEntity<ProjectWorkspaceView>,
     window: &mut Window,
 ) {
     let canvas_move = canvas_move.clone();
@@ -2866,7 +2923,7 @@ fn install_drag_events(
 /// seam; the call used to sit inside `canvas_key_down`).
 fn install_key_events(
     canvas: &gpui_kit::WeakEntity<EditorCanvasView>,
-    app: &gpui_kit::WeakEntity<AppState>,
+    app: &gpui_kit::WeakEntity<ProjectWorkspaceView>,
     window: &mut Window,
 ) {
     let canvas_down = canvas.clone();

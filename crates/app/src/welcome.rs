@@ -11,13 +11,13 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
-    Context, DragMoveEvent, Entity, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, Styled, WeakEntity, Window, div, px, rgb,
+    App, Context, DragMoveEvent, Entity, ExternalPaths, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, Styled, WeakEntity, Window, div, px, rgb,
 };
 
 use crate::project::Step;
 use crate::sheets_ui::SheetRow;
-use crate::state::{AppState, number_input};
+use crate::state::{ProjectWorkspaceView, number_input};
 use crate::ui::text_label;
 
 /// The dimension cap the core enforces (`create_document` silently refuses
@@ -67,16 +67,16 @@ pub(crate) fn welcome_disabled(session: &EditorSession) -> bool {
 /// Width/Height field entities (NewCanvasSheet's `@State width`/`height`,
 /// NewCanvasSheet.swift:9-10) and renders the whole form. Rendered only by
 /// the canvas view's welcome branch, so it keeps no session observer (the
-/// branch re-renders with the window, as before); its session field is
-/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+/// branch re-renders with the window, as before); its session field comes
+/// with the per-tab content build (ticket 43).
 pub struct WelcomeView {
     /// The active tab's session — the busy gates and the Create write speak
     /// to it directly (`NewCanvasSheet`'s `session`).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the Open/Import flows, the
-    /// file-drop receive and the repaint epoch stay there. No AppState
+    /// The root view (the window shell): the Open/Import flows, the
+    /// file-drop receive and the repaint epoch stay there. No ProjectWorkspaceView
     /// dependencies beyond what the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The dimension fields (`NewCanvasSheet`'s `@State width`/`height`),
     /// defaulting to 1920×1080 like Swift. Built here because an
     /// `InputState` needs the window.
@@ -87,7 +87,7 @@ pub struct WelcomeView {
 impl WelcomeView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -103,14 +103,8 @@ impl WelcomeView {
         }
     }
 
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel).
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
-    }
-
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// Create asks the shell through the seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.touch(cx)).ok();
@@ -214,9 +208,13 @@ impl WelcomeView {
                     .disabled(disabled)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.app
-                            .update(cx, |app, cx| match app.workspace.open(None, cx) {
-                                Step::Pending(pending) => app.present_pending(pending, window, cx),
-                                Step::Done(_) => {}
+                            .update(cx, |app, cx| {
+                                match app.workspace.update(cx, |ws, cx| ws.open(None, cx)) {
+                                    Step::Pending(pending) => {
+                                        app.present_pending(pending, window, cx)
+                                    }
+                                    Step::Done(_) => {}
+                                }
                             })
                             .ok();
                     })),
@@ -267,11 +265,14 @@ impl WelcomeView {
                     // records the point through the shell's canvas entity.
                     this.app
                         .update(cx, |app, cx| {
-                            app.canvas_view.update(cx, |canvas, cx| {
-                                let local = canvas.local_position(event.event.position);
-                                canvas.drop_point_doc =
-                                    Some(canvas.screen_to_doc(cx, local.0, local.1));
-                            });
+                            if let Some(content) = app.content.as_ref() {
+                                let canvas = content.read(cx).canvas_view.clone();
+                                canvas.update(cx, |canvas, cx| {
+                                    let local = canvas.local_position(event.event.position);
+                                    canvas.drop_point_doc =
+                                        Some(canvas.screen_to_doc(cx, local.0, local.1));
+                                });
+                            }
                         })
                         .ok();
                 },
@@ -331,12 +332,13 @@ impl Render for WelcomeView {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The empty tab's welcome view (Swift `ContentView.welcome`): the form
-    /// entity built once (its inputs need the window); the canvas view's
-    /// welcome branch clones it into the tree (ticket 42).
-    pub fn render_welcome(&self) -> Entity<WelcomeView> {
-        self.welcome.clone()
+    /// entity built fresh with the per-tab content (its inputs need the
+    /// window, ticket 43); the canvas view's welcome branch clones it into
+    /// the tree (ticket 42).
+    pub(crate) fn render_welcome(&self, cx: &App) -> Option<Entity<WelcomeView>> {
+        Some(self.content.as_ref()?.read(cx).welcome.clone())
     }
 }
 

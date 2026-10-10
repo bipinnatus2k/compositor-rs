@@ -102,7 +102,7 @@ pub struct ProjectWorkspace {
     /// tab must not switch (Swift's `canStartProjectOperation` counts the
     /// panels' edit states — `levels != nil`, `filterEdit != nil`, … — which
     /// the Rust core only carries for adjustment editing). Opened/closed
-    /// panels keep this in sync through `AppState`.
+    /// panels keep this in sync through `ProjectWorkspaceView`.
     pub ui_panels_open: bool,
 }
 

@@ -8,7 +8,7 @@ use gpui_kit::{Context, Entity, IntoElement, WeakEntity, px};
 use compositor_core::document::ShapeKind;
 use compositor_core::session::EditorSession;
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::navigation_tool_header::menu_entries;
 use crate::ui::{Dropdown, app_dispatch, text_label};
 
@@ -16,25 +16,22 @@ use crate::ui::{Dropdown, app_dispatch, text_label};
 /// ticket 42. It carries no widget state of its own (Swift's bar is
 /// `@Bindable session` only); only in the render tree while the shape tool
 /// is active, so it keeps no session observer, and its session field is
-/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+/// re-pointed on tab changes by [`ProjectWorkspaceView::sync_session_observer`].
 pub struct ShapeControlsView {
     /// The active tab's session — the kind readout speaks to it directly.
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the shared header row
-    /// stays there. No AppState dependencies beyond what the moved handlers
+    /// The root view (the window shell): the shared header row
+    /// stays there. No ProjectWorkspaceView dependencies beyond what the moved handlers
     /// already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
 }
 
 impl ShapeControlsView {
-    pub(crate) fn new(session: Entity<EditorSession>, app: WeakEntity<AppState>) -> Self {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<ProjectWorkspaceView>,
+    ) -> Self {
         ShapeControlsView { session, app }
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel).
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// `ShapeControls.swift`'s bar controls: the Rectangle/Rounded/Ellipse/

@@ -4,6 +4,78 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 架构裁定（2026-10-10：废除 AppState 票 43——workspace 实体化 + 双层 root + AppState 除名）
+
+收官大票（ADR 0003 票序 F）。`AppState` 除名为 `ProjectWorkspaceView`
+（Swift 对照：ProjectTabs.swift:6-19 的 `ProjectWorkspaceView`，观察
+workspace、以 `.id(workspace.current.id)` 对活动 tab 重建整个
+`ContentView`）；window shell 的装配、流与窗口杂项就此定型为「根视图」，
+session/文档镜像不再有第二个名字。
+
+- **workspace 实体化**：`Entity<ProjectWorkspace>` 纯状态实体（取代
+  ADR 0001「普通结构体」偏差，实体无 Render，镜像 Swift
+  `@Observable ProjectWorkspace`）；`ProjectWorkspace` 结构体与方法
+  原样成为实体内层，`ProjectTab`/`ProjectController` 保持普通类型
+  （镜像 Swift 非 observable 事实）。根持实体并 `cx.observe` 之（镜像
+  Swift 视图对 workspace 的观察）；全部调用点过 `update`/`read`
+  （约 240 处调用形状改写：130 处 `self.tab()`/`t.tab()` update 闭包、
+  62 处 read、6 处 clone、16 处 `current_tab(cx)` 传 cx、约 25 处
+  workspace 方法位点手工包 `update`/`read`，`current_tab(cx)` 保留为
+  读助手）。tabs.rs/project.rs 逻辑零改动（仅调用形状与一处注释）。
+- **双层 root**：根持 `Option<Entity<ContentView>>`，`sync_content`
+  在渲染头比对 workspace `selected_id` 与内容构建时的 tab id，不同即
+  重建（`.id` 镜像：画布拖拽/重命名/welcome 草稿随重建消亡；
+  `can_switch` 九消费点保证重建不发生在交互中）。`ContentView`
+  （Swift ContentView.swift:4-18）薄容器：持 session 实体 + 12 个子
+  视图实体（画布/图层面板/8 工具头/welcome/status bar），构造期拿
+  session，render 承接原根渲染的中段（工具轨道/选项头/画布/welcome/
+  图层面板/状态条，DOM 形状逐字保留）；状态条观察者在构造期挂。
+- **除名换壳**：`AppState` → `ProjectWorkspaceView`（state.rs 类型
+  与文件名不动——申报：文件内还有 SheetState/SaveAfter/数值字段助手
+  等 shell 杂项，Move 重命名文件收益为零）；`WeakEntity<AppState>` 缝
+  族（12 视图实体 + ui.rs 六适配器 `app_dispatch`/`app_on`/
+  `app_on_click`/`app_on_press`/`app_on_drag_move`/`app_on_drag_up` +
+  `AppHandler`/`MenuDispatch` 类型别名 + `MenuEntry`）机械改名
+  `WeakEntity<ProjectWorkspaceView>`，签名同形——改名即重写，ADR 0002
+  「只重写适配器」的预留兑现；~213 处 `AppState` 引用清零。
+- **tab 条与菜单装配留 root**（申报）：根已随 workspace notify 重渲染，
+  独立实体零失效收益；Swift 侧 tab strip 是 `ProjectTabStrip` 独立
+  view，Rust 的 `render_tab_bar` 留在根（`ui/project_tabs.rs`），与
+  Swift 的 `.commands` 单点声明语义对应的 `MenuBar` 仍每渲染从
+  workspace 实体读活动 session 实体传入（menu.rs 形状不动）。
+- **`DRAIN_PUMP_RUNNING` 入 root**：文件级 `AtomicBool` static →
+  `drain_pump_running: bool` 根字段（ADR 0003 裁定 4；异步泵仍跑在根
+  实体上，spawn 后置位、排空后经 `this.update` 复位——窗口关闭随实体
+  丢弃标志，单窗口下的语义与原 static 等价）。
+- **`sync_session_observer` 与九连 `set_session` 退役**：原「活动 tab
+  变更 → 重指 11 个子实体 session + 重挂根的 session 观察者」整族
+  删除——子实体构造期拿 session，`ContentView` 重建即完成换绑；
+  根的 session 观察者本就休眠（session 实体从不自行 notify，全窗口
+  重渲染靠显式 `touch`），删除为行为零变化。11 个子实体的
+  `set_session` 方法（8 工具头 + welcome + status bar + 图层面板）与
+  `sync_session_observer` 里对画布 session 字段的直写一并移除。
+- **留 root 的窗口级偏差（43 不动，沿用）**：模态 sheet 宿主
+  （`SheetState` + `render_sheet_overlay`）、面板宿主 + panel_views、
+  帧缓存（`revision`/`frame_image*`，缓存键 `(tab_id, revision)`）、
+  preview 族、`pending_save`/`delete_ask_ids`、~130 个 `on_action`
+  注册与全部流方法（随改名留根）。
+- **模态锁定逐点保留**（CONTEXT.md「模态锁定」）：`can_switch` 九消费
+  点（select/new_canvas/open/close/confirm_quit/close_window/receive/
+  drain/copy_layer）落在 tabs.rs，本票零改动、行为不变；键位层
+  `keys.rs` 不动。
+- **AGENTS §5 核对（交 44 号票落文档）**：`ProjectWorkspace` 实体内层
+  仍持 `pub` 字段（`is_managing`/`errors`/`ui_panels_open`）与
+  `pub(crate)` 私有字段——它是 Swift `@Observable` 类的直译，视图直读
+  字段属原项目写法；`ContentView` 子实体字段 `pub(crate)`（根的流经
+  `.read(cx)` 直取，镜像 `EditorCanvasView` 票 39 形状）——需在 AGENTS
+  §5 豁免清单补一句「workspace/ContentView 实体内层字段直读豁免」。
+
+**测试**：912 全绿 = core 627 + app 175 + 集成 110；断言零改动
+（tabs.rs 测试原样——`ProjectWorkspace` 结构体未变；构造适配仅
+类型改名）。门禁：`cargo fmt --check` 零差异、`typos` 零报告、
+`cargo clippy --all --all-targets` 退出码 0 且 app crate 零警告；
+boot smoke 通过（窗口开启、渲染、存活）。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 42——工具头族 / welcome / status 实体化）
 
 工具头族、welcome 表单与状态条从 AppState 字段 + 方法族改为独立 view

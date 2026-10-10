@@ -20,7 +20,7 @@ use compositor_core::tools::brush::RasterEdit;
 
 use crate::project::UnsavedChoice;
 
-use crate::state::{AppState, Sheet};
+use crate::state::{ProjectWorkspaceView, Sheet};
 use crate::ui::text_label;
 
 fn sheet_title(kind: Sheet) -> &'static str {
@@ -93,7 +93,7 @@ impl RenderOnce for SheetRow {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     // MARK: Sheet rendering
 
     pub fn render_sheet_overlay(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
@@ -400,10 +400,20 @@ impl AppState {
             _ => {}
         }
         // An adjustment editing session restores the opening settings.
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(false))
+            });
         }
         self.close_sheet(cx);
     }
@@ -416,10 +426,20 @@ impl AppState {
         let kind_before = self.sheet.as_ref().map(|sheet| sheet.kind);
         // Editing an adjustment layer: the settings previewed live, OK keeps
         // them as one undo step and skips the layer-pixel commit paths.
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(true))
+            });
             self.close_sheet(cx);
             return;
         }
@@ -512,7 +532,7 @@ impl AppState {
                 let data = match data {
                     Some(data) => data,
                     None => {
-                        let Some(document) = self.current_tab().session.read(cx).document.clone()
+                        let Some(document) = self.current_tab(cx).session.read(cx).document.clone()
                         else {
                             self.set_status("Nothing to export", cx);
                             return;
@@ -598,10 +618,25 @@ impl AppState {
 
     /// Fills the active layer with one color, honoring the selection.
     pub fn fill_active(&mut self, color: [u8; 4], name: &str, cx: &mut Context<Self>) {
-        let Some(document) = self.tab().session.read(cx).document.clone() else {
+        let Some(document) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .document
+            .clone()
+        else {
             return;
         };
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
+        let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        else {
             return;
         };
         let Some(layer) = document.layer(id) else {

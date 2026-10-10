@@ -20,7 +20,7 @@ use compositor_core::adjust::levels_auto::LevelsAuto;
 use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::{HistogramView, SheetRow};
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::floating_panel::{
     PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on,
 };
@@ -39,11 +39,11 @@ pub fn levels_channel_label(channel: LevelsChannel) -> &'static str {
 
 /// The Levels panel as its own view entity (Swift `LevelsSheet`'s edit
 /// state; ticket 41). It holds the session plus the transitional
-/// `WeakEntity<AppState>` seam: the sliders, the Preview checkbox, the
+/// `WeakEntity<ProjectWorkspaceView>` seam: the sliders, the Preview checkbox, the
 /// channel picker and the Auto trio run here (they read this panel's own
 /// widgets), while the preview recomputes and the commit/cancel pipelines
 /// stay on the shell. The entity exists exactly while the panel is open —
-/// created by `AppState::open_levels_panel`, dropped on close — so its
+/// created by `ProjectWorkspaceView::open_levels_panel`, dropped on close — so its
 /// session can never go stale (tab switches are blocked while any panel is
 /// open, and `sync_session_observer` does not observe panels).
 pub struct LevelsPanelView {
@@ -53,9 +53,9 @@ pub struct LevelsPanelView {
     /// rebuild.
     #[allow(dead_code)]
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the preview recomputes and
+    /// The root view (the window shell): the preview recomputes and
     /// the commit/cancel flows stay there (ticket 41's handler split).
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The five sliders: input black, gamma, input white, output black,
     /// output white.
     sliders: Vec<Entity<SliderState>>,
@@ -74,7 +74,7 @@ pub struct LevelsPanelView {
 impl LevelsPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         histogram: [f64; 1024],
         cx: &mut Context<Self>,
     ) -> Self {
@@ -343,10 +343,14 @@ impl Render for LevelsPanelView {
 }
 
 /// The Levels channel dropdown's write-back: a menu entry is
-/// AppState-flavored, so it lands on the shell and reads the panel through
+/// ProjectWorkspaceView-flavored, so it lands on the shell and reads the panel through
 /// the content registry (the ticket-40 transitional pattern for `MenuEntry`
 /// dropdowns).
-fn set_levels_channel(state: &mut AppState, channel: usize, cx: &mut Context<AppState>) {
+fn set_levels_channel(
+    state: &mut ProjectWorkspaceView,
+    channel: usize,
+    cx: &mut Context<ProjectWorkspaceView>,
+) {
     if let Some(panel) = state.levels_view() {
         panel.update(cx, |panel, cx| panel.set_channel(channel, cx));
     }
@@ -403,7 +407,7 @@ impl RenderOnce for AutoButton {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `showLevelsPanel` (`LevelsSheet` via the panel-spawning onChange):
     /// capture the preview base, compute the histogram, and put the panel
     /// entity in the registry.
@@ -415,7 +419,13 @@ impl AppState {
         if let Some(pixels) = self.preview_base.clone() {
             let coverage = crate::ui::sheets::histogram_coverage(
                 self.preview_base_transform,
-                self.tab().session.read(cx).selection().cloned(),
+                self.workspace
+                    .read(cx)
+                    .current()
+                    .session
+                    .read(cx)
+                    .selection()
+                    .cloned(),
                 pixels.width,
                 pixels.height,
             );
@@ -425,7 +435,7 @@ impl AppState {
                 &mut histogram,
             );
         }
-        let session = self.tab().session.clone();
+        let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| LevelsPanelView::new(session, app, histogram, cx));
         self.panel_views.insert(
@@ -437,7 +447,7 @@ impl AppState {
             "Levels",
             PanelPlacement::Automatic,
         );
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -447,10 +457,20 @@ impl AppState {
         if !self.panels.close(panel_names::LEVELS_PANEL) {
             return;
         }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(false))
+            });
         }
         self.panel_views.remove(panel_names::LEVELS_PANEL);
         self.after_panel_editing_closed(cx);
@@ -463,10 +483,20 @@ impl AppState {
             return;
         }
         // Editing an adjustment layer: the previewed settings are the commit.
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(true))
+            });
         } else {
             self.commit_preview_pixels("Levels", cx);
         }

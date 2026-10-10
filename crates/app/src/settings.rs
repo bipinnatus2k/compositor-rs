@@ -15,7 +15,7 @@
 //!   platform config directory, hand-rolled, no new dependencies).
 //! - The `didSet` writes are immediate, so there is no exit save to wire up;
 //!   the workspace calls [`persist_session`] at every toggle point
-//!   (`AppState::persist_tool_defaults`).
+//!   (`ProjectWorkspaceView::persist_tool_defaults`).
 //! - A missing or corrupt file falls back to the compiled defaults, exactly
 //!   like Swift's `?? fallback` on an unreadable `UserDefaults` entry and like
 //!   `shortcuts.rs`'s tolerant load.

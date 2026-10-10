@@ -40,7 +40,7 @@ use gpui_kit::{
     MouseUpEvent, ParentElement, Pixels, RenderOnce, SharedString, Styled, WeakEntity, Window, px,
 };
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 
 // The palette: Photoshop-like dark grays.
 pub const BG_APP: u32 = 0x1e1e1e;
@@ -90,18 +90,20 @@ pub fn rgb_u32(hex: u32) -> gpui_kit::Rgba {
     gpui_kit::rgb(hex)
 }
 
-/// A handler that mutates the app state, run from menus and dropdowns.
-/// Transitional until AppState dissolves: menu entries will then speak in
-/// session terms, and only the dispatch adapters (not the components)
-/// change with it.
-pub type AppHandler = Rc<dyn Fn(&mut AppState, &mut Window, &mut Context<AppState>)>;
+/// A handler that mutates the root view, run from menus and dropdowns. The
+/// root is the `ProjectWorkspaceView` entity (ADR 0003 step F, ticket 43):
+/// the transitional "until AppState dissolves" seam is now simply the root
+/// entity's shape — the rename is the rewrite ADR 0002 reserved, and the
+/// adapters' shapes are unchanged.
+pub type AppHandler =
+    Rc<dyn Fn(&mut ProjectWorkspaceView, &mut Window, &mut Context<ProjectWorkspaceView>)>;
 
 /// Runs one picked menu entry's handler. Which entity owns the state the
 /// handler mutates is the dispatcher's business, not the dropdown's.
 pub type MenuDispatch = Rc<dyn Fn(&AppHandler, &mut Window, &mut App)>;
 
 /// The app-shell dispatch: run the entry's handler inside the app entity.
-pub fn app_dispatch(app: &WeakEntity<AppState>) -> MenuDispatch {
+pub fn app_dispatch(app: &WeakEntity<ProjectWorkspaceView>) -> MenuDispatch {
     let app = app.clone();
     Rc::new(move |handler, window, cx| {
         let handler = handler.clone();
@@ -114,11 +116,12 @@ pub fn app_dispatch(app: &WeakEntity<AppState>) -> MenuDispatch {
 /// and app contexts.
 pub type AppCallback<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
-/// The app-shell adapter for value callbacks: run an AppState-flavored
-/// handler inside the app entity.
+/// The app-shell adapter for value callbacks: run a root-flavored
+/// handler inside the root entity.
 pub fn app_on<T: 'static>(
-    app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, T, &mut Window, &mut Context<AppState>) + 'static,
+    app: &WeakEntity<ProjectWorkspaceView>,
+    handler: impl Fn(&mut ProjectWorkspaceView, T, &mut Window, &mut Context<ProjectWorkspaceView>)
+    + 'static,
 ) -> AppCallback<T> {
     let app = app.clone();
     let handler = Rc::new(handler);
@@ -134,8 +137,13 @@ pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// The app-shell adapter for click callbacks.
 pub fn app_on_click(
-    app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, &ClickEvent, &mut Window, &mut Context<AppState>) + 'static,
+    app: &WeakEntity<ProjectWorkspaceView>,
+    handler: impl Fn(
+        &mut ProjectWorkspaceView,
+        &ClickEvent,
+        &mut Window,
+        &mut Context<ProjectWorkspaceView>,
+    ) + 'static,
 ) -> ClickHandler {
     let app = app.clone();
     let handler = Rc::new(handler);
@@ -152,8 +160,13 @@ pub type PressHandler = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
 /// The app-shell adapter for press callbacks.
 pub fn app_on_press(
-    app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, &MouseDownEvent, &mut Window, &mut Context<AppState>) + 'static,
+    app: &WeakEntity<ProjectWorkspaceView>,
+    handler: impl Fn(
+        &mut ProjectWorkspaceView,
+        &MouseDownEvent,
+        &mut Window,
+        &mut Context<ProjectWorkspaceView>,
+    ) + 'static,
 ) -> PressHandler {
     let app = app.clone();
     let handler = Rc::new(handler);
@@ -170,8 +183,13 @@ pub type DragMoveHandler = Rc<dyn Fn(&MouseMoveEvent, &mut Window, &mut App)>;
 
 /// The app-shell adapter for drag-move callbacks.
 pub fn app_on_drag_move(
-    app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, &MouseMoveEvent, &mut Window, &mut Context<AppState>) + 'static,
+    app: &WeakEntity<ProjectWorkspaceView>,
+    handler: impl Fn(
+        &mut ProjectWorkspaceView,
+        &MouseMoveEvent,
+        &mut Window,
+        &mut Context<ProjectWorkspaceView>,
+    ) + 'static,
 ) -> DragMoveHandler {
     let app = app.clone();
     let handler = Rc::new(handler);
@@ -187,8 +205,13 @@ pub type DragUpHandler = Rc<dyn Fn(&MouseUpEvent, &mut Window, &mut App)>;
 
 /// The app-shell adapter for drag-release callbacks.
 pub fn app_on_drag_up(
-    app: &WeakEntity<AppState>,
-    handler: impl Fn(&mut AppState, &MouseUpEvent, &mut Window, &mut Context<AppState>) + 'static,
+    app: &WeakEntity<ProjectWorkspaceView>,
+    handler: impl Fn(
+        &mut ProjectWorkspaceView,
+        &MouseUpEvent,
+        &mut Window,
+        &mut Context<ProjectWorkspaceView>,
+    ) + 'static,
 ) -> DragUpHandler {
     let app = app.clone();
     let handler = Rc::new(handler);
@@ -211,7 +234,8 @@ pub struct MenuEntry {
 impl MenuEntry {
     pub fn new(
         label: impl Into<String>,
-        handler: impl Fn(&mut AppState, &mut Window, &mut Context<AppState>) + 'static,
+        handler: impl Fn(&mut ProjectWorkspaceView, &mut Window, &mut Context<ProjectWorkspaceView>)
+        + 'static,
     ) -> Self {
         MenuEntry {
             label: label.into(),
@@ -249,7 +273,7 @@ impl MenuEntry {
 /// running the entry's handler inside the app entity. Shared by the
 /// layers-panel footer menus' `dropdown_menu` closures.
 pub(crate) fn build_menu(
-    app: &WeakEntity<AppState>,
+    app: &WeakEntity<ProjectWorkspaceView>,
     mut menu: PopupMenu,
     entries: &[MenuEntry],
 ) -> PopupMenu {

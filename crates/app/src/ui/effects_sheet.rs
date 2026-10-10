@@ -20,7 +20,7 @@ use compositor_core::effects::LayerEffectKind;
 use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::floating_panel::{
     PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on, panel_on_click,
 };
@@ -28,7 +28,7 @@ use crate::ui::sheets::panel_value;
 use crate::ui::{ClickHandler, text_label};
 
 /// The Effects panel as its own view entity (Swift `EffectsSheet`'s edit
-/// state; ticket 41). Created by `AppState::open_effects_panel`, dropped on
+/// state; ticket 41). Created by `ProjectWorkspaceView::open_effects_panel`, dropped on
 /// close; its session can never go stale (tab switches are blocked while
 /// any panel is open).
 pub struct EffectsPanelView {
@@ -36,9 +36,9 @@ pub struct EffectsPanelView {
     /// every slider write go through it (one undo step per change, as
     /// Swift's changeEffects does).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the commit/cancel flows
+    /// The root view (the window shell): the commit/cancel flows
     /// and the repaint epoch stay there.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// Which effect is being edited (an index into `LayerEffectKind::ALL`).
     kind_index: usize,
     /// The edited effect's sliders.
@@ -51,7 +51,7 @@ pub struct EffectsPanelView {
 impl EffectsPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         // No preview capture: every slider change is committed to the layer's
@@ -579,12 +579,12 @@ impl RenderOnce for EffectSwatch {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `session.effectsEditing` → effectsPanel, title = the effect's name
     /// (`ContentView.swift:217-224`). The caller (`add_effect`) has already
     /// started the editing session; the panel reads it at construction.
     pub fn open_effects_panel(&mut self, cx: &mut Context<Self>) {
-        let session = self.tab().session.clone();
+        let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| EffectsPanelView::new(session, app, cx));
         self.panel_views.insert(
@@ -593,14 +593,20 @@ impl AppState {
         );
         // The title follows the edited kind, as the old open read it.
         let title = {
-            let kind = self.tab().session.read(cx).effects_editing;
+            let kind = self
+                .workspace
+                .read(cx)
+                .current()
+                .session
+                .read(cx)
+                .effects_editing;
             kind.map(|editing| editing.kind)
                 .unwrap_or(LayerEffectKind::Stroke)
         }
         .label();
         self.panels
             .show(panel_names::EFFECTS_PANEL, title, PanelPlacement::Automatic);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -609,11 +615,13 @@ impl AppState {
         if !self.panels.close(panel_names::EFFECTS_PANEL) {
             return;
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.finish_effects_editing(false));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.finish_effects_editing(false))
+        });
         self.panel_views.remove(panel_names::EFFECTS_PANEL);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -623,12 +631,14 @@ impl AppState {
         if !self.panels.is_visible(panel_names::EFFECTS_PANEL) {
             return;
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.finish_effects_editing(true));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.finish_effects_editing(true))
+        });
         self.panel_views.remove(panel_names::EFFECTS_PANEL);
         self.panels.close(panel_names::EFFECTS_PANEL);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 }

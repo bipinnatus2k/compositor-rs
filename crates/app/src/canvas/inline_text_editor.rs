@@ -817,7 +817,7 @@ impl EditorCanvasView {
 
     /// Option-left tightens the tracking by one step; Shift makes ten
     /// (`CanvasTextView.keyDown`, InlineTextEditor.swift:18-19). The text
-    /// style itself is shell-side (`AppState::adjust_text_tracking`).
+    /// style itself is shell-side (`ProjectWorkspaceView::adjust_text_tracking`).
     pub(crate) fn on_inline_tracking_tighten(
         &mut self,
         _: &crate::keys::InlineTextTrackingTighten,

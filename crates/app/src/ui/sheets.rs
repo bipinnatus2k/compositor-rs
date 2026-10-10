@@ -15,9 +15,9 @@ use compositor_core::geometry::CGAffineTransform;
 use compositor_core::raster::Bitmap;
 use compositor_core::transform::LayerTransform;
 
-use crate::state::{AppState, Sheet, SheetState};
+use crate::state::{ProjectWorkspaceView, Sheet, SheetState};
 
-impl AppState {
+impl ProjectWorkspaceView {
     // MARK: Opening
 
     pub fn open_sheet(&mut self, kind: Sheet, window: &mut Window, cx: &mut Context<Self>) {
@@ -107,7 +107,7 @@ impl AppState {
         match kind {
             Sheet::ImageSize => {
                 let resolution = self
-                    .current_tab()
+                    .current_tab(cx)
                     .session
                     .read(cx)
                     .document
@@ -150,7 +150,14 @@ impl AppState {
 
     /// Captures the active layer's pixels so adjustment panels can preview.
     pub(crate) fn begin_preview(&mut self, cx: &gpui_kit::App) {
-        let layer = self.tab().session.read(cx).active_layer().cloned();
+        let layer = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer()
+            .cloned();
         self.preview_base = layer
             .as_ref()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
@@ -182,10 +189,20 @@ impl AppState {
         preview: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab().session.update(cx, |session, _| {
-                session.levels = Some(settings);
-                session.preview_adjustment_editing(preview);
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut().session.update(cx, |session, _| {
+                    session.levels = Some(settings);
+                    session.preview_adjustment_editing(preview);
+                })
             });
             return;
         }
@@ -214,10 +231,20 @@ impl AppState {
         preview: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab().session.update(cx, |session, _| {
-                session.levels = Some(settings);
-                session.preview_adjustment_editing(preview);
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut().session.update(cx, |session, _| {
+                    session.levels = Some(settings);
+                    session.preview_adjustment_editing(preview);
+                })
             });
             self.revision += 1;
             cx.notify();
@@ -246,10 +273,20 @@ impl AppState {
         settings: compositor_core::adjust::HueSaturationSettings,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab().session.update(cx, |session, _| {
-                session.hue_saturation = Some(settings);
-                session.preview_adjustment_editing(true);
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut().session.update(cx, |session, _| {
+                    session.hue_saturation = Some(settings);
+                    session.preview_adjustment_editing(true);
+                })
             });
             return;
         }
@@ -274,11 +311,15 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_effect(kind));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.add_effect(kind))
+        });
         if self
-            .tab()
+            .workspace
+            .read(cx)
+            .current()
             .session
             .read(cx)
             .effects_editing
@@ -302,7 +343,7 @@ impl AppState {
             base,
             adjusted,
             self.preview_base_transform,
-            self.current_tab().session.read(cx).selection().cloned(),
+            self.current_tab(cx).session.read(cx).selection().cloned(),
         )
     }
 }

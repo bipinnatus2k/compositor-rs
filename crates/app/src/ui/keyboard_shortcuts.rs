@@ -37,7 +37,7 @@ use gpui_kit::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::floating_panel::{PanelPlacement, panel_names, panel_on_click};
 use crate::ui::{ClickHandler, text_label};
 
@@ -1840,9 +1840,9 @@ mod tests {
 /// port, and the draft remains the baseline-snapshot reading of the Swift
 /// copy-on-edit `draft` — both pre-existing port shapes, untouched here.
 pub struct ShortcutsPanelView {
-    /// The window shell (the transitional root): the save/status flows, the
+    /// The root view (the window shell): the save/status flows, the
     /// keymap rebuild and the panel-close stay there.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// Overrides when the panel opened. The panel edits the live registry as
     /// its draft (each row goes through `set_override`/`reset`); Cancel
     /// restores this snapshot, Done saves it.
@@ -1856,7 +1856,7 @@ pub struct ShortcutsPanelView {
 }
 
 impl ShortcutsPanelView {
-    pub(crate) fn new(app: WeakEntity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(app: WeakEntity<ProjectWorkspaceView>, cx: &mut Context<Self>) -> Self {
         // The baseline is the registry's overrides at open, and the app-wide
         // keystroke interceptor is installed for the panel's lifetime (it
         // only acts while a row is recording) — the sheet's first-render
@@ -2316,7 +2316,7 @@ mod recorder_tests {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `ShortcutSettings.show()` (`KeyboardShortcuts.swift:155-157`): title
     /// "Keyboard Shortcuts". The panel entity carries the editor state
     /// (baseline draft, recording row, keystroke interceptor), created here
@@ -2333,7 +2333,7 @@ impl AppState {
             "Keyboard Shortcuts",
             PanelPlacement::Automatic,
         );
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -2344,7 +2344,7 @@ impl AppState {
     pub fn close_shortcuts_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_views.remove(panel_names::KEYBOARD_SHORTCUTS);
         self.panels.close(panel_names::KEYBOARD_SHORTCUTS);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 

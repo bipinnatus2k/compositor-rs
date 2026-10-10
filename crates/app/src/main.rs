@@ -1,7 +1,7 @@
 //! Compositor: a Photoshop-like image editor. The binary opens one dark
-//! window (see `workspace.rs`) whose state is the `EditorSession` plus the
-//! viewport, tools and sheets. All application logic lives in the library
-//! target (`lib.rs`), so the binary only wires up the window.
+//! window whose root is the `ProjectWorkspaceView` entity (the workspace's
+//! session plus viewport, tools and sheets). All application logic lives in
+//! the library target (`lib.rs`), so the binary only wires up the window.
 
 use compositor_app::{keys, state};
 use gpui_kit::AppContext;
@@ -9,7 +9,7 @@ use gpui_kit::assets::AllAssets;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::{Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
-use state::AppState;
+use state::ProjectWorkspaceView;
 
 fn main() {
     gpui_kit::application().with_assets(AllAssets).run(|cx| {
@@ -36,7 +36,7 @@ fn main() {
                 ..TitleBar::window_options()
             };
             let window = cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| AppState::new(window, cx));
+                let view = cx.new(|cx| ProjectWorkspaceView::new(window, cx));
                 let focus = view.read(cx).focus.clone();
                 window.focus(&focus, cx);
                 cx.new(|cx| Root::new(view, window, cx))

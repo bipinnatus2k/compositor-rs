@@ -12,7 +12,7 @@ use compositor_core::document::NavigationTool;
 use compositor_core::session::EditorSession;
 use compositor_core::session::{BlurToolMode, BrushToolMode, SpotHealingMode};
 
-use crate::state::{AppState, slider};
+use crate::state::{ProjectWorkspaceView, slider};
 use crate::ui::navigation_tool_header::menu_entries;
 use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, text_label};
 
@@ -21,19 +21,18 @@ use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, 
 /// subscriptions (`subscribe_sliders`' brush slice). Only in the render
 /// tree while a brush-family tool is active (Swift's
 /// `if session.tool.isBrushTool`), so it keeps no session observer; its
-/// session field is re-pointed on tab changes by
-/// [`AppState::sync_session_observer`].
+/// session field comes with the per-tab content build (ticket 43).
 pub struct BrushControlsView {
     /// The active tab's session — the readouts and the slider writes speak
     /// to it directly (`BrushControls`' `@Bindable session`).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch and the
-    /// shared header row stay there. No AppState dependencies beyond what
+    /// The root view (the window shell): the repaint epoch and the
+    /// shared header row stay there. No ProjectWorkspaceView dependencies beyond what
     /// the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The Size/Hardness/Opacity/Smoothing sliders (`BrushControls`' four
     /// slider bindings): seeded from the persisted tool defaults at
-    /// construction, exactly as `AppState::new` seeded them when the fields
+    /// construction, exactly as `ProjectWorkspaceView::new` seeded them when the fields
     /// lived there.
     brush_sliders: [Entity<SliderState>; 4],
     /// Keep-alive for the slider subscriptions: dropping a Subscription
@@ -45,7 +44,7 @@ pub struct BrushControlsView {
 impl BrushControlsView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let brush = session.read(cx).brush_settings;
@@ -63,14 +62,6 @@ impl BrushControlsView {
         };
         view.subscribe_sliders(cx);
         view
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel). The slider
-    /// subscriptions read this field at event time, so the re-point keeps
-    /// them writing to the active tab.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// The slider entities, for the shell's brush flows (`resize_brush`,
@@ -107,7 +98,7 @@ impl BrushControlsView {
     }
 
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
@@ -227,10 +218,11 @@ impl BrushControlsView {
                 LabeledCheckbox::new("clone-aligned", "Aligned")
                     .checked(aligned)
                     .with_on_change(app_on(&app, |state, checked, _, cx| {
-                        state
-                            .tab()
-                            .session
-                            .update(cx, |session, _| session.clone_settings.aligned = checked);
+                        state.workspace.update(cx, |ws, cx| {
+                            ws.current_mut()
+                                .session
+                                .update(cx, |session, _| session.clone_settings.aligned = checked)
+                        });
                         state.touch(cx);
                     }))
                     .into_any_element(),
@@ -239,8 +231,10 @@ impl BrushControlsView {
                 LabeledCheckbox::new("clone-all-layers", "Sample All Layers")
                     .checked(all_layers)
                     .with_on_change(app_on(&app, |state, checked, _, cx| {
-                        state.tab().session.update(cx, |session, _| {
-                            session.clone_settings.sample_all_layers = checked
+                        state.workspace.update(cx, |ws, cx| {
+                            ws.current_mut().session.update(cx, |session, _| {
+                                session.clone_settings.sample_all_layers = checked
+                            })
                         });
                         state.touch(cx);
                     }))

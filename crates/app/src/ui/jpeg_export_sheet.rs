@@ -7,10 +7,10 @@ use gpui_kit::component::slider::Slider;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder as _, px};
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::{Dropdown, MenuEntry, app_dispatch, text_label};
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The JPEG export sheet's body: path field, the live encoded preview
     /// (JPEGExportSheet's ZStack + ByteCountFormatter row), the quality
     /// slider and the matte dropdown with its flatten note.
@@ -70,13 +70,13 @@ impl AppState {
                     Dropdown::new("jpeg-matte", if matte == 1 { "Black" } else { "White" })
                         .with_width(px(140.0))
                         .with_entries(vec![
-                            MenuEntry::new("White", |state: &mut AppState, _, cx| {
+                            MenuEntry::new("White", |state: &mut ProjectWorkspaceView, _, cx| {
                                 if let Some(sheet) = state.sheet.as_mut() {
                                     sheet.preset = 0;
                                 }
                                 state.refresh_jpeg_preview(cx);
                             }),
-                            MenuEntry::new("Black", |state: &mut AppState, _, cx| {
+                            MenuEntry::new("Black", |state: &mut ProjectWorkspaceView, _, cx| {
                                 if let Some(sheet) = state.sheet.as_mut() {
                                     sheet.preset = 1;
                                 }

@@ -16,7 +16,7 @@ use compositor_core::selection::{LassoKind, WandMode};
 use compositor_core::session::{EditorSession, SelectionAmountOperation};
 
 use crate::sheets_ui::{SheetRow, parse_input_usize};
-use crate::state::{AppState, slider};
+use crate::state::{ProjectWorkspaceView, slider};
 use crate::ui::floating_panel::{PanelPlacement, panel_body_frame, panel_footer, panel_names};
 use crate::ui::navigation_tool_header::menu_entries;
 use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, text_label};
@@ -26,12 +26,12 @@ use crate::ui::{Dropdown, LabeledCheckbox, LabeledSlider, app_dispatch, app_on, 
 /// its companion slider, kept in two-way sync by the panel's own
 /// subscriptions. The session never appears here — the open/confirm
 /// session mutations stay on the shell, so the panel holds only the seam
-/// its footer routes through. Created by `AppState::open_amount_panel`,
+/// its footer routes through. Created by `ProjectWorkspaceView::open_amount_panel`,
 /// dropped on close.
 pub struct AmountPanelView {
-    /// The window shell (the transitional root): the footer's commit/cancel
+    /// The root view (the window shell): the footer's commit/cancel
     /// flows stay there.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// Which operation is being sized (`SelectionAmountSheet.operation`).
     operation: SelectionAmountOperation,
     /// The amount field (`LassoControls.swift:184`'s `@State input`).
@@ -49,7 +49,7 @@ impl AmountPanelView {
     pub(crate) fn new(
         operation: SelectionAmountOperation,
         amount: i64,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -188,19 +188,19 @@ impl Render for AmountPanelView {
 /// its write subscription (`subscribe_sliders`' wand slice) and renders the
 /// Marquee, Lasso and Wand arms. Only in the render tree while a selection
 /// tool is active (Swift's `if session.tool.isSelectionTool`), so it keeps
-/// no session observer; its session field is re-pointed on tab changes by
-/// [`AppState::sync_session_observer`].
+/// no session observer; its session field comes with the per-tab content
+/// build (ticket 43).
 pub struct LassoControlsView {
     /// The active tab's session — the arm readouts and the tolerance slider
     /// write speak to it directly (`LassoControls`' `@Bindable session`).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch and the
-    /// shared header row stay there. No AppState dependencies beyond what
+    /// The root view (the window shell): the repaint epoch and the
+    /// shared header row stay there. No ProjectWorkspaceView dependencies beyond what
     /// the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The wand tolerance slider (`LassoControls`' tolerance binding):
     /// seeded from the persisted tool default at construction, exactly as
-    /// `AppState::new` seeded it when the field lived there.
+    /// `ProjectWorkspaceView::new` seeded it when the field lived there.
     wand_slider: Entity<SliderState>,
     /// Keep-alive for the slider subscription: dropping a Subscription
     /// unsubscribes, so the bundle is held, never read.
@@ -211,7 +211,7 @@ pub struct LassoControlsView {
 impl LassoControlsView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let tolerance = session.read(cx).wand_settings.tolerance;
@@ -224,14 +224,6 @@ impl LassoControlsView {
         };
         view.subscribe_sliders(cx);
         view
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel). The slider
-    /// subscription reads this field at event time, so the re-point keeps
-    /// it writing to the active tab.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// Keeps the session's wand tolerance in sync with the slider
@@ -252,7 +244,7 @@ impl LassoControlsView {
     }
 
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
@@ -349,18 +341,21 @@ impl LassoControlsView {
             LabeledCheckbox::new("wand-contiguous", "Contiguous")
                 .checked(settings.contiguous)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state
-                        .tab()
-                        .session
-                        .update(cx, |session, _| session.wand_settings.contiguous = checked);
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut()
+                            .session
+                            .update(cx, |session, _| session.wand_settings.contiguous = checked)
+                    });
                     state.touch(cx);
                 }))
                 .into_any_element(),
             LabeledCheckbox::new("wand-all-layers", "Sample All Layers")
                 .checked(settings.sample_all_layers)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state.tab().session.update(cx, |session, _| {
-                        session.wand_settings.sample_all_layers = checked
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.wand_settings.sample_all_layers = checked
+                        })
                     });
                     state.touch(cx);
                 }))
@@ -369,7 +364,7 @@ impl LassoControlsView {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `session.selectionAmountOperation` → selectionAmountPanel, title
     /// "{Operation} Selection" (`ContentView.swift:227-234`). The operation
     /// rides on the core session, which is what blocks project operations
@@ -381,7 +376,9 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if self
-            .tab()
+            .workspace
+            .read(cx)
+            .current()
             .session
             .read(cx)
             .selection_amount_operation
@@ -389,13 +386,15 @@ impl AppState {
         {
             return;
         }
-        let amount = self.tab().session.update(cx, |session, _| {
-            session.selection_amount_operation = Some(operation);
-            match operation {
-                SelectionAmountOperation::Expand => session.selection_expand_amount,
-                SelectionAmountOperation::Contract => session.selection_contract_amount,
-                SelectionAmountOperation::Feather => session.selection_feather_amount,
-            }
+        let amount = self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.selection_amount_operation = Some(operation);
+                match operation {
+                    SelectionAmountOperation::Expand => session.selection_expand_amount,
+                    SelectionAmountOperation::Contract => session.selection_contract_amount,
+                    SelectionAmountOperation::Feather => session.selection_feather_amount,
+                }
+            })
         });
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| AmountPanelView::new(operation, amount, app, window, cx));
@@ -413,7 +412,7 @@ impl AppState {
             title,
             PanelPlacement::Automatic,
         );
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -423,11 +422,13 @@ impl AppState {
         if !self.panels.close(panel_names::SELECTION_AMOUNT_PANEL) {
             return;
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.selection_amount_operation = None);
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.selection_amount_operation = None)
+        });
         self.panel_views.remove(panel_names::SELECTION_AMOUNT_PANEL);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -444,12 +445,14 @@ impl AppState {
                 .map(|panel| panel.read(cx_app).amount_value(cx_app))
                 .unwrap_or(0) as i64
         };
-        self.tab()
-            .session
-            .update(cx, |session, _| session.confirm_selection_amount(amount));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.confirm_selection_amount(amount))
+        });
         self.panel_views.remove(panel_names::SELECTION_AMOUNT_PANEL);
         self.panels.close(panel_names::SELECTION_AMOUNT_PANEL);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 }

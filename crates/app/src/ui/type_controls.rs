@@ -18,8 +18,8 @@ use gpui_kit::{
 use compositor_core::session::EditorSession;
 
 use crate::state::{
-    AppState, TextStyleField, clamp_font_size, format_number, leading_from_text, leading_to_text,
-    number_input, parse_field,
+    ProjectWorkspaceView, TextStyleField, clamp_font_size, format_number, leading_from_text,
+    leading_to_text, number_input, parse_field,
 };
 use crate::ui::{AppCallback, Dropdown, MenuEntry, app_dispatch, app_on, div_row, text_label};
 
@@ -27,20 +27,20 @@ use crate::ui::{AppCallback, Dropdown, MenuEntry, app_dispatch, app_on, div_row,
 /// ticket 42 — it owns the size/tracking/leading field entities and their
 /// write subscriptions (`subscribe_inputs`' text-style slice). Only in the
 /// render tree while the Type tool is active, so it keeps no session
-/// observer; its session field is re-pointed on tab changes by
-/// [`AppState::sync_session_observer`].
+/// observer; its session field comes with the per-tab content build
+/// (ticket 43).
 pub struct TypeControlsView {
     /// The active tab's session — the readouts, the field writes and the
     /// draft buttons speak to it directly (`TypeControls`' `@Bindable
     /// session`).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch, the
+    /// The root view (the window shell): the repaint epoch, the
     /// color picker opening and the shared header row stay there. No
-    /// AppState dependencies beyond what the moved handlers already used.
-    app: WeakEntity<AppState>,
+    /// ProjectWorkspaceView dependencies beyond what the moved handlers already used.
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The numeric fields (TypeControls' size/tracking/leading bindings):
     /// seeded from the current text style at construction, exactly as
-    /// `AppState::new` seeded them when the fields lived there.
+    /// `ProjectWorkspaceView::new` seeded them when the fields lived there.
     type_size_input: Entity<InputState>,
     type_tracking_input: Entity<InputState>,
     type_leading_input: Entity<InputState>,
@@ -53,7 +53,7 @@ pub struct TypeControlsView {
 impl TypeControlsView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -75,14 +75,6 @@ impl TypeControlsView {
         };
         view.subscribe_inputs(cx);
         view
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel). The field
-    /// subscriptions read this field at event time, so the re-point keeps
-    /// them writing to the active tab.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// Wiring for the numeric fields: typing writes straight into the
@@ -110,7 +102,7 @@ impl TypeControlsView {
     }
 
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
@@ -174,8 +166,10 @@ impl TypeControlsView {
     fn sync_inline_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app
             .update(cx, |app, cx| {
-                app.canvas_view
-                    .update(cx, |canvas, cx| canvas.sync_inline_text(window, cx));
+                if let Some(content) = app.content.as_ref() {
+                    let canvas = content.read(cx).canvas_view.clone();
+                    canvas.update(cx, |canvas, cx| canvas.sync_inline_text(window, cx));
+                }
             })
             .ok();
     }
@@ -194,9 +188,11 @@ impl TypeControlsView {
                 let chosen = name.clone();
                 MenuEntry::new(name.clone(), move |state, _, cx| {
                     let chosen = chosen.clone();
-                    state.tab().session.update(cx, |session, _| {
-                        session.change_text_style(move |style| {
-                            style.font_name = chosen;
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.change_text_style(move |style| {
+                                style.font_name = chosen;
+                            })
                         })
                     });
                     state.touch(cx);
@@ -254,9 +250,11 @@ impl TypeControlsView {
                 .into_any_element(),
             AlignmentButtons::new(style.alignment)
                 .with_on_select(app_on(&app, |state, alignment, _, cx| {
-                    state.tab().session.update(cx, |session, _| {
-                        session.change_text_style(move |style| {
-                            style.alignment = alignment;
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.change_text_style(move |style| {
+                                style.alignment = alignment;
+                            })
                         })
                     });
                     state.touch(cx);

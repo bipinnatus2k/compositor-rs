@@ -10,14 +10,14 @@ use std::path::PathBuf;
 use gpui_kit::{Context, IntoElement, Styled, Window, px, rgb};
 
 use crate::project::{ConfirmStep, Pending, Step, TabId, UnsavedChoice};
-use crate::state::{AppState, SaveAfter, Sheet};
+use crate::state::{ProjectWorkspaceView, SaveAfter, Sheet};
 use crate::tabs::ProjectTab;
 use compositor_core::transform::LayerSampling;
 
 /// The live-mask delete alert's informative text (LiveLayerMask.swift:117).
 pub(crate) const DELETE_LIVE_MASK_INFO: &str = "Bake keeps the current masked appearance in the dependent layers’ pixels. Remove Links reveals their pixels. You can undo either choice.";
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// Canvas / tab-bar file drops route through the workspace's `receive`:
     /// `.comp` packages open as projects, images import at the drop point of
     /// the current tab (`ImageFileDrop.importProviders` -> `workspace.receive`).
@@ -30,13 +30,16 @@ impl AppState {
         if paths.is_empty() {
             return;
         }
-        // The drop point is canvas gesture state (ticket 39).
-        let at = self
-            .canvas_view
-            .update(cx, |canvas, _| canvas.drop_point_doc.take());
-        let destination = self.workspace.selected_id();
-        let failures = self.workspace.receive(&paths, Some(destination), at, cx);
-        self.sync_session_observer(cx);
+        // The drop point is canvas gesture state (ticket 39); the canvas is
+        // the active tab content's child (ticket 43).
+        let at = self.content.as_ref().and_then(|content| {
+            let canvas = content.read(cx).canvas_view.clone();
+            canvas.update(cx, |canvas, _| canvas.drop_point_doc.take())
+        });
+        let destination = self.workspace.read(cx).selected_id();
+        let failures = self
+            .workspace
+            .update(cx, |ws, cx| ws.receive(&paths, Some(destination), at, cx));
         if !failures.is_empty() {
             self.set_status(failures.join("; "), cx);
         }
@@ -46,7 +49,8 @@ impl AppState {
     /// Runs a closure with the current tab's (controller, session) pair —
     /// the shape every controller entry point takes. The session entity is
     /// updated once for the whole closure, so the controller and the
-    /// session stay in one borrow scope.
+    /// session stay in one borrow scope. The workspace is an entity
+    /// (ticket 43), so the pair is reached inside its update.
     pub(crate) fn with_current_tab<R>(
         &mut self,
         cx: &mut Context<Self>,
@@ -55,12 +59,14 @@ impl AppState {
             &mut compositor_core::session::EditorSession,
         ) -> R,
     ) -> R {
-        let ProjectTab {
-            session,
-            controller,
-            ..
-        } = self.workspace.current_mut();
-        session.update(cx, |session, _| f(controller, session))
+        self.workspace.update(cx, |ws, cx| {
+            let ProjectTab {
+                session,
+                controller,
+                ..
+            } = ws.current_mut();
+            session.update(cx, |session, _| f(controller, session))
+        })
     }
 
     /// Opens a path-seeded sheet (the save/export/open panels the model
@@ -138,8 +144,8 @@ impl AppState {
                         .unwrap_or_default()
                         .unwrap_or_default();
                     this.update(cx, |this, cx| {
-                        this.workspace.finish_open(picked, cx);
-                        this.sync_session_observer(cx);
+                        this.workspace
+                            .update(cx, |ws, cx| ws.finish_open(picked, cx));
                         this.touch(cx);
                     })
                     .ok();
@@ -180,15 +186,17 @@ impl AppState {
         let (tab_id, after) = self
             .pending_save
             .take()
-            .unwrap_or((self.workspace.selected_id(), SaveAfter::Nothing));
-        let saved = match self.workspace.tab_mut(tab_id) {
-            Some(ProjectTab {
-                session,
-                controller,
-                ..
-            }) => session.update(cx, |session, _| controller.finish_save(session, url)),
-            None => false,
-        };
+            .unwrap_or((self.workspace.read(cx).selected_id(), SaveAfter::Nothing));
+        let saved = self
+            .workspace
+            .update(cx, |ws, cx| match ws.tab_mut(tab_id) {
+                Some(ProjectTab {
+                    session,
+                    controller,
+                    ..
+                }) => session.update(cx, |session, _| controller.finish_save(session, url)),
+                None => false,
+            });
         self.drain_controller_error(window, cx);
         self.follow_save(after, tab_id, saved, window, cx);
     }
@@ -211,14 +219,16 @@ impl AppState {
                 }
             }
             SaveAfter::Close => {
-                let step = self.workspace.close_after_save(saved, cx);
-                self.sync_session_observer(cx);
+                let step = self
+                    .workspace
+                    .update(cx, |ws, cx| ws.close_after_save(saved, cx));
                 self.follow_close_step(step, window, cx);
             }
             SaveAfter::Quit => {
                 let _ = tab_id;
-                let step = self.workspace.quit_after_save(saved, cx);
-                self.sync_session_observer(cx);
+                let step = self
+                    .workspace
+                    .update(cx, |ws, cx| ws.quit_after_save(saved, cx));
                 self.follow_quit_step(step, window, cx);
             }
         }
@@ -256,16 +266,16 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ok = {
+        let ok = self.workspace.update(cx, |ws, cx| {
             let ProjectTab {
                 session,
                 controller,
                 ..
-            } = self.workspace.current_mut();
+            } = ws.current_mut();
             session.update(cx, |session, _| {
                 controller.finish_export_png(session, url.as_deref())
             })
-        };
+        });
         self.drain_controller_error(window, cx);
         if ok && let Some(url) = url {
             self.set_status(format!("Exported {}", url.display()), cx);
@@ -280,16 +290,16 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ok = {
+        let ok = self.workspace.update(cx, |ws, cx| {
             let ProjectTab {
                 session,
                 controller,
                 ..
-            } = self.workspace.current_mut();
+            } = ws.current_mut();
             session.update(cx, |session, _| {
                 controller.finish_export_jpeg(session, url.as_deref(), data)
             })
-        };
+        });
         self.drain_controller_error(window, cx);
         if ok && let Some(url) = url {
             self.set_status(format!("Exported {}", url.display()), cx);
@@ -308,7 +318,7 @@ impl AppState {
         // deleteLayerOrMask: the mask target deletes the mask; the single
         // selection guard matches the workspace's former body.
         let mask_delete = {
-            let session = self.tab().session.read(cx);
+            let session = self.workspace.read(cx).current().session.read(cx);
             session.is_mask_selected
                 && session
                     .active_layer()
@@ -317,16 +327,20 @@ impl AppState {
                 && session.selected_layer_ids.len() <= 1
         };
         if mask_delete {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.delete_layer_mask());
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.delete_layer_mask())
+            });
             self.touch(cx);
             return;
         }
         if !self.delete_needs_ask(cx) {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.delete_selected_layers());
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.delete_selected_layers())
+            });
             self.touch(cx);
             return;
         }
@@ -390,18 +404,21 @@ impl AppState {
         let step = self.take_confirm_step(cx);
         match step {
             ConfirmStep::Close => {
-                match self.workspace.resolve_close(choice, cx) {
+                match self
+                    .workspace
+                    .update(cx, |ws, cx| ws.resolve_close(choice, cx))
+                {
                     Step::Done(()) => {
-                        self.sync_session_observer(cx);
                         self.touch(cx);
                     }
                     Step::Pending(Pending::SaveAs { .. }) => {
                         // The Save button raised a save panel on the asked
                         // tab; resume the close flow after it completes.
+                        let workspace = self.workspace.read(cx);
                         self.pending_save = Some((
-                            self.workspace
+                            workspace
                                 .close_pending_tab()
-                                .unwrap_or_else(|| self.workspace.selected_id()),
+                                .unwrap_or_else(|| workspace.selected_id()),
                             SaveAfter::Close,
                         ));
                         self.present_pending_save_flow(window, cx);
@@ -410,22 +427,22 @@ impl AppState {
                 };
             }
             ConfirmStep::Quit => {
-                match self.workspace.resolve_quit(choice, cx) {
+                match self
+                    .workspace
+                    .update(cx, |ws, cx| ws.resolve_quit(choice, cx))
+                {
                     Step::Done(true) => {
                         // The flow finished — a window close (the tabs were
                         // reset) or an explicit quit either way ends here.
-                        self.sync_session_observer(cx);
                         window.remove_window();
                     }
                     // advance_quit may have foregrounded an asked tab
                     // before the refusal.
-                    Step::Done(false) => {
-                        self.sync_session_observer(cx);
-                        self.touch(cx)
-                    }
+                    Step::Done(false) => self.touch(cx),
                     Step::Pending(Pending::SaveAs { .. }) => {
                         // The asked tab is the one on screen.
-                        self.pending_save = Some((self.workspace.selected_id(), SaveAfter::Quit));
+                        self.pending_save =
+                            Some((self.workspace.read(cx).selected_id(), SaveAfter::Quit));
                         self.present_pending_save_flow(window, cx);
                     }
                     Step::Pending(pending) => self.present_pending(pending, window, cx),
@@ -466,13 +483,13 @@ impl AppState {
         let step = self.take_confirm_step(cx);
         match step {
             ConfirmStep::Close => {
-                self.workspace.resolve_close(UnsavedChoice::Cancel, cx);
-                self.sync_session_observer(cx);
+                self.workspace
+                    .update(cx, |ws, cx| ws.resolve_close(UnsavedChoice::Cancel, cx));
                 self.touch(cx);
             }
             ConfirmStep::Quit => {
-                self.workspace.resolve_quit(UnsavedChoice::Cancel, cx);
-                self.sync_session_observer(cx);
+                self.workspace
+                    .update(cx, |ws, cx| ws.resolve_quit(UnsavedChoice::Cancel, cx));
                 self.touch(cx);
             }
             ConfirmStep::Open => {
@@ -493,27 +510,32 @@ impl AppState {
                 let (tab_id, after) = self
                     .pending_save
                     .take()
-                    .unwrap_or((self.workspace.selected_id(), SaveAfter::Nothing));
-                let saved = match self.workspace.tab_mut(tab_id) {
-                    Some(ProjectTab {
-                        session,
-                        controller,
-                        ..
-                    }) => session.update(cx, |session, _| controller.finish_save(session, None)),
-                    None => false,
-                };
+                    .unwrap_or((self.workspace.read(cx).selected_id(), SaveAfter::Nothing));
+                let saved =
+                    self.workspace
+                        .update(cx, |ws, cx| match ws.tab_mut(tab_id) {
+                            Some(ProjectTab {
+                                session,
+                                controller,
+                                ..
+                            }) => session
+                                .update(cx, |session, _| controller.finish_save(session, None)),
+                            None => false,
+                        });
                 // A save panel raised by the close/quit flow's Save button
                 // resumes that flow with "not saved", releasing its guard.
                 match after {
                     SaveAfter::Nothing => {}
                     SaveAfter::Close => {
-                        let step = self.workspace.close_after_save(saved, cx);
-                        self.sync_session_observer(cx);
+                        let step = self
+                            .workspace
+                            .update(cx, |ws, cx| ws.close_after_save(saved, cx));
                         self.follow_close_step(step, window, cx);
                     }
                     SaveAfter::Quit => {
-                        let step = self.workspace.quit_after_save(saved, cx);
-                        self.sync_session_observer(cx);
+                        let step = self
+                            .workspace
+                            .update(cx, |ws, cx| ws.quit_after_save(saved, cx));
                         self.follow_quit_step(step, window, cx);
                     }
                 }
@@ -564,11 +586,14 @@ impl AppState {
         if self.sheet.is_some() {
             return;
         }
-        if let Some((title, message)) = if self.workspace.errors.is_empty() {
-            None
-        } else {
-            Some(self.workspace.errors.remove(0))
-        } {
+        let next_error = self.workspace.update(cx, |ws, _| {
+            if ws.errors.is_empty() {
+                None
+            } else {
+                Some(ws.errors.remove(0))
+            }
+        });
+        if let Some((title, message)) = next_error {
             self.open_alert(&title, &message, window, cx);
         }
     }
@@ -576,15 +601,17 @@ impl AppState {
     /// Drains queued file receives once the guards cleared; failures land in
     /// the status bar.
     pub fn drain_queued_receives(&mut self, cx: &mut Context<Self>) {
-        if self.workspace.has_queued_receives() {
-            let failures = self.workspace.drain_incoming(cx);
-            self.sync_session_observer(cx);
+        if self.workspace.read(cx).has_queued_receives() {
+            let failures = self.workspace.update(cx, |ws, cx| ws.drain_incoming(cx));
             if !failures.is_empty() {
                 // A quiet store, like the direct field write it replaces:
                 // no repaint epoch bump; the pump's drain-pass notify shows
-                // it (the text itself lives on the bar entity, ticket 42).
-                self.status_bar
-                    .update(cx, |bar, _| bar.set_status(failures.join("; ")));
+                // it (the text lives on the bar entity, ticket 42; the bar
+                // is the active tab content's child, ticket 43).
+                if let Some(content) = self.content.as_ref() {
+                    let bar = content.read(cx).status_bar.clone();
+                    bar.update(cx, |bar, _| bar.set_status(failures.join("; ")));
+                }
             }
         }
     }

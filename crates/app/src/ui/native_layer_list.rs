@@ -2,10 +2,11 @@
 //! active layer, the layer list (top-to-bottom), and the footer layer
 //! actions — the port of Swift's `LayersPanel` + `NativeLayerList` +
 //! `LayerAppearanceControls` + the footer menu family (ADR 0003 step C,
-//! ticket 40). The window shell (`AppState`, the transitional root) keeps
+//! ticket 40). The window shell (`ProjectWorkspaceView`, the transitional root) keeps
 //! the delete-ask flows, the panel openings, the status line and the
 //! revision epoch; the panel reaches them through its
-//! `app: WeakEntity<AppState>` seam until ticket 43 reshapes it.
+//! `app: WeakEntity<ProjectWorkspaceView>` seam (renamed with the root,
+//! ticket 43).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -32,7 +33,7 @@ use compositor_core::effects::{LayerEffectKind, LayerEffectSelection};
 use compositor_core::selection::SelectionMode;
 use compositor_core::session::EditorSession;
 
-use crate::state::{AppState, bgra_render_image, slider};
+use crate::state::{ProjectWorkspaceView, bgra_render_image, slider};
 use crate::ui::{ClickHandler, Dropdown, MenuEntry, app_dispatch, text_label};
 
 const THUMB: f32 = 30.0;
@@ -158,15 +159,14 @@ fn delete_target(session: &compositor_core::session::EditorSession) -> DeleteTar
 pub struct LayersPanelView {
     /// The active tab's session — the header readouts, the layer rows and
     /// the footer guards read it, and the panel's handlers mutate it
-    /// directly (Swift's panel speaks to its session the same way).
-    /// Re-pointed on tab changes by [`AppState::sync_session_observer`]
-    /// (the per-tab rebuild lands with ticket 43).
+    /// directly (Swift's panel speaks to its session the same way); it
+    /// comes with the per-tab content build (ticket 43).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the delete-ask flows, the
+    /// The root view (the window shell): the delete-ask flows, the
     /// effects/adjustment panel openings and the touch/revision epoch stay
-    /// there. No AppState dependencies beyond what the moved handlers
+    /// there. No ProjectWorkspaceView dependencies beyond what the moved handlers
     /// already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The layers-panel rename edit field (`renamingLayerID`'s widget half;
     /// the session flag itself lives in the core session since stage-D
     /// ticket 35). Built in [`Self::begin_rename`] — an input needs the
@@ -185,21 +185,20 @@ pub struct LayersPanelView {
     subscriptions: Vec<Subscription>,
     /// The observe subscription on the active tab's session entity (ticket
     /// 40's item 1): a session-entity notify re-renders this panel alone.
-    /// Re-attached whenever the active tab changes
-    /// ([`Self::set_session`]); kept in a dedicated field — not
-    /// `subscriptions` — so a tab switch drops the outgoing session's
-    /// observation.
+    /// Attached once in the constructor (a rebuild brings a fresh panel);
+    /// kept in a dedicated field — not `subscriptions` — per the ticket-40
+    /// shape.
     session_observer: Option<(Entity<EditorSession>, Subscription)>,
 }
 
 impl LayersPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         // LayerAppearanceControls' opacity slider: 0…100 %, whole steps —
-        // the same seed `AppState::new` used when the slider lived there.
+        // the same seed `ProjectWorkspaceView::new` used when the slider lived there.
         let opacity_slider = cx.new(|_| slider(0.0, 100.0, 1.0, 100.0));
         let mut panel = LayersPanelView {
             session,
@@ -252,36 +251,21 @@ impl LayersPanelView {
         self.session_observer = Some((session, subscription));
     }
 
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view; the per-tab rebuild itself lands with ticket
-    /// 43): the observation follows, so the non-active tab is not observed.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>, cx: &mut Context<Self>) {
-        if self
-            .session_observer
-            .as_ref()
-            .is_some_and(|(observed, _)| observed.entity_id() == session.entity_id())
-        {
-            return;
-        }
-        self.session = session;
-        self.attach_session_observer(cx);
-    }
-
     /// The panel's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// a panel interaction that changed the session asks the shell through
     /// the seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.touch(cx)).ok();
     }
 
-    /// The header slider entity, for `AppState::opacity_digit`'s Move-tool
+    /// The header slider entity, for `ProjectWorkspaceView::opacity_digit`'s Move-tool
     /// sync — the one write to it from outside this view.
     pub(crate) fn opacity_slider(&self) -> Entity<SliderState> {
         self.opacity_slider.clone()
     }
 
-    /// Drops the rename input; the caller (`AppState::cancel_active`'s
+    /// Drops the rename input; the caller (`ProjectWorkspaceView::cancel_active`'s
     /// Escape chain) already cleared `renaming_layer_id` through the
     /// session.
     pub(crate) fn discard_rename_input(&mut self) {

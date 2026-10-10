@@ -5,10 +5,10 @@ use gpui_kit::component::input::Input;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, px};
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::{LabeledCheckbox, app_on, text_label};
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The Image Size sheet's body: width/height fields, the Percent unit
     /// checkbox, the resolution field and the aspect-link constraint.
     pub(crate) fn image_size_body(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {

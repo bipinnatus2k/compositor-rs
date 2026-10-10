@@ -19,7 +19,7 @@ use compositor_core::adjust::{ColorRange, HueSaturationSettings, RangeAdjustment
 use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::SheetRow;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::LabeledCheckbox;
 use crate::ui::floating_panel::{
     PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on,
@@ -28,7 +28,7 @@ use crate::ui::sheets::panel_value;
 
 /// The Hue/Saturation panel as its own view entity (Swift
 /// `HueSaturationSheet`'s edit state; ticket 41). Created by
-/// `AppState::open_hue_saturation_panel`, dropped on close, so its session
+/// `ProjectWorkspaceView::open_hue_saturation_panel`, dropped on close, so its session
 /// can never go stale (tab switches are blocked while any panel is open).
 pub struct HueSaturationPanelView {
     /// The session this panel edits. Unread today — every interaction
@@ -37,9 +37,9 @@ pub struct HueSaturationPanelView {
     /// rebuild.
     #[allow(dead_code)]
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the preview recompute and
+    /// The root view (the window shell): the preview recompute and
     /// the commit/cancel flows stay there.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The three sliders: hue (-180…180), saturation and lightness
     /// (-100…100).
     sliders: Vec<Entity<SliderState>>,
@@ -51,7 +51,7 @@ pub struct HueSaturationPanelView {
 impl HueSaturationPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut panel = HueSaturationPanelView {
@@ -182,12 +182,12 @@ impl Render for HueSaturationPanelView {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `session.hueSaturation != nil` → adjustmentPanel, title
     /// "Hue/Saturation" (`ContentView.swift:208-215`).
     pub fn open_hue_saturation_panel(&mut self, cx: &mut Context<Self>) {
         self.begin_preview(cx);
-        let session = self.tab().session.clone();
+        let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| HueSaturationPanelView::new(session, app, cx));
         self.panel_views.insert(
@@ -199,7 +199,7 @@ impl AppState {
             "Hue/Saturation",
             PanelPlacement::Automatic,
         );
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -208,10 +208,20 @@ impl AppState {
         if !self.panels.close(panel_names::ADJUSTMENT_PANEL) {
             return;
         }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(false))
+            });
         }
         self.panel_views.remove(panel_names::ADJUSTMENT_PANEL);
         self.after_panel_editing_closed(cx);
@@ -221,10 +231,20 @@ impl AppState {
         if !self.panels.is_visible(panel_names::ADJUSTMENT_PANEL) {
             return;
         }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(true))
+            });
         } else {
             self.commit_preview_pixels("Hue/Saturation", cx);
         }

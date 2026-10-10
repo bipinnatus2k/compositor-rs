@@ -2,7 +2,7 @@
 //! (ADR 0003 step D, ticket 41): which filter is open, its sliders, Add
 //! Noise's two checkboxes and — folded in, since they share one open/close
 //! and one preview path — the Curves editor state (`CurvesControls`'s
-//! `settings`/`selected`/`dragging`, the former `AppState.curves_editor`),
+//! `settings`/`selected`/`dragging`, the former `ProjectWorkspaceView.curves_editor`),
 //! plus the open-panel-time noise seed (fixed for the panel's whole session,
 //! `FilterEdit.seed`, Filters.swift:223). The shell keeps the preview
 //! recompute and the commit flows, reached through the panel's seam
@@ -21,7 +21,7 @@ use compositor_core::filters::FilterSettings;
 use compositor_core::session::EditorSession;
 
 use crate::sheets_ui::SheetRow;
-use crate::state::{AppState, CurvesEditor, time_seed};
+use crate::state::{CurvesEditor, ProjectWorkspaceView, time_seed};
 use crate::ui::floating_panel::{
     PanelPlacement, panel_body_frame, panel_footer, panel_names, panel_on, panel_on_drag_move,
     panel_on_drag_up,
@@ -32,7 +32,7 @@ use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, text_label};
 
 /// The filter panel as its own view entity (Swift `FilterSheet`'s edit
 /// state plus `CurvesControls`' editor; ticket 41). Created by
-/// `AppState::open_filter_panel`, dropped on close — which is what retires
+/// `ProjectWorkspaceView::open_filter_panel`, dropped on close — which is what retires
 /// the noise seed and the curves editor ("fixed while the panel is open"
 /// semantics, unchanged). Its session can never go stale: tab switches are
 /// blocked while any panel is open.
@@ -43,11 +43,11 @@ pub struct FilterPanelView {
     /// rebuild.
     #[allow(dead_code)]
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the preview recompute and
+    /// The root view (the window shell): the preview recompute and
     /// the commit/cancel flows stay there. `pub(crate)`: the curves gesture
     /// impl block lives in curves_controls.rs (the session.rs split-impl
     /// layout).
-    pub(crate) app: WeakEntity<AppState>,
+    pub(crate) app: WeakEntity<ProjectWorkspaceView>,
     /// Which filter is open.
     kind: FilterKind,
     /// The open filter's sliders (Camera Raw carries fourteen).
@@ -71,7 +71,7 @@ pub struct FilterPanelView {
 impl FilterPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         kind: FilterKind,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -479,13 +479,13 @@ impl Render for FilterPanelView {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// `session.filterEdit != nil` → filterPanel (`ContentView.swift:236-246`):
     /// title = the filter's label; Camera Raw opens
     /// `DockedToMainWindowRight`, every other filter `Automatic`.
     pub fn open_filter_panel(&mut self, kind: FilterKind, cx: &mut Context<Self>) {
         self.begin_preview(cx);
-        let session = self.tab().session.clone();
+        let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| FilterPanelView::new(session, app, kind, cx));
         self.panel_views.insert(
@@ -499,7 +499,7 @@ impl AppState {
         };
         self.panels
             .show(panel_names::FILTER_PANEL, kind.label(), placement);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -511,10 +511,20 @@ impl AppState {
         if !self.panels.close(panel_names::FILTER_PANEL) {
             return;
         }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(false));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(false))
+            });
         }
         self.panel_views.remove(panel_names::FILTER_PANEL);
         self.after_panel_editing_closed(cx);
@@ -526,10 +536,20 @@ impl AppState {
         if !self.panels.is_visible(panel_names::FILTER_PANEL) {
             return;
         }
-        if self.tab().session.read(cx).adjustment_editing_id.is_some() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_adjustment_editing(true));
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .adjustment_editing_id
+            .is_some()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_adjustment_editing(true))
+            });
         } else {
             let name = self
                 .filter_view()

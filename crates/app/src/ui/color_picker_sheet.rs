@@ -7,7 +7,7 @@
 //! drags feed the same state the former sliders did, including an effect
 //! color's live preview. The hex entry is the panel's own field — Swift's
 //! `@State hexDraft` (ColorPickerSheet.swift:10), the former
-//! `AppState.picker_ui`.
+//! `ProjectWorkspaceView.picker_ui`.
 //!
 //! Layout divergence: Swift also has R/G/B number entry fields. They are not
 //! in this cut — the port kept nowhere to host three more input entities,
@@ -31,7 +31,7 @@ use image::Frame;
 use compositor_core::document::{PaletteColor, PickerHSB};
 use compositor_core::session::{ColorPickerTarget, EditorSession};
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::floating_panel::{panel_on_click, panel_on_drag_move, panel_on_press};
 use crate::ui::{ClickHandler, DragMoveHandler, PressHandler, text_label};
 
@@ -59,10 +59,10 @@ const BACKING_SCALE: f32 = 2.0;
 /// close.
 pub struct ColorPickerPanelView {
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the commit/close flow stays
+    /// The root view (the window shell): the commit/close flow stays
     /// there (the OK/Cancel read the hex first, then close the session's
     /// picker).
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The hex entry (`ColorPickerSheet.swift:10`'s `@State hexDraft`); a
     /// well-formed entry overrides the field at commit.
     hex: Entity<InputState>,
@@ -71,7 +71,7 @@ pub struct ColorPickerPanelView {
 impl ColorPickerPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         hex: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -866,7 +866,7 @@ pub fn hue_strip_bitmap(width: usize, height: usize) -> Vec<u8> {
     data
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The palette swatch's picker opener (`ColorPickerSheet.swift:167-181`):
     /// arm the session's picker, put the panel entity (with the color's hex
     /// prefilled) in the registry, and show the shared floating panel —
@@ -878,16 +878,33 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab().session.read(cx).color_picker.is_some()
-            || !self.tab().session.read(cx).can_edit_palette()
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .color_picker
+            .is_some()
+            || !self
+                .workspace
+                .read(cx)
+                .current()
+                .session
+                .read(cx)
+                .can_edit_palette()
         {
             return;
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.open_color_picker(background));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.open_color_picker(background))
+        });
         let hex = self
-            .tab()
+            .workspace
+            .read(cx)
+            .current()
             .session
             .read(cx)
             .color_picker
@@ -897,14 +914,16 @@ impl AppState {
             return;
         };
         let title = self
-            .tab()
+            .workspace
+            .read(cx)
+            .current()
             .session
             .read(cx)
             .color_picker
             .as_ref()
             .map(|picker| picker.target.title())
             .unwrap_or_default();
-        let session = self.tab().session.clone();
+        let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         // A stale drag from a previous open must not survive.
         cx.default_global::<PickerFieldState>().drag = None;
@@ -918,7 +937,7 @@ impl AppState {
             title,
             crate::ui::floating_panel::PanelPlacement::Automatic,
         );
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         self.touch(cx);
     }
 
@@ -938,21 +957,25 @@ impl AppState {
                 _ => String::new(),
             };
             if let Some(color) = PaletteColor::from_hex(&text) {
-                self.tab().session.update(cx, |session, _| {
-                    if let Some(picker) = session.color_picker.as_mut() {
-                        picker.hsb = PickerHSB::from_rgb(color);
-                    }
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        if let Some(picker) = session.color_picker.as_mut() {
+                            picker.hsb = PickerHSB::from_rgb(color);
+                        }
+                    })
                 });
             }
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.close_color_picker(commit));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.close_color_picker(commit))
+        });
         self.panel_views
             .remove(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
         self.panels
             .close(crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL);
-        self.sync_panel_guard();
+        self.sync_panel_guard(cx);
         cx.default_global::<PickerFieldState>().drag = None;
         self.touch(cx);
     }

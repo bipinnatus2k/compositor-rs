@@ -9,38 +9,35 @@ use gpui_kit::{Context, Entity, IntoElement, WeakEntity, px};
 
 use compositor_core::session::EditorSession;
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 use crate::ui::navigation_tool_header::menu_entries;
 use crate::ui::{Dropdown, app_dispatch};
 
 /// The crop tool's option bar (`CropControls.swift`): a view entity since
 /// ticket 42. It carries no widget state of its own (Swift's bar is
 /// `@Bindable session` only); only in the render tree while the crop tool
-/// is active, so it keeps no session observer, and its session field is
-/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+/// is active, so it keeps no session observer; its session field comes
+/// with the per-tab content build (ticket 43).
 pub struct CropControlsView {
     /// The active tab's session — the ratio readout and the Apply/Cancel
     /// writes speak to it directly.
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch and the
-    /// shared header row stay there. No AppState dependencies beyond what
+    /// The root view (the window shell): the repaint epoch and the
+    /// shared header row stay there. No ProjectWorkspaceView dependencies beyond what
     /// the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
 }
 
 impl CropControlsView {
-    pub(crate) fn new(session: Entity<EditorSession>, app: WeakEntity<AppState>) -> Self {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<ProjectWorkspaceView>,
+    ) -> Self {
         CropControlsView { session, app }
     }
 
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel).
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
-    }
-
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {

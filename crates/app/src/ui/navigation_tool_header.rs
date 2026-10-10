@@ -1,12 +1,11 @@
-//! The left tool rail and the options header shell (NavigationToolHeader.swift
-//! plus ContentView's `toolHeaders` group): the tool title and the dispatch
-//! to each tool's controls. The per-tool control sets are view entities
-//! (ADR 0003 step E, ticket 42) living beside their Swift sources
-//! (`ui/brush_controls.rs`, `ui/lasso_controls.rs`, `ui/crop_controls.rs`,
-//! `ui/shape_controls.rs`, `ui/type_controls.rs`,
-//! `ui/transform_inspector.rs`); the NavigationToolHeader and
-//! GradientControls entities stay here, where their arms were carved
-//! (GradientControls has no file of its own in the port).
+//! The NavigationToolHeader and GradientControls view entities
+//! (NavigationToolHeader.swift; GradientControls has no file of its own in
+//! the port) plus the tool-rail entries and tool titles the per-tab
+//! content's assembly (`content_view.rs`, ticket 43) renders. The per-tool
+//! control sets are view entities (ADR 0003 step E, ticket 42) living
+//! beside their Swift sources (`ui/brush_controls.rs`, `ui/lasso_controls.rs`,
+//! `ui/crop_controls.rs`, `ui/shape_controls.rs`, `ui/type_controls.rs`,
+//! `ui/transform_inspector.rs`).
 
 use std::rc::Rc;
 
@@ -16,9 +15,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{Selectable, Sizable};
 use gpui_kit::{
-    App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-    px,
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, px,
 };
 
 use compositor_core::document::NavigationTool;
@@ -26,23 +24,17 @@ use compositor_core::session::{BrushToolMode, EditorSession};
 use compositor_core::tools::brush::GradientShape;
 
 use crate::canvas::editor_canvas::CanvasDrag;
-use crate::state::{AppState, slider};
-use crate::ui::brush_controls::BrushControlsView;
-use crate::ui::crop_controls::CropControlsView;
-use crate::ui::lasso_controls::LassoControlsView;
-use crate::ui::shape_controls::ShapeControlsView;
-use crate::ui::transform_inspector::TransformInspectorView;
-use crate::ui::type_controls::TypeControlsView;
+use crate::state::{ProjectWorkspaceView, slider};
 use crate::ui::{
     AppCallback, ClickHandler, Dropdown, LabeledCheckbox, LabeledSlider, MenuEntry, app_dispatch,
-    app_on, app_on_click, text_label,
+    app_on, text_label,
 };
 
 /// The rail entries in display order: (tool, id letter, Lucide icon, name,
 /// eraser-variant flag). The letter only names the button element (kept so
 /// existing element ids are stable); the glyph comes from the bundled
 /// Lucide set (`gpui_kit::assets`). Brush and Eraser share the Brush tool.
-const TOOLS: [(NavigationTool, &str, IconName, &str, bool); 16] = [
+pub(crate) const TOOLS: [(NavigationTool, &str, IconName, &str, bool); 16] = [
     (
         NavigationTool::Move,
         "V",
@@ -103,7 +95,7 @@ const TOOLS: [(NavigationTool, &str, IconName, &str, bool); 16] = [
     (NavigationTool::Zoom, "Z", IconName::ZoomIn, "Zoom", false),
 ];
 
-fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
+pub(crate) fn tool_title(tool: NavigationTool, erasing: bool) -> &'static str {
     match tool {
         NavigationTool::Move => "Move",
         NavigationTool::Marquee => "Marquee",
@@ -160,10 +152,11 @@ where
         .map(|(value, label)| {
             let assign = set.clone();
             MenuEntry::new(label, move |state, _, cx| {
-                state
-                    .tab()
-                    .session
-                    .update(cx, |session, _| assign(session, value));
+                state.workspace.update(cx, |ws, cx| {
+                    ws.current_mut()
+                        .session
+                        .update(cx, |session, _| assign(session, value))
+                });
                 state.touch(cx);
             })
             .checked(current == value)
@@ -171,7 +164,7 @@ where
         .collect()
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     pub fn set_tool(&mut self, tool: NavigationTool, cx: &mut Context<Self>) {
         // `selectTool` (EditorSession.swift:332-352) lives on the session
         // now, with its guards (:334) — the busy flags are session fields
@@ -180,16 +173,17 @@ impl AppState {
         // adjustment editor is the port's stand-in for Swift's `levels`
         // sheet. A refused switch (a failing text apply) leaves the shape
         // drag up, like every session-side gate.
-        let dragging = self.canvas_view.read(cx).drag.as_ref();
-        if matches!(
-            dragging,
-            Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
-        ) {
+        let stroke_or_warp = self
+            .content
+            .as_ref()
+            .and_then(|content| content.read(cx).canvas_view.read(cx).drag.as_ref())
+            .is_some_and(|drag| matches!(drag, CanvasDrag::Stroke(..) | CanvasDrag::Warp(..)));
+        if stroke_or_warp {
             return;
         }
-        if self.current_tab().session.read(cx).is_project_busy
+        if self.current_tab(cx).session.read(cx).is_project_busy
             || self
-                .current_tab()
+                .current_tab(cx)
                 .session
                 .read(cx)
                 .adjustment_editing_id
@@ -197,215 +191,37 @@ impl AppState {
         {
             return;
         }
-        if !self
-            .tab()
-            .session
-            .update(cx, |session, _| session.select_tool(tool))
-        {
+        if !self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.select_tool(tool))
+        }) {
             return;
         }
         // A shape drag dies with the switch (Swift's cancelShape :335); it
         // lives on the canvas, so dropping it here is the whole cancel.
-        if self
-            .canvas_view
-            .read(cx)
-            .drag
-            .as_ref()
-            .is_some_and(|drag| matches!(drag, CanvasDrag::Shape { .. }))
-        {
-            self.canvas_view.update(cx, |canvas, _| canvas.drag = None);
+        if let Some(content) = self.content.as_ref() {
+            let canvas = content.read(cx).canvas_view.clone();
+            if canvas
+                .read(cx)
+                .drag
+                .as_ref()
+                .is_some_and(|drag| matches!(drag, CanvasDrag::Shape { .. }))
+            {
+                canvas.update(cx, |canvas, _| canvas.drag = None);
+            }
         }
         self.touch(cx);
     }
 
     pub fn set_tool_eraser(&mut self, cx: &mut Context<Self>) {
         self.set_tool(NavigationTool::Brush, cx);
-        self.tab()
-            .session
-            .update(cx, |session, _| session.brush_mode = BrushToolMode::Erase);
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.brush_mode = BrushToolMode::Erase)
+        });
         self.touch(cx);
-    }
-
-    // MARK: Tool rail
-
-    pub fn render_tool_rail(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let app = cx.entity().downgrade();
-        let (active, eraser_active) = {
-            let session = self.tab().session.read(cx);
-            (
-                session.tool,
-                session.tool == NavigationTool::Brush && session.brush_mode == BrushToolMode::Erase,
-            )
-        };
-
-        let mut rail = gpui_kit::div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .w(px(44.0))
-            .flex_shrink_0()
-            .py_1()
-            .bg(crate::ui::panel_bg());
-
-        for (tool, letter, icon, name, eraser_entry) in TOOLS {
-            let selected = if eraser_entry {
-                eraser_active
-            } else if tool == NavigationTool::Brush {
-                active == NavigationTool::Brush && !eraser_active
-            } else {
-                active == tool
-            };
-            rail = rail.child(
-                ToolButton::new(tool, letter, icon, name, eraser_entry, selected).with_on_click(
-                    app_on_click(&app, move |state, _, _, cx| {
-                        if eraser_entry {
-                            state.set_tool_eraser(cx);
-                        } else {
-                            state.set_tool(tool, cx);
-                        }
-                    }),
-                ),
-            );
-        }
-
-        // Foreground / background swatches: clicking either opens the color
-        // picker on it (ColorPalette.swift:60; the X key still swaps).
-        let foreground = self.tab().session.read(cx).palette_color(false);
-        let background = self.tab().session.read(cx).palette_color(true);
-        rail = rail.child(
-            gpui_kit::div()
-                .mt_2()
-                .id("palette")
-                .w(px(28.0))
-                .h(px(28.0))
-                .relative()
-                .child(
-                    Swatch::new("swatch-background", 6.0, 6.0, background).with_on_click(
-                        app_on_click(&app, |state, _, window, cx| {
-                            state.open_color_picker_ui(true, window, cx);
-                        }),
-                    ),
-                )
-                .child(
-                    Swatch::new("swatch-foreground", 0.0, 0.0, foreground).with_on_click(
-                        app_on_click(&app, |state, _, window, cx| {
-                            state.open_color_picker_ui(false, window, cx);
-                        }),
-                    ),
-                ),
-        );
-
-        rail.into_any_element()
-    }
-
-    // MARK: Options header
-
-    /// The options header row (Swift `toolHeaders`' shared bar): the title
-    /// plus the active tool's controls. Each per-tool control set is a view
-    /// entity (ticket 42); only the active tool's entity is consulted per
-    /// pass, mirroring Swift's `if session.tool == ...` branches — the
-    /// entities are persistent (`AppState` fields) and re-pointed on tab
-    /// changes by [`AppState::sync_session_observer`].
-    pub fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let (tool, erasing) = {
-            let session = self.tab().session.read(cx);
-            (session.tool, session.brush_mode == BrushToolMode::Erase)
-        };
-
-        let mut header = gpui_kit::div()
-            // Stateful so the bar can scroll sideways (overflow_x_scroll is a
-            // StatefulInteractiveElement method, gpui div.rs).
-            .id("options-header")
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            // ToolHeaderStyle.swift:5 (height 42) and BrushControls.swift:111
-            // (horizontal padding 18).
-            .h(px(42.0))
-            .px(px(18.0))
-            .gap_3()
-            .flex_shrink_0()
-            // Dense bars (Type, Move) run out of width; scroll sideways
-            // instead of clipping the tail controls.
-            .overflow_x_scroll()
-            .bg(crate::ui::panel_bg());
-
-        header = header.child(
-            text_label(tool_title(tool, erasing), false)
-                .w(px(82.0))
-                // ToolHeaderStyle.swift:6: the title is 13pt semibold.
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .flex_shrink_0(),
-        );
-
-        match tool {
-            NavigationTool::Brush
-            | NavigationTool::SpotHealing
-            | NavigationTool::Blur
-            | NavigationTool::CloneStamp => {
-                header = header.children(
-                    self.brush_header
-                        .update(cx, BrushControlsView::brush_controls),
-                );
-            }
-            NavigationTool::Marquee => {
-                header = header.children(
-                    self.lasso_header
-                        .update(cx, LassoControlsView::marquee_controls),
-                );
-            }
-            NavigationTool::Lasso => {
-                header = header.children(
-                    self.lasso_header
-                        .update(cx, LassoControlsView::lasso_controls),
-                );
-            }
-            NavigationTool::Wand => {
-                header = header.children(
-                    self.lasso_header
-                        .update(cx, LassoControlsView::wand_controls),
-                );
-            }
-            NavigationTool::Gradient => {
-                // Swift home: GradientControls.swift; the entity lives here,
-                // where the arm was carved (no file of its own in the port).
-                header = header.children(
-                    self.gradient_header
-                        .update(cx, GradientControlsView::gradient_controls),
-                );
-            }
-            NavigationTool::Zoom | NavigationTool::Hand => {
-                header = header.children(
-                    self.navigation_header
-                        .update(cx, NavigationToolHeaderView::controls),
-                );
-            }
-            NavigationTool::Crop => {
-                header =
-                    header.children(self.crop_header.update(cx, CropControlsView::crop_controls));
-            }
-            _ => {}
-        }
-
-        if tool == NavigationTool::Move {
-            header = header.children(
-                self.transform_header
-                    .update(cx, TransformInspectorView::transform_inspector),
-            );
-        }
-        if tool == NavigationTool::Type {
-            header = header.children(self.type_header.update(cx, TypeControlsView::type_controls));
-        }
-        if tool == NavigationTool::Shape {
-            header = header.children(
-                self.shape_header
-                    .update(cx, ShapeControlsView::shape_controls),
-            );
-        }
-
-        header.into_any_element()
     }
 }
 
@@ -418,21 +234,18 @@ impl AppState {
 pub struct NavigationToolHeaderView {
     /// The active tab's session — the branch pick reads its tool.
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the zoom commands route
-    /// through it (`zoom_fit`, the keyboard zoom levels). No AppState
+    /// The root view (the window shell): the zoom commands route
+    /// through it (`zoom_fit`, the keyboard zoom levels). No ProjectWorkspaceView
     /// dependencies beyond what the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
 }
 
 impl NavigationToolHeaderView {
-    pub(crate) fn new(session: Entity<EditorSession>, app: WeakEntity<AppState>) -> Self {
+    pub(crate) fn new(
+        session: Entity<EditorSession>,
+        app: WeakEntity<ProjectWorkspaceView>,
+    ) -> Self {
         NavigationToolHeaderView { session, app }
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel).
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// `NavigationToolHeader.swift`'s body: the four zoom buttons on Zoom,
@@ -445,24 +258,27 @@ impl NavigationToolHeaderView {
                     ZoomCommand::Fit => state.zoom_fit(cx),
                     ZoomCommand::ActualSize => {
                         // Actual Pixels: `session.zoom(to: 1)` (CompositorApp.swift:88).
-                        state
-                            .tab()
-                            .session
-                            .update(cx, |session, _| session.zoom(1.0, None));
+                        state.workspace.update(cx, |ws, cx| {
+                            ws.current_mut()
+                                .session
+                                .update(cx, |session, _| session.zoom(1.0, None))
+                        });
                         state.touch(cx);
                     }
                     ZoomCommand::In => {
-                        state
-                            .tab()
-                            .session
-                            .update(cx, |session, _| session.zoom_keyboard(1));
+                        state.workspace.update(cx, |ws, cx| {
+                            ws.current_mut()
+                                .session
+                                .update(cx, |session, _| session.zoom_keyboard(1))
+                        });
                         state.touch(cx);
                     }
                     ZoomCommand::Out => {
-                        state
-                            .tab()
-                            .session
-                            .update(cx, |session, _| session.zoom_keyboard(-1));
+                        state.workspace.update(cx, |ws, cx| {
+                            ws.current_mut()
+                                .session
+                                .update(cx, |session, _| session.zoom_keyboard(-1))
+                        });
                         state.touch(cx);
                     }
                 });
@@ -495,20 +311,20 @@ impl NavigationToolHeaderView {
 /// Gradient arm was carved into this file pending its own carve (the Swift
 /// source is its own view; no Rust file was ever made for it). Only in the
 /// render tree while the Gradient tool is active, so it keeps no session
-/// observer; its session field is re-pointed on tab changes by
-/// [`AppState::sync_session_observer`].
+/// observer; its session field comes with the per-tab content build
+/// (ticket 43).
 pub struct GradientControlsView {
     /// The active tab's session — the settings readouts and the checkbox
     /// writes speak to it directly (`GradientControls`' `@Bindable
     /// session`).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch and the
-    /// shared header row stay there. No AppState dependencies beyond what
+    /// The root view (the window shell): the repaint epoch and the
+    /// shared header row stay there. No ProjectWorkspaceView dependencies beyond what
     /// the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The opacity slider (`GradientControls`' opacity binding): seeded from
     /// the persisted tool default at construction, exactly as
-    /// `AppState::new` seeded it when the field lived there.
+    /// `ProjectWorkspaceView::new` seeded it when the field lived there.
     gradient_slider: Entity<SliderState>,
     /// Keep-alive for the slider subscription: dropping a Subscription
     /// unsubscribes, so the bundle is held, never read.
@@ -519,7 +335,7 @@ pub struct GradientControlsView {
 impl GradientControlsView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let opacity = session.read(cx).gradient_settings.opacity;
@@ -534,15 +350,7 @@ impl GradientControlsView {
         view
     }
 
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel). The slider
-    /// subscription reads this field at event time, so the re-point keeps
-    /// it writing to the active tab.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
-    }
-
-    /// The shell's Opacity-digit sync route (`AppState::opacity_digit` —
+    /// The shell's Opacity-digit sync route (`ProjectWorkspaceView::opacity_digit` —
     /// the one write to it from outside this view).
     pub(crate) fn opacity_slider(&self) -> Entity<SliderState> {
         self.gradient_slider.clone()
@@ -569,7 +377,7 @@ impl GradientControlsView {
     }
 
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
@@ -606,8 +414,10 @@ impl GradientControlsView {
             LabeledCheckbox::new("gradient-fg-bg", "Foreground to Background")
                 .checked(settings.foreground_to_background)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state.tab().session.update(cx, |session, _| {
-                        session.gradient_settings.foreground_to_background = checked
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.gradient_settings.foreground_to_background = checked
+                        })
                     });
                     state.touch(cx);
                 }))
@@ -615,8 +425,10 @@ impl GradientControlsView {
             LabeledCheckbox::new("gradient-reverse", "Reverse")
                 .checked(settings.reversed)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state.tab().session.update(cx, |session, _| {
-                        session.gradient_settings.reversed = checked
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.gradient_settings.reversed = checked
+                        })
                     });
                     state.touch(cx);
                 }))

@@ -12,7 +12,7 @@ use gpui_kit::{
 use compositor_core::adjust::{CurvePoint, CurvesSettings, LevelsChannel};
 use compositor_core::filters::FilterSettings;
 
-use crate::state::{AppState, CurvesEditor};
+use crate::state::{CurvesEditor, ProjectWorkspaceView};
 use crate::ui::filter_sheet::FilterPanelView;
 use crate::ui::{DragMoveHandler, DragUpHandler};
 
@@ -142,7 +142,7 @@ impl FilterPanelView {
 
     /// Runs the curve editor's settings as the Curves filter preview, the
     /// same path the other filter sheets' sliders use (the former
-    /// `AppState::apply_curves_preview`, moved with the editor, ticket 41).
+    /// `ProjectWorkspaceView::apply_curves_preview`, moved with the editor, ticket 41).
     pub(crate) fn apply_curves_preview(&mut self, cx: &mut Context<Self>) {
         let mut settings = FilterSettings::default();
         if let Some(editor) = self.curves.as_ref() {
@@ -158,9 +158,9 @@ impl FilterPanelView {
     }
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The curves channel dropdown's write-back: a menu entry is
-    /// AppState-flavored, so it lands on the shell and reads the filter
+    /// ProjectWorkspaceView-flavored, so it lands on the shell and reads the filter
     /// panel through the content registry (the ticket-40 transitional
     /// pattern for `MenuEntry` dropdowns).
     pub fn curves_set_channel(&mut self, channel: LevelsChannel, cx: &mut Context<Self>) {
@@ -330,7 +330,7 @@ fn curve_layout_bounds(cx: &App) -> Option<Bounds<Pixels>> {
     cx.try_global::<CurvesCanvasLayout>().and_then(|l| l.bounds)
 }
 
-/// The press half of `AppState::curves_mouse_down`, on the editor alone:
+/// The press half of `ProjectWorkspaceView::curves_mouse_down`, on the editor alone:
 /// grab the nearest point or insert one, and start dragging it. Returns
 /// whether a drag is live (the handler then folds the press position in).
 fn curves_press(

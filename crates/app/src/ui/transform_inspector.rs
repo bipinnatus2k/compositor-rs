@@ -17,8 +17,8 @@ use compositor_core::session::EditorSession;
 use compositor_core::transform::{LayerSampling, LayerTransform};
 
 use crate::state::{
-    AppState, TransformField, normalize_rotation, number_input, parse_field, resize_transform,
-    transform_field_texts,
+    ProjectWorkspaceView, TransformField, normalize_rotation, number_input, parse_field,
+    resize_transform, transform_field_texts,
 };
 use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, div_row, text_label};
 
@@ -28,8 +28,7 @@ use crate::ui::{Dropdown, LabeledCheckbox, MenuEntry, app_dispatch, app_on, div_
 /// displayed-transform read and the draft edit. Only in the render tree
 /// while the Move tool is active (Swift's `.id(session.activeLayerID)`
 /// aside, which the port does not model), so it keeps no session observer;
-/// its session field is re-pointed on tab changes by
-/// [`AppState::sync_session_observer`].
+/// its session field comes with the per-tab content build (ticket 43).
 pub struct TransformInspectorView {
     /// The active tab's session — the toggles, the displayed transform and
     /// the draft edits speak to it directly (`TransformInspector`'
@@ -37,12 +36,12 @@ pub struct TransformInspectorView {
     /// `@FocusState`, TransformInspector.swift:82-84, are the input
     /// entities below).
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root): the repaint epoch and the
-    /// shared header row stay there. No AppState dependencies beyond what
+    /// The root view (the window shell): the repaint epoch and the
+    /// shared header row stay there. No ProjectWorkspaceView dependencies beyond what
     /// the moved handlers already used.
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The numeric fields (X, Y, W, H, Scale %, ° — the TransformValueField
-    /// `@State text` stand-ins): seeded flat, exactly as `AppState::new`
+    /// `@State text` stand-ins): seeded flat, exactly as `ProjectWorkspaceView::new`
     /// seeded them when the fields lived there.
     transform_x_input: Entity<InputState>,
     transform_y_input: Entity<InputState>,
@@ -59,7 +58,7 @@ pub struct TransformInspectorView {
 impl TransformInspectorView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,14 +81,6 @@ impl TransformInspectorView {
         };
         view.subscribe_inputs(cx);
         view
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel). The field
-    /// subscriptions read this field at event time, so the re-point keeps
-    /// them writing to the active tab.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>) {
-        self.session = session;
     }
 
     /// Wiring for the numeric fields: typing writes straight into the
@@ -123,7 +114,7 @@ impl TransformInspectorView {
     }
 
     /// The view's route to the app-side repaint epoch (`touch`): the frame
-    /// cache and `revision` stay on AppState (ticket 39's field audit), so
+    /// cache and `revision` stay on ProjectWorkspaceView (ticket 39's field audit), so
     /// an interaction that changed the session asks the shell through the
     /// seam.
     fn touch(&mut self, cx: &mut Context<Self>) {
@@ -224,7 +215,7 @@ impl TransformInspectorView {
     /// Pushes the displayed transform back into the fields
     /// (`TransformValueField.sync`). Reached from outside this view too —
     /// the canvas's Move drags ask the shell to run it
-    /// (`AppState::sync_transform_inputs`, ticket 39's seam).
+    /// (`ProjectWorkspaceView::sync_transform_inputs`, ticket 39's seam).
     pub(crate) fn sync_transform_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(value) = self.transform_displayed(cx) else {
             return;
@@ -298,9 +289,15 @@ impl TransformInspectorView {
             .map(|sampling| {
                 let sampling = *sampling;
                 MenuEntry::new(sampling.label(), move |state, _, cx| {
-                    state.transform_header.update(cx, |view, cx| {
-                        view.transform_change(move |value| value.sampling = sampling, cx)
-                    });
+                    let inspector = state
+                        .content
+                        .as_ref()
+                        .map(|content| content.read(cx).transform_header.clone());
+                    if let Some(inspector) = inspector {
+                        inspector.update(cx, |view, cx| {
+                            view.transform_change(move |value| value.sampling = sampling, cx)
+                        });
+                    }
                 })
                 .checked(current == sampling)
             })
@@ -318,10 +315,11 @@ impl TransformInspectorView {
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
                     // transformAutoSelect (EditorSession.swift:198). The
                     // canvas press reads it when the next Move press lands.
-                    state
-                        .tab()
-                        .session
-                        .update(cx, |session, _| session.transform_auto_select = checked);
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut()
+                            .session
+                            .update(cx, |session, _| session.transform_auto_select = checked)
+                    });
                     state.persist_tool_defaults(cx);
                     state.touch(cx);
                 }))
@@ -329,10 +327,11 @@ impl TransformInspectorView {
             LabeledCheckbox::new("transform-show-controls", "Show Controls")
                 .checked(self.session.read(cx).shows_transform_controls)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state
-                        .tab()
-                        .session
-                        .update(cx, |session, _| session.shows_transform_controls = checked);
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut()
+                            .session
+                            .update(cx, |session, _| session.shows_transform_controls = checked)
+                    });
                     state.touch(cx);
                 }))
                 .into_any_element(),
@@ -347,10 +346,11 @@ impl TransformInspectorView {
             LabeledCheckbox::new("transform-lock-ratio", "Lock")
                 .checked(self.session.read(cx).locks_transform_ratio)
                 .with_on_change(app_on(&app, |state, checked, _, cx| {
-                    state
-                        .tab()
-                        .session
-                        .update(cx, |session, _| session.locks_transform_ratio = checked);
+                    state.workspace.update(cx, |ws, cx| {
+                        ws.current_mut()
+                            .session
+                            .update(cx, |session, _| session.locks_transform_ratio = checked)
+                    });
                     state.touch(cx);
                 }))
                 .into_any_element(),

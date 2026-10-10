@@ -5,7 +5,7 @@
 use gpui_kit::{Context, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, px};
 
 use crate::project::Step;
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 
 /// `projectTabLabelWidth` (ProjectTabs.swift:59-64): the title's rendered
 /// width plus the 10px unsaved dot when it shows, clamped to 35...155. The
@@ -24,7 +24,7 @@ pub(crate) fn project_tab_pill_width(title: &str, modified: bool) -> f32 {
     project_tab_label_width(title, modified) + 40.0
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     /// The 34px project tab strip (`ProjectTabs.swift`'s `ProjectTabStrip`):
     /// one pill per tab — title, unsaved dot, close button — plus a "New"
     /// slot. Clicking selects (`workspace.select`, refitting the viewport);
@@ -35,10 +35,12 @@ impl AppState {
         use gpui_kit::component::tab::{Tab, TabBar};
         use gpui_kit::component::{Disableable, Selectable};
 
-        let can_switch = self.workspace.can_switch(cx);
-        let selected = self.workspace.selected_id();
-        let tabs: Vec<(crate::project::TabId, String, bool)> = self
-            .workspace
+        // The workspace is an entity (ticket 43): the strip reads it through
+        // its update boundary.
+        let workspace = self.workspace.read(cx);
+        let can_switch = workspace.can_switch(cx);
+        let selected = workspace.selected_id();
+        let tabs: Vec<(crate::project::TabId, String, bool)> = workspace
             .tabs()
             .iter()
             .map(|tab| (tab.id, tab.title(cx), tab.session.read(cx).is_modified()))
@@ -54,8 +56,7 @@ impl AppState {
                 .selected(active)
                 .disabled(!can_switch && !active)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.workspace.select(id, cx) {
-                        this.sync_session_observer(cx);
+                    if this.workspace.update(cx, |ws, cx| ws.select(id, cx)) {
                         this.touch(cx);
                     }
                 }));
@@ -73,10 +74,9 @@ impl AppState {
                     // says the same to assistive tech.
                     .accessibility_label(format!("Close {title}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        match this.workspace.close(id, cx) {
+                        match this.workspace.update(cx, |ws, cx| ws.close(id, cx)) {
                             Step::Pending(pending) => this.present_pending(pending, window, cx),
                             Step::Done(()) => {
-                                this.sync_session_observer(cx);
                                 this.touch(cx);
                             }
                         }
@@ -94,9 +94,10 @@ impl AppState {
                 .compact()
                 .disabled(!can_switch)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if this.workspace.can_switch(cx) {
-                        this.workspace.add_tab(true, cx);
-                        this.sync_session_observer(cx);
+                    if this.workspace.read(cx).can_switch(cx) {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.add_tab(true, cx);
+                        });
                         this.touch(cx);
                     }
                 })),
@@ -119,8 +120,9 @@ impl AppState {
             })
             .on_drop::<ExternalPaths>(cx.listener(|this, dropped: &ExternalPaths, _window, cx| {
                 let paths = dropped.paths().to_vec();
-                let failures = this.workspace.receive(&paths, None, None, cx);
-                this.sync_session_observer(cx);
+                let failures = this
+                    .workspace
+                    .update(cx, |ws, cx| ws.receive(&paths, None, None, cx));
                 if !failures.is_empty() {
                     this.set_status(failures.join("; "), cx);
                 }

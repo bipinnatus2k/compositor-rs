@@ -26,7 +26,7 @@ use compositor_core::geometry::CGPoint;
 use compositor_core::raster::Bitmap;
 use compositor_core::session::EditorSession;
 
-use crate::state::AppState;
+use crate::state::ProjectWorkspaceView;
 
 /// A tab's identity (`ProjectTab.id`, a `UUID` in Swift). Declared here so
 /// `Pending::Confirm` can name the tab being asked about.
@@ -866,7 +866,7 @@ fn same_path(session: &EditorSession, source: &Path) -> bool {
 
 // MARK: Tests
 
-impl AppState {
+impl ProjectWorkspaceView {
     // MARK: File operations
 
     /// Opens an image (PNG/JPEG) as a new layer, or a .comp package folder.
@@ -879,12 +879,14 @@ impl AppState {
                     // validate, swap the whole project in, reset history,
                     // fit the viewport. The reload marks the project saved
                     // right after (ProjectController's same-path reload).
-                    let installed = self.tab().session.update(cx, |session, _| {
-                        let installed = session.install_project(&data, &dir);
-                        if installed.is_ok() {
-                            session.mark_saved();
-                        }
-                        installed
+                    let installed = self.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            let installed = session.install_project(&data, &dir);
+                            if installed.is_ok() {
+                                session.mark_saved();
+                            }
+                            installed
+                        })
                     });
                     match installed {
                         Ok(()) => self.set_status(format!("Opened {}", dir.display()), cx),
@@ -910,11 +912,11 @@ impl AppState {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Photoshop".to_string());
-            match self
-                .tab()
-                .session
-                .update(cx, |session, _| session.import_photoshop_data(&name, &data))
-            {
+            match self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.import_photoshop_data(&name, &data))
+            }) {
                 Ok(notes) => {
                     self.set_status(
                         if notes > 0 {
@@ -950,9 +952,19 @@ impl AppState {
                     .file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Image".to_string());
-                if self.tab().session.read(cx).document.is_none() {
-                    self.tab().session.update(cx, |session, _| {
-                        session.create_document(width, height, true)
+                if self
+                    .workspace
+                    .read(cx)
+                    .current()
+                    .session
+                    .read(cx)
+                    .document
+                    .is_none()
+                {
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.create_document(width, height, true)
+                        })
                     });
                 }
                 let layer = compositor_core::document::ImageLayer::with_asset(

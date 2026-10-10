@@ -1,31 +1,51 @@
-//! Port of `ContentView.swift`: the window layout, the action dispatch for
-//! every menu item and keyboard shortcut, and the status bar.
-
-use std::sync::atomic::{AtomicBool, Ordering};
+//! Port of `ContentView.swift`: the per-tab content view entity (the tool
+//! rail, the options header row, the canvas, the layers panel and the
+//! status bar — the middle section of the window), plus the root view's
+//! render (`ProjectWorkspaceView`, ProjectTabs.swift:6-19), the action
+//! dispatch for every menu item and keyboard shortcut, the drain pump and
+//! the status bar entity. The root owns the tab strip and the menu
+//! assembly; the per-tab `ContentView` is rebuilt on tab switches by the
+//! root's `sync_content` (the `.id(workspace.current.id)` mirror).
 
 use gpui_kit::{
-    App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Subscription, WeakEntity, Window, div, px, rgb,
+    App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px, rgb,
 };
 
 use compositor_core::adjustment::AdjustmentKind;
 use compositor_core::document::NavigationTool;
 use compositor_core::filters::FilterKind;
-use compositor_core::session::EditorSession;
 use compositor_core::session::SelectionAmountOperation;
+use compositor_core::session::{BrushToolMode, EditorSession};
 
+use crate::canvas::editor_canvas::EditorCanvasView;
 use crate::keys;
 use crate::project::{Pending, Step};
-use crate::state::{AppState, SaveAfter, Sheet};
-use crate::ui::{FG_DIM, text_label};
+use crate::state::{ProjectWorkspaceView, SaveAfter, Sheet};
+use crate::ui::brush_controls::BrushControlsView;
+use crate::ui::crop_controls::CropControlsView;
+use crate::ui::lasso_controls::LassoControlsView;
+use crate::ui::native_layer_list::LayersPanelView;
+use crate::ui::navigation_tool_header::{
+    GradientControlsView, NavigationToolHeaderView, Swatch, TOOLS, ToolButton, tool_title,
+};
+use crate::ui::shape_controls::ShapeControlsView;
+use crate::ui::transform_inspector::TransformInspectorView;
+use crate::ui::type_controls::TypeControlsView;
+use crate::ui::{FG_DIM, app_on_click, text_label};
+use crate::welcome::WelcomeView;
 
-impl Render for AppState {
+impl Render for ProjectWorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Workspace errors (failed opens → the Alert sheet) and queued file
         // receives progress on the async drain pump, never during draw;
         // rendering stays a pure function of state and only requests a pump
         // when state says work is pending.
         self.schedule_drain_pump(window, cx);
+        // The `.id(workspace.current.id)` mirror: rebuild the per-tab
+        // content when the workspace's selected tab changed (runs here,
+        // where the window is available for the constructors' inputs).
+        self.sync_content(window, cx);
         div()
             .id("workspace")
             .key_context("Compositor")
@@ -189,9 +209,392 @@ impl Render for AppState {
             .on_action(cx.listener(Self::on_cancel))
             // Layout
             .child(crate::menu::MenuBar::new(
-                self.current_tab().session.clone(),
+                self.current_tab(cx).session.clone(),
             ))
             .child(self.render_tab_bar(cx))
+            // The active tab's content (Swift `ContentView`, ticket 43): a
+            // fresh per-tab entity hosting the tool rail, the options
+            // header row, the canvas (with the welcome branch), the layers
+            // panel and the status bar. The tab strip and the menu assembly
+            // stay on the root — the root re-renders on workspace
+            // notifications anyway, so a separate entity would buy zero
+            // invalidation (declared in the ticket's landing record).
+            .children(self.content.clone())
+            .children(self.render_sheet_overlay(cx))
+            // The floating panels render above the workspace; the color
+            // picker is one of them now (ColorPickerSheet.swift:167).
+            .children(self.render_panels_overlay(window, cx))
+    }
+}
+
+impl ProjectWorkspaceView {
+    /// Spawns the workspace drain pump when state says work is pending. The
+    /// pump — not `render` — drains workspace-level errors into the Alert
+    /// sheet and runs queued file receives once the guards cleared, the two
+    /// side effects the render head used to carry. Spawning is idempotent:
+    /// one pump at a time (the [`Self::drain_pump_running`] flag), and a
+    /// pump that finds nothing left to do exits without ever holding entity
+    /// state across an await.
+    fn schedule_drain_pump(&mut self, window: &Window, cx: &Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        if workspace.errors.is_empty() && !workspace.has_queued_receives() {
+            return;
+        }
+        if self.drain_pump_running {
+            return;
+        }
+        self.drain_pump_running = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                // One drain pass, with the same order and guards the render
+                // head used: errors first (the Alert sheet), then queued
+                // receives. A pass that changed state asks for a frame, the
+                // way the old same-frame drains showed their result.
+                let mut waiting_on_guards = false;
+                let window_open = this.update_in(cx, |this, window, cx| {
+                    let sheet_free = this.sheet.is_none();
+                    let had_errors = !this.workspace.read(cx).errors.is_empty();
+                    let had_receives = this.workspace.read(cx).has_queued_receives();
+                    this.drain_workspace_errors(window, cx);
+                    this.drain_queued_receives(cx);
+                    let alert_opened = sheet_free && had_errors && this.sheet.is_some();
+                    let receives_ran =
+                        had_receives && !this.workspace.read(cx).has_queued_receives();
+                    if alert_opened || receives_ran {
+                        cx.notify();
+                    }
+                    // Receives still queued mean the guards block them (a
+                    // floating panel or a mid-flow dialog): keep Swift's
+                    // `while !canSwitch` 30 ms poll going
+                    // (ProjectWorkspace.swift:126-129) until they clear.
+                    // Errors left behind an open Alert wait for its
+                    // dismissal — the close notifies, and the next render
+                    // re-requests a pump.
+                    waiting_on_guards = this.workspace.read(cx).has_queued_receives();
+                });
+                if window_open.is_err() || !waiting_on_guards {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(30))
+                    .await;
+            }
+            // A window that went away drops the flag with the root entity.
+            this.update(cx, |this, _| this.drain_pump_running = false)
+                .ok();
+        })
+        .detach();
+    }
+}
+
+/// The active tab's content (Swift `ContentView`, ContentView.swift:4-18):
+/// a thin per-tab container built fresh by the root's `sync_content`
+/// whenever the workspace's selected tab changed — the `.id(workspace
+/// .current.id)` mirror. It holds the tab's session and the child view
+/// entities (Swift `ContentView`'s members), each constructed with the
+/// session at construction time, so every per-tab UI draft (canvas drags,
+/// the rename field, the welcome form's fields) dies with the rebuild and
+/// the fresh children observe the new tab's session from their
+/// constructors. The window-level state — modal sheets, floating panels,
+/// frame cache, preview pipelines, flows — stays on the root, reached
+/// through the same `WeakEntity<ProjectWorkspaceView>` seam every child has
+/// held since ticket 39.
+pub struct ContentView {
+    /// The tab this content was built for (`workspace.current.id` — the
+    /// `.id` mirror's comparison key).
+    pub(crate) tab_id: crate::project::TabId,
+    /// The active tab's session (`@Bindable var session`).
+    pub(crate) session: Entity<EditorSession>,
+    /// The root view: the flows, pipelines and frame cache stay there
+    /// (window-level); the per-tab views reach them through this seam.
+    pub(crate) app: WeakEntity<ProjectWorkspaceView>,
+    /// The canvas view (Swift `CanvasView`, ticket 39): pointer/keyboard
+    /// gestures, the inline text editor and the drag state.
+    pub(crate) canvas_view: Entity<EditorCanvasView>,
+    /// The layers panel (Swift `LayersPanel`, ticket 40): rename field,
+    /// thumbnail cache, header opacity slider.
+    pub(crate) layers_panel: Entity<LayersPanelView>,
+    /// The tool option headers (Swift's per-tool header views, ticket 42):
+    /// each owns its option-bar widget entities and their write
+    /// subscriptions, and its controls enter the shared header row only
+    /// while its tool is active (Swift's `if session.tool == …` branches).
+    pub(crate) brush_header: Entity<BrushControlsView>,
+    pub(crate) lasso_header: Entity<LassoControlsView>,
+    pub(crate) gradient_header: Entity<GradientControlsView>,
+    pub(crate) crop_header: Entity<CropControlsView>,
+    pub(crate) shape_header: Entity<ShapeControlsView>,
+    pub(crate) type_header: Entity<TypeControlsView>,
+    pub(crate) transform_header: Entity<TransformInspectorView>,
+    /// The Zoom/Hand header (Swift `NavigationToolHeader`; the Swift view's
+    /// zoom-text drafts have no Rust counterpart — recorded in the ticket).
+    pub(crate) navigation_header: Entity<NavigationToolHeaderView>,
+    /// The empty tab's welcome form (Swift `ContentView.welcome`, the
+    /// tab-embedded `NewCanvasSheet`): owns the Width/Height fields and
+    /// renders the whole form; the canvas view's welcome branch clones it.
+    pub(crate) welcome: Entity<WelcomeView>,
+    /// The status bar (Swift `ContentView.statusBar`): owns the status line
+    /// and observes the session for its readouts.
+    pub(crate) status_bar: Entity<StatusBarView>,
+}
+
+impl ContentView {
+    /// Builds the per-tab content: the children are constructed in the same
+    /// order the root's former constructor used (ticket 42), each taking
+    /// the session and the root seam it needs — an `InputState` needs the
+    /// window, so the constructor runs where one is available.
+    pub(crate) fn new(
+        tab_id: crate::project::TabId,
+        session: Entity<EditorSession>,
+        app: WeakEntity<ProjectWorkspaceView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // The tool headers (Swift's per-tool header views, ticket 42): each
+        // builds its own widgets — an `InputState` needs the window.
+        let brush_header = cx.new(|cx| BrushControlsView::new(session.clone(), app.clone(), cx));
+        let lasso_header = cx.new(|cx| LassoControlsView::new(session.clone(), app.clone(), cx));
+        let gradient_header =
+            cx.new(|cx| GradientControlsView::new(session.clone(), app.clone(), cx));
+        let crop_header = cx.new(|_| CropControlsView::new(session.clone(), app.clone()));
+        let shape_header = cx.new(|_| ShapeControlsView::new(session.clone(), app.clone()));
+        let type_header =
+            cx.new(|cx| TypeControlsView::new(session.clone(), app.clone(), window, cx));
+        let transform_header =
+            cx.new(|cx| TransformInspectorView::new(session.clone(), app.clone(), window, cx));
+        let navigation_header =
+            cx.new(|_| NavigationToolHeaderView::new(session.clone(), app.clone()));
+        let welcome = cx.new(|cx| WelcomeView::new(session.clone(), app.clone(), window, cx));
+        // The status bar observes the session from its constructor — fresh
+        // per tab, so no re-pointing.
+        let status_bar = cx.new(|cx| StatusBarView::new(session.clone(), app.clone(), cx));
+
+        // The canvas view (Swift `CanvasView`): it builds its own inline
+        // text input (an `InputState` needs the window), and it holds the
+        // root's handle so its handlers can reach the pipelines that stay
+        // there (ticket 39's seam).
+        let canvas_view =
+            cx.new(|cx| EditorCanvasView::new(session.clone(), app.clone(), window, cx));
+        // The layers panel (Swift `LayersPanel`): it builds its own rename
+        // input and header opacity slider, and reaches the root's flows
+        // through the same seam (ticket 40).
+        let layers_panel = cx.new(|cx| LayersPanelView::new(session.clone(), app.clone(), cx));
+
+        ContentView {
+            tab_id,
+            session: session.clone(),
+            app,
+            canvas_view,
+            layers_panel,
+            brush_header,
+            lasso_header,
+            gradient_header,
+            crop_header,
+            shape_header,
+            type_header,
+            transform_header,
+            navigation_header,
+            welcome,
+            status_bar,
+        }
+    }
+
+    // MARK: Tool rail
+
+    /// The tool rail (Swift `ContentView`'s `toolRail` computed property):
+    /// one entry per tool plus the foreground/background swatches. The
+    /// buttons dispatch the root's tool flows through the seam.
+    pub(crate) fn render_tool_rail(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let app = self.app.clone();
+        let (active, eraser_active) = {
+            let session = self.session.read(cx);
+            (
+                session.tool,
+                session.tool == NavigationTool::Brush && session.brush_mode == BrushToolMode::Erase,
+            )
+        };
+
+        let mut rail = gpui_kit::div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .w(px(44.0))
+            .flex_shrink_0()
+            .py_1()
+            .bg(crate::ui::panel_bg());
+
+        for (tool, letter, icon, name, eraser_entry) in TOOLS {
+            let selected = if eraser_entry {
+                eraser_active
+            } else if tool == NavigationTool::Brush {
+                active == NavigationTool::Brush && !eraser_active
+            } else {
+                active == tool
+            };
+            rail = rail.child(
+                ToolButton::new(tool, letter, icon, name, eraser_entry, selected).with_on_click(
+                    app_on_click(&app, move |state, _, _, cx| {
+                        if eraser_entry {
+                            state.set_tool_eraser(cx);
+                        } else {
+                            state.set_tool(tool, cx);
+                        }
+                    }),
+                ),
+            );
+        }
+
+        // Foreground / background swatches: clicking either opens the color
+        // picker on it (ColorPalette.swift:60; the X key still swaps).
+        let foreground = self.session.read(cx).palette_color(false);
+        let background = self.session.read(cx).palette_color(true);
+        rail = rail.child(
+            gpui_kit::div()
+                .mt_2()
+                .id("palette")
+                .w(px(28.0))
+                .h(px(28.0))
+                .relative()
+                .child(
+                    Swatch::new("swatch-background", 6.0, 6.0, background).with_on_click(
+                        app_on_click(&app, |state, _, window, cx| {
+                            state.open_color_picker_ui(true, window, cx);
+                        }),
+                    ),
+                )
+                .child(
+                    Swatch::new("swatch-foreground", 0.0, 0.0, foreground).with_on_click(
+                        app_on_click(&app, |state, _, window, cx| {
+                            state.open_color_picker_ui(false, window, cx);
+                        }),
+                    ),
+                ),
+        );
+
+        rail.into_any_element()
+    }
+
+    // MARK: Options header
+
+    /// The options header row (Swift `toolHeaders`' shared bar): the title
+    /// plus the active tool's controls. Each per-tool control set is a view
+    /// entity (ticket 42); only the active tool's entity is consulted per
+    /// pass, mirroring Swift's `if session.tool == ...` branches — the
+    /// entities are this content's fields, built fresh per tab.
+    pub(crate) fn render_options_header(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let (tool, erasing) = {
+            let session = self.session.read(cx);
+            (session.tool, session.brush_mode == BrushToolMode::Erase)
+        };
+
+        let mut header = gpui_kit::div()
+            // Stateful so the bar can scroll sideways (overflow_x_scroll is a
+            // StatefulInteractiveElement method, gpui div.rs).
+            .id("options-header")
+            .flex()
+            .flex_row()
+            .items_center()
+            .w_full()
+            // ToolHeaderStyle.swift:5 (height 42) and BrushControls.swift:111
+            // (horizontal padding 18).
+            .h(px(42.0))
+            .px(px(18.0))
+            .gap_3()
+            .flex_shrink_0()
+            // Dense bars (Type, Move) run out of width; scroll sideways
+            // instead of clipping the tail controls.
+            .overflow_x_scroll()
+            .bg(crate::ui::panel_bg());
+
+        header = header.child(
+            text_label(tool_title(tool, erasing), false)
+                .w(px(82.0))
+                // ToolHeaderStyle.swift:6: the title is 13pt semibold.
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .flex_shrink_0(),
+        );
+
+        match tool {
+            NavigationTool::Brush
+            | NavigationTool::SpotHealing
+            | NavigationTool::Blur
+            | NavigationTool::CloneStamp => {
+                header = header.children(
+                    self.brush_header
+                        .update(cx, BrushControlsView::brush_controls),
+                );
+            }
+            NavigationTool::Marquee => {
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::marquee_controls),
+                );
+            }
+            NavigationTool::Lasso => {
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::lasso_controls),
+                );
+            }
+            NavigationTool::Wand => {
+                header = header.children(
+                    self.lasso_header
+                        .update(cx, LassoControlsView::wand_controls),
+                );
+            }
+            NavigationTool::Gradient => {
+                // Swift home: GradientControls.swift; the entity lives in
+                // `ui::navigation_tool_header`, where the arm was carved (no
+                // file of its own in the port).
+                header = header.children(
+                    self.gradient_header
+                        .update(cx, GradientControlsView::gradient_controls),
+                );
+            }
+            NavigationTool::Zoom | NavigationTool::Hand => {
+                header = header.children(
+                    self.navigation_header
+                        .update(cx, NavigationToolHeaderView::controls),
+                );
+            }
+            NavigationTool::Crop => {
+                header =
+                    header.children(self.crop_header.update(cx, CropControlsView::crop_controls));
+            }
+            _ => {}
+        }
+
+        if tool == NavigationTool::Move {
+            header = header.children(
+                self.transform_header
+                    .update(cx, TransformInspectorView::transform_inspector),
+            );
+        }
+        if tool == NavigationTool::Type {
+            header = header.children(self.type_header.update(cx, TypeControlsView::type_controls));
+        }
+        if tool == NavigationTool::Shape {
+            header = header.children(
+                self.shape_header
+                    .update(cx, ShapeControlsView::shape_controls),
+            );
+        }
+
+        header.into_any_element()
+    }
+}
+
+impl Render for ContentView {
+    /// The per-tab content (Swift `ContentView`'s `editorStack`): the tool
+    /// rail and canvas column row plus the status bar, filling the window
+    /// below the tab strip. The geometry is the former root layout verbatim
+    /// (the root hosts this entity where the middle row used to sit).
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
                     .flex()
@@ -206,7 +609,7 @@ impl Render for AppState {
                             .flex_1()
                             .min_w_0()
                             .child(self.render_options_header(cx))
-                            // The canvas is its own view entity now (Swift
+                            // The canvas is its own view entity (Swift
                             // `CanvasView`, ticket 39): it renders itself,
                             // including the welcome form on an empty tab.
                             .child(self.canvas_view.clone()),
@@ -219,69 +622,6 @@ impl Render for AppState {
             // The status bar is its own view entity too (ticket 42): it owns
             // the status line and observes the session for its readouts.
             .child(self.status_bar.clone())
-            .children(self.render_sheet_overlay(cx))
-            // The floating panels render above the workspace; the color
-            // picker is one of them now (ColorPickerSheet.swift:167).
-            .children(self.render_panels_overlay(window, cx))
-    }
-}
-
-/// Guards against stacking drain pumps: set when a pump is spawned, cleared
-/// when it runs out of work (or its window went away). Renders that find
-/// work pending while a pump is already polling are no-ops.
-static DRAIN_PUMP_RUNNING: AtomicBool = AtomicBool::new(false);
-
-impl AppState {
-    /// Spawns the workspace drain pump when state says work is pending. The
-    /// pump — not `render` — drains workspace-level errors into the Alert
-    /// sheet and runs queued file receives once the guards cleared, the two
-    /// side effects the render head used to carry. Spawning is idempotent:
-    /// one pump at a time, and a pump that finds nothing left to do exits
-    /// without ever holding entity state across an await.
-    fn schedule_drain_pump(&mut self, window: &Window, cx: &Context<Self>) {
-        if self.workspace.errors.is_empty() && !self.workspace.has_queued_receives() {
-            return;
-        }
-        if DRAIN_PUMP_RUNNING.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                // One drain pass, with the same order and guards the render
-                // head used: errors first (the Alert sheet), then queued
-                // receives. A pass that changed state asks for a frame, the
-                // way the old same-frame drains showed their result.
-                let mut waiting_on_guards = false;
-                let window_open = this.update_in(cx, |this, window, cx| {
-                    let sheet_free = this.sheet.is_none();
-                    let had_errors = !this.workspace.errors.is_empty();
-                    let had_receives = this.workspace.has_queued_receives();
-                    this.drain_workspace_errors(window, cx);
-                    this.drain_queued_receives(cx);
-                    let alert_opened = sheet_free && had_errors && this.sheet.is_some();
-                    let receives_ran = had_receives && !this.workspace.has_queued_receives();
-                    if alert_opened || receives_ran {
-                        cx.notify();
-                    }
-                    // Receives still queued mean the guards block them (a
-                    // floating panel or a mid-flow dialog): keep Swift's
-                    // `while !canSwitch` 30 ms poll going
-                    // (ProjectWorkspace.swift:126-129) until they clear.
-                    // Errors left behind an open Alert wait for its
-                    // dismissal — the close notifies, and the next render
-                    // re-requests a pump.
-                    waiting_on_guards = this.workspace.has_queued_receives();
-                });
-                if window_open.is_err() || !waiting_on_guards {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(30))
-                    .await;
-            }
-            DRAIN_PUMP_RUNNING.store(false, Ordering::Release);
-        })
-        .detach();
     }
 }
 
@@ -337,7 +677,7 @@ fn color_bytes(color: compositor_core::document::PaletteColor) -> [u8; 4] {
     ]
 }
 
-impl AppState {
+impl ProjectWorkspaceView {
     // MARK: Shortcut registry
 
     /// The live shortcut registry (KeyboardShortcuts.swift:129-213). It is
@@ -359,10 +699,10 @@ impl AppState {
     /// `didSet { ToolDefaults.set(...) }`; the port snapshots the whole table
     /// at the change point and stores it atomically. Every handler below that
     /// flips one of the persisted switches calls this right after mutating
-    /// `self.tab().session`, which is also why no
+    /// the active tab's session, which is also why no
     /// explicit exit save is wired: the table on disk is always current.
     pub fn persist_tool_defaults(&mut self, cx: &App) {
-        let session = self.current_tab().session.read(cx);
+        let session = self.current_tab(cx).session.read(cx);
         crate::settings::persist_session(session);
     }
 
@@ -430,9 +770,11 @@ impl AppState {
 
     fn on_swap_colors(&mut self, _: &keys::SwapColors, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.swap_palette_colors());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.swap_palette_colors())
+            });
             t.touch(cx);
         });
     }
@@ -443,9 +785,11 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.reset_palette_colors());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.reset_palette_colors())
+            });
             t.touch(cx);
         });
     }
@@ -462,8 +806,7 @@ impl AppState {
 
     fn on_new_canvas(&mut self, _: &keys::NewCanvas, _w: &mut Window, cx: &mut Context<Self>) {
         // `newCanvas` (:53-57): a fresh tab, no modal.
-        if self.workspace.new_canvas(cx) {
-            self.sync_session_observer(cx);
+        if self.workspace.update(cx, |ws, cx| ws.new_canvas(cx)) {
             self.touch(cx);
         }
     }
@@ -471,7 +814,7 @@ impl AppState {
         // `open(_:)` (:58-76), two-phase: the dialog ask comes back as
         // `Pending::Open` and the Open sheet plays the file picker's part
         // (semicolon-separated paths stand in for the multi-select panel).
-        match self.workspace.open(None, cx) {
+        match self.workspace.update(cx, |ws, cx| ws.open(None, cx)) {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(_) => {}
         }
@@ -489,7 +832,8 @@ impl AppState {
             self.with_current_tab(cx, |controller, session| controller.save(session, as_new));
         match result {
             Step::Pending(Pending::SaveAs { default_name, .. }) => {
-                self.pending_save = Some((self.workspace.selected_id(), SaveAfter::Nothing));
+                self.pending_save =
+                    Some((self.workspace.read(cx).selected_id(), SaveAfter::Nothing));
                 self.present_pending(
                     Pending::SaveAs {
                         as_new,
@@ -536,10 +880,12 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         // `close(_:)` (:89-96): confirm unsaved changes, then remove the tab.
-        match self.workspace.close(self.workspace.selected_id(), cx) {
+        match self
+            .workspace
+            .update(cx, |ws, cx| ws.close(ws.selected_id(), cx))
+        {
             Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(()) => {
-                self.sync_session_observer(cx);
                 self.touch(cx);
             }
         }
@@ -547,15 +893,13 @@ impl AppState {
     fn on_quit(&mut self, _: &keys::Quit, w: &mut Window, cx: &mut Context<Self>) {
         // `confirmQuit` (:106-114): ask each tab in order; on success the
         // window closes.
-        match self.workspace.confirm_quit(cx) {
-            Step::Pending(pending) => {
-                self.sync_session_observer(cx);
-                self.present_pending(pending, w, cx)
-            }
+        match self.workspace.update(cx, |ws, cx| ws.confirm_quit(cx)) {
+            Step::Pending(pending) => self.present_pending(pending, w, cx),
             Step::Done(true) => w.remove_window(),
-            // advance_quit may have foregrounded an asked tab before the
-            // refusal; the observer follows whatever is active now.
-            Step::Done(false) => self.sync_session_observer(cx),
+            // A refusal changes nothing on screen (the guard never latched),
+            // and the active tab's content is rebuilt from the workspace's
+            // selection on the next render anyway.
+            Step::Done(false) => {}
         }
     }
 
@@ -564,11 +908,19 @@ impl AppState {
     fn on_undo(&mut self, _: &keys::Undo, _w: &mut Window, cx: &mut Context<Self>) {
         // A restored document of a different canvas refits the viewport
         // inside the session (`restore` → `changedCanvas`, ticket 38).
-        self.tab().session.update(cx, |session, _| session.undo());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.undo())
+        });
         self.touch(cx);
     }
     fn on_redo(&mut self, _: &keys::Redo, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| session.redo());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.redo())
+        });
         self.touch(cx);
     }
     fn on_fill_foreground(
@@ -577,7 +929,14 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let color = color_bytes(self.tab().session.read(cx).palette_color(false));
+        let color = color_bytes(
+            self.workspace
+                .read(cx)
+                .current()
+                .session
+                .read(cx)
+                .palette_color(false),
+        );
         self.fill_active(color, "Fill Foreground", cx);
     }
     fn on_fill_background(
@@ -586,7 +945,14 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let color = color_bytes(self.tab().session.read(cx).palette_color(true));
+        let color = color_bytes(
+            self.workspace
+                .read(cx)
+                .current()
+                .session
+                .read(cx)
+                .palette_color(true),
+        );
         self.fill_active(color, "Fill Background", cx);
     }
     fn on_free_transform(
@@ -596,14 +962,25 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         // transformCommand: the selection floats when there is one (FloatingSelection.swift:22).
-        if self.tab().session.read(cx).can_transform_selection() {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.begin_selection_transform());
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .can_transform_selection()
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.begin_selection_transform())
+            });
         } else {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.begin_transform());
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.begin_transform())
+            });
         }
         self.touch(cx);
     }
@@ -638,12 +1015,20 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(selection) = self.tab().session.read(cx).selection()
+        if let Some(selection) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .selection()
             && let Some(bounds) = selection.path.bounds()
         {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.crop_rect = Some(bounds));
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.crop_rect = Some(bounds))
+            });
             self.set_status("Crop to selection: press Apply in the Crop header", cx);
         }
     }
@@ -653,9 +1038,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.flip_canvas(true));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.flip_canvas(true))
+        });
         self.touch(cx);
     }
     fn on_flip_canvas_v(
@@ -664,9 +1051,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.flip_canvas(false));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.flip_canvas(false))
+        });
         self.touch(cx);
     }
 
@@ -723,9 +1112,11 @@ impl AppState {
     // MARK: Layer
 
     fn on_new_layer(&mut self, _: &keys::NewLayer, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_blank_layer());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.add_blank_layer())
+        });
         self.touch(cx);
     }
     fn on_duplicate_layer(
@@ -735,9 +1126,11 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         // layerViaCopy duplicates when nothing is selected (SelectionClipboard.swift:138).
-        self.tab()
-            .session
-            .update(cx, |session, _| session.layer_via_copy());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.layer_via_copy())
+        });
         self.touch(cx);
     }
     fn on_delete_layer(&mut self, _: &keys::DeleteLayer, w: &mut Window, cx: &mut Context<Self>) {
@@ -749,9 +1142,11 @@ impl AppState {
         });
     }
     fn on_merge_down(&mut self, _: &keys::MergeDown, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.merge_layers());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.merge_layers())
+        });
         self.touch(cx);
     }
     fn on_new_group(&mut self, _: &keys::NewGroup, _w: &mut Window, cx: &mut Context<Self>) {
@@ -761,15 +1156,19 @@ impl AppState {
     /// New Group: a folder inserted above the active layer, which becomes
     /// its first child.
     pub(crate) fn add_group(&mut self, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_group());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.add_group())
+        });
         self.touch(cx);
     }
     fn on_add_mask(&mut self, _: &keys::AddMask, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_layer_mask(true));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.add_layer_mask(true))
+        });
         self.touch(cx);
     }
     fn on_flip_layer_h(
@@ -778,9 +1177,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.flip_layers(true));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.flip_layers(true))
+        });
         self.touch(cx);
     }
     fn on_flip_layer_v(
@@ -789,9 +1190,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.flip_layers(false));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.flip_layers(false))
+        });
         self.touch(cx);
     }
     fn on_group_selected_layers(
@@ -800,9 +1203,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.group_selected_layers());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.group_selected_layers())
+        });
         self.touch(cx);
     }
     fn on_move_out_of_folder(
@@ -811,16 +1216,28 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.move_active_layer_out_of_group());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.move_active_layer_out_of_group())
+        });
         self.touch(cx);
     }
     fn on_rename_layer(&mut self, _: &keys::RenameLayer, w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            // The rename field is the layers panel's (ticket 40).
-            self.layers_panel
-                .update(cx, |panel, cx| panel.begin_rename(id, w, cx));
+        if let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        {
+            // The rename field is the layers panel's (ticket 40; the panel
+            // is the active tab content's child, ticket 43).
+            if let Some(content) = self.content.as_ref() {
+                let panel = content.read(cx).layers_panel.clone();
+                panel.update(cx, |panel, cx| panel.begin_rename(id, w, cx));
+            }
         }
     }
     fn on_toggle_layer_visibility(
@@ -829,17 +1246,28 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.toggle_layer_visibility(id));
+        if let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.toggle_layer_visibility(id))
+            });
             self.touch(cx);
         }
     }
     pub(crate) fn add_adjustment(&mut self, kind: AdjustmentKind, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.add_adjustment(kind));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.add_adjustment(kind))
+        });
         self.touch(cx);
     }
     fn on_add_adjustment_hsv(
@@ -944,7 +1372,14 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.tab().session.read(cx).active_layer_id else {
+        let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        else {
             return;
         };
         self.edit_layer_adjustment(id, cx);
@@ -955,7 +1390,9 @@ impl AppState {
     /// settings and opens the matching panel. False when nothing opened.
     pub(crate) fn edit_layer_adjustment(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) -> bool {
         let Some(adjustment) = self
-            .tab()
+            .workspace
+            .read(cx)
+            .current()
             .session
             .read(cx)
             .document
@@ -966,39 +1403,46 @@ impl AppState {
             return false;
         };
         if adjustment.kind == AdjustmentKind::Invert
-            || !self
-                .tab()
-                .session
-                .update(cx, |session, _| session.begin_adjustment_editing(id))
+            || !self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.begin_adjustment_editing(id))
+            })
         {
             return false;
         }
         // Prefill the editor from the layer's current settings.
         match adjustment.kind {
             AdjustmentKind::Levels => {
-                self.tab()
-                    .session
-                    .update(cx, |session, _| session.levels = Some(adjustment.levels));
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut()
+                        .session
+                        .update(cx, |session, _| session.levels = Some(adjustment.levels))
+                });
                 self.open_levels_panel(cx);
             }
             AdjustmentKind::Hsv => {
-                self.tab().session.update(cx, |session, _| {
-                    session.hue_saturation =
-                        Some(adjustment.hsv_settings.clone().unwrap_or_else(|| {
-                            compositor_core::adjust::HueSaturationSettings::new(
-                                adjustment.hue,
-                                adjustment.saturation,
-                                adjustment.lightness,
-                                adjustment.colorize,
-                            )
-                        }))
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.hue_saturation =
+                            Some(adjustment.hsv_settings.clone().unwrap_or_else(|| {
+                                compositor_core::adjust::HueSaturationSettings::new(
+                                    adjustment.hue,
+                                    adjustment.saturation,
+                                    adjustment.lightness,
+                                    adjustment.colorize,
+                                )
+                            }))
+                    })
                 });
                 self.open_hue_saturation_panel(cx);
             }
             other => {
                 if let Some(filter) = other.filter_kind() {
-                    self.tab().session.update(cx, |session, _| {
-                        session.filter_edit = Some(filter_settings_from_adjustment(&adjustment))
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.current_mut().session.update(cx, |session, _| {
+                            session.filter_edit = Some(filter_settings_from_adjustment(&adjustment))
+                        })
                     });
                     self.open_filter_panel(filter, cx);
                 }
@@ -1015,15 +1459,19 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.select_all());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.select_all())
+        });
         self.touch(cx);
     }
     fn on_deselect(&mut self, _: &keys::DeselectAction, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.deselect());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.deselect())
+        });
         self.touch(cx);
     }
     fn on_invert_selection(
@@ -1032,9 +1480,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.invert_selection());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.invert_selection())
+        });
         self.touch(cx);
     }
     fn on_feather(&mut self, _: &keys::FeatherSheet, w: &mut Window, cx: &mut Context<Self>) {
@@ -1098,16 +1548,20 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.update(cx, |session, _| {
-            session.shows_rulers = !session.shows_rulers
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.shows_rulers = !session.shows_rulers
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_toggle_grid(&mut self, _: &keys::ToggleGrid, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.shows_grid = !session.shows_grid);
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.shows_grid = !session.shows_grid)
+        });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
@@ -1117,8 +1571,10 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.update(cx, |session, _| {
-            session.shows_guides = !session.shows_guides
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.shows_guides = !session.shows_guides
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
@@ -1129,65 +1585,83 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.update(cx, |session, _| {
-            session.shows_pixel_grid = !session.shows_pixel_grid
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.shows_pixel_grid = !session.shows_pixel_grid
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_snap_guides(&mut self, _: &keys::SnapGuides, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.snap_to_guides = !session.snap_to_guides
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.snap_to_guides = !session.snap_to_guides
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_snap_toggle(&mut self, _: &keys::SnapToggle, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.snapping_enabled = !session.snapping_enabled
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.snapping_enabled = !session.snapping_enabled
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_lock_guides(&mut self, _: &keys::LockGuides, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.locks_guides = !session.locks_guides
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.locks_guides = !session.locks_guides
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_snap_grid(&mut self, _: &keys::SnapGrid, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.snap_to_grid = !session.snap_to_grid
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.snap_to_grid = !session.snap_to_grid
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_snap_layers(&mut self, _: &keys::SnapLayers, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.snap_to_layers = !session.snap_to_layers
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.snap_to_layers = !session.snap_to_layers
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_snap_bounds(&mut self, _: &keys::SnapBounds, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab().session.update(cx, |session, _| {
-            session.snap_to_document_bounds = !session.snap_to_document_bounds
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.snap_to_document_bounds = !session.snap_to_document_bounds
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
     }
     fn on_zoom_in(&mut self, _: &keys::ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
         // Zoom In/Out walk the stable keyboard levels (CompositorApp.swift:91-96).
-        self.tab()
-            .session
-            .update(cx, |session, _| session.zoom_keyboard(1));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.zoom_keyboard(1))
+        });
         self.touch(cx);
     }
     fn on_zoom_out(&mut self, _: &keys::ZoomOut, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.zoom_keyboard(-1));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.zoom_keyboard(-1))
+        });
         self.touch(cx);
     }
     fn on_zoom_fit(&mut self, _: &keys::ZoomFit, _w: &mut Window, cx: &mut Context<Self>) {
@@ -1196,9 +1670,11 @@ impl AppState {
     }
     fn on_zoom_100(&mut self, _: &keys::Zoom100, _w: &mut Window, cx: &mut Context<Self>) {
         // Actual Pixels: `session.zoom(to: 1)` (CompositorApp.swift:88).
-        self.tab()
-            .session
-            .update(cx, |session, _| session.zoom(1.0, None));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.zoom(1.0, None))
+        });
         self.touch(cx);
     }
 
@@ -1320,9 +1796,11 @@ impl AppState {
     }
     fn nudge_pixels(&mut self, dx: f64, dy: f64, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.nudge_pixels(dx, dy));
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.nudge_pixels(dx, dy))
+            });
             t.touch(cx);
         });
     }
@@ -1344,9 +1822,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.cycle_blend_mode(false));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.cycle_blend_mode(false))
+        });
         cx.notify();
     }
     fn on_blend_mode_next(
@@ -1355,9 +1835,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.cycle_blend_mode(true));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.cycle_blend_mode(true))
+        });
         cx.notify();
     }
     fn on_cycle_shape_kind(
@@ -1366,9 +1848,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.toggle_shape_kind());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.toggle_shape_kind())
+        });
         cx.notify();
     }
     fn on_show_transform_controls(
@@ -1377,8 +1861,10 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab().session.update(cx, |session, _| {
-            session.shows_transform_controls = !session.shows_transform_controls
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut().session.update(cx, |session, _| {
+                session.shows_transform_controls = !session.shows_transform_controls
+            })
         });
         self.persist_tool_defaults(cx);
         self.touch(cx);
@@ -1389,9 +1875,11 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.invert_pixels());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.invert_pixels())
+        });
         self.touch(cx);
     }
     fn on_toggle_clipping_mask(
@@ -1400,10 +1888,19 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.toggle_clipping_mask(id));
+        if let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.toggle_clipping_mask(id))
+            });
         }
         self.touch(cx);
     }
@@ -1413,46 +1910,58 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.move_active_layer(-1));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.move_active_layer(-1))
+        });
         self.touch(cx);
     }
     fn on_move_layer_up(&mut self, _: &keys::MoveLayerUp, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.move_active_layer(1));
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.move_active_layer(1))
+        });
         self.touch(cx);
     }
     fn on_cut(&mut self, _: &keys::Cut, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.cut_selection());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.cut_selection())
+            });
             t.touch(cx);
         });
     }
     fn on_copy_pixels(&mut self, _: &keys::CopyPixels, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.copy_selection());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.copy_selection())
+            });
             t.touch(cx);
         });
     }
     fn on_copy_merged(&mut self, _: &keys::CopyMerged, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.copy_merged_selection());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.copy_merged_selection())
+            });
             t.touch(cx);
         });
     }
     fn on_paste_pixels(&mut self, _: &keys::PastePixels, w: &mut Window, cx: &mut Context<Self>) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.paste_pixels());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.paste_pixels())
+            });
             t.touch(cx);
         });
     }
@@ -1471,9 +1980,11 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.hotkey(w, cx, |t, _w, cx| {
-            t.tab()
-                .session
-                .update(cx, |session, _| session.clear_selected_pixels());
+            t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.clear_selected_pixels())
+            });
             t.touch(cx);
         });
     }
@@ -1483,9 +1994,21 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            self.tab().session.update(cx, |session, _| {
-                session.load_layer_selection(id, compositor_core::selection::SelectionMode::Replace)
+        if let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut().session.update(cx, |session, _| {
+                    session.load_layer_selection(
+                        id,
+                        compositor_core::selection::SelectionMode::Replace,
+                    )
+                })
             });
             self.touch(cx);
         }
@@ -1496,17 +2019,29 @@ impl AppState {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.tab().session.read(cx).active_layer_id {
-            self.tab().session.update(cx, |session, _| {
-                session.load_mask_selection(id, compositor_core::selection::SelectionMode::Replace)
+        if let Some(id) = self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .active_layer_id
+        {
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut().session.update(cx, |session, _| {
+                    session
+                        .load_mask_selection(id, compositor_core::selection::SelectionMode::Replace)
+                })
             });
             self.touch(cx);
         }
     }
     fn on_clear_guides(&mut self, _: &keys::ClearGuides, _w: &mut Window, cx: &mut Context<Self>) {
-        self.tab()
-            .session
-            .update(cx, |session, _| session.clear_guides());
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.clear_guides())
+        });
         self.touch(cx);
     }
     fn on_toggle_levels_preview(
@@ -1519,22 +2054,26 @@ impl AppState {
     }
     fn on_finish_lasso(&mut self, _: &keys::FinishLasso, _w: &mut Window, cx: &mut Context<Self>) {
         let (has_lasso, has_transform) = {
-            let session = self.tab().session.read(cx);
+            let session = self.workspace.read(cx).current().session.read(cx);
             (
                 session.lasso_draft.is_some(),
                 session.transform_edit.is_some(),
             )
         };
         if has_lasso {
-            self.tab()
-                .session
-                .update(cx, |session, _| session.finish_lasso());
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.finish_lasso())
+            });
             self.touch(cx);
         } else if has_transform {
             // Return applies the pending transform (the inspector's Apply).
-            self.tab()
-                .session
-                .update(cx, |session, _| session.commit_transform());
+            self.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.commit_transform())
+            });
             self.touch(cx);
         }
     }
@@ -1553,12 +2092,21 @@ impl AppState {
         // While an import is in flight the welcome form disables; a second
         // trigger must not stack a second picker (`isImporting`, now a
         // session field — stage-D ticket 34).
-        if self.tab().session.read(cx).is_importing {
+        if self
+            .workspace
+            .read(cx)
+            .current()
+            .session
+            .read(cx)
+            .is_importing
+        {
             return;
         }
-        self.tab()
-            .session
-            .update(cx, |session, _| session.is_importing = true);
+        self.workspace.update(cx, |ws, cx| {
+            ws.current_mut()
+                .session
+                .update(cx, |session, _| session.is_importing = true)
+        });
         // The native multi-select panel (Swift's showsImporter flow).
         let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
@@ -1576,17 +2124,20 @@ impl AppState {
             this.update(cx, |this, cx| {
                 // The flag clears on every path — cancel included — so the
                 // form re-enables as soon as the panel closes.
-                this.tab()
-                    .session
-                    .update(cx, |session, _| session.is_importing = false);
+                this.workspace.update(cx, |ws, cx| {
+                    ws.current_mut()
+                        .session
+                        .update(cx, |session, _| session.is_importing = false)
+                });
                 if picked.is_empty() {
                     this.touch(cx);
                     return;
                 }
-                let failures = this
-                    .tab()
-                    .session
-                    .update(cx, |session, _| session.import_images(&picked, None));
+                let failures = this.workspace.update(cx, |ws, cx| {
+                    ws.current_mut()
+                        .session
+                        .update(cx, |session, _| session.import_images(&picked, None))
+                });
                 if failures.is_empty() {
                     this.set_status(format!("Imported {} images", picked.len()), cx);
                 } else {
@@ -1617,19 +2168,23 @@ impl AppState {
         self.hotkey(w, cx, |t, _w, cx| {
             let scale = if large { 10.0 } else { 1.0 };
             let (transforming, move_tool) = {
-                let session = t.tab().session.read(cx);
+                let session = t.workspace.read(cx).current().session.read(cx);
                 (
                     session.transform_edit.is_some(),
                     session.tool == NavigationTool::Move && session.can_transform(),
                 )
             };
             if transforming || move_tool {
-                t.tab()
-                    .session
-                    .update(cx, |session, _| session.nudge_layer(dx * scale, dy * scale));
+                t.workspace.update(cx, |ws, cx| {
+                    ws.current_mut()
+                        .session
+                        .update(cx, |session, _| session.nudge_layer(dx * scale, dy * scale))
+                });
             } else {
-                t.tab().session.update(cx, |session, _| {
-                    session.nudge_selection(dx * scale, dy * scale)
+                t.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.nudge_selection(dx * scale, dy * scale)
+                    })
                 });
             }
             t.touch(cx);
@@ -1641,31 +2196,32 @@ impl AppState {
 /// view entity since ticket 42 — it owns the status line (app-local state;
 /// the shell's `set_status` forwards into it) and observes the session for
 /// its readouts (tool name, undo/redo names, dimensions, zoom), so a
-/// session notification re-renders the bar alone. Its session field is
-/// re-pointed on tab changes by [`AppState::sync_session_observer`].
+/// session notification re-renders the bar alone. It is built fresh with
+/// the per-tab content (ticket 43) and observes the session from its
+/// constructor.
 pub struct StatusBarView {
     /// The active tab's session — the bar's readouts read it directly.
     session: Entity<EditorSession>,
-    /// The window shell (the transitional root). The bar currently has no
+    /// The root view (the window shell). The bar currently has no
     /// outbound flow (its one write, `set_status`, is forwarded from the
-    /// shell), so the seam has no reader yet — kept for the pattern and for
-    /// ticket 43's reshaping.
+    /// root), so the seam has no reader yet — kept for the pattern, like
+    /// every child entity's seam since ticket 39.
     #[allow(dead_code)]
-    app: WeakEntity<AppState>,
+    app: WeakEntity<ProjectWorkspaceView>,
     /// The status line's text (`self.status` when it lived on the shell):
     /// the last message any flow set, shown until the next one.
     status: Option<String>,
     /// The observe subscription on the active tab's session entity: a
-    /// session-entity notify re-renders this bar alone. Re-attached whenever
-    /// the active tab changes ([`Self::set_session`]); kept in a dedicated
-    /// field so a tab switch drops the outgoing session's observation.
+    /// session-entity notify re-renders this bar alone. Attached once in
+    /// the constructor (a rebuild brings a fresh bar); kept in a dedicated
+    /// field so the subscription outlives the constructor borrow.
     session_observer: Option<(Entity<EditorSession>, Subscription)>,
 }
 
 impl StatusBarView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
-        app: WeakEntity<AppState>,
+        app: WeakEntity<ProjectWorkspaceView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut bar = StatusBarView {
@@ -1685,21 +2241,6 @@ impl StatusBarView {
         let session = self.session.clone();
         let subscription = cx.observe(&session, |_, _, cx| cx.notify());
         self.session_observer = Some((session, subscription));
-    }
-
-    /// Re-points the session on tab changes (`AppState::sync_session_observer`,
-    /// same as the canvas view and the layers panel); the observation
-    /// follows.
-    pub(crate) fn set_session(&mut self, session: Entity<EditorSession>, cx: &mut Context<Self>) {
-        if self
-            .session_observer
-            .as_ref()
-            .is_some_and(|(observed, _)| observed.entity_id() == session.entity_id())
-        {
-            return;
-        }
-        self.session = session;
-        self.attach_session_observer(cx);
     }
 
     /// Stores the status line's text. The shell's `set_status` forwards here
