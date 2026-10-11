@@ -726,7 +726,10 @@ pub fn render_effects(
         );
         fill(&mut canvas, shadow.color(), shadow.opacity, &alpha);
     }
+    // `outerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 }`
+    // (MetalLayerEffects.swift:137; `visible()` carried the enabled half).
     if let Some(glow) = effects.outer_glow
+        && glow.size > 0.0
         && glow.opacity > 0.0
     {
         let shape = shape_coverage(&shown, placed, width, height, 0.0);
@@ -789,8 +792,11 @@ pub fn render_effects(
         let shape = shape_coverage(&shown, placed, width, height, 0.0);
         fill(&mut canvas, overlay.color(), overlay.opacity, &shape);
     }
+    // `innerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 }`
+    // (MetalLayerEffects.swift:155).
     if let Some(inner_glow) = effects.inner_glow
         && inner_glow.is_enabled()
+        && inner_glow.size > 0.0
         && inner_glow.opacity > 0.0
     {
         let shape = shape_coverage(&shown, placed, width, height, 0.0);
@@ -964,13 +970,15 @@ mod tests {
                 img.set_pixel(x, y, [255, 0, 0, 255]);
             }
         }
-        let mut effects = LayerEffects::default();
-        effects.shadow = Some(ShadowEffect {
-            distance: 2.0,
-            blur: 0.0,
-            opacity: 1.0,
+        let effects = LayerEffects {
+            shadow: Some(ShadowEffect {
+                distance: 2.0,
+                blur: 0.0,
+                opacity: 1.0,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let (result, inset) = render_effects(&img, None, &effects);
         assert!(inset >= 4.0);
         // The output is inset by the margin: the square sits offset and the
@@ -999,13 +1007,15 @@ mod tests {
                 img.set_pixel(x, y, [255, 255, 255, 255]);
             }
         }
-        let mut effects = LayerEffects::default();
-        effects.stroke = Some(StrokeEffect {
-            size: 2.0,
-            inside: false,
-            opacity: 1.0,
+        let mut effects = LayerEffects {
+            stroke: Some(StrokeEffect {
+                size: 2.0,
+                inside: false,
+                opacity: 1.0,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let (outside, _) = render_effects(&img, None, &effects);
         assert!(outside.data.iter().any(|v| *v > 0));
         effects.stroke.as_mut().unwrap().inside = true;
@@ -1020,5 +1030,35 @@ mod tests {
         let grown = placed_transform(&t, &img, 10.0);
         assert!((grown.size.width - 125.0).abs() < 1e-9);
         assert_eq!(grown.center(), t.center());
+    }
+
+    // The glows' `size > 0` gate (MetalLayerEffects.swift:137/:155): a
+    // zero-size glow renders nothing, exactly like no glow at all.
+
+    #[test]
+    fn zero_size_glows_render_nothing() {
+        let mut img = Bitmap::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                img.set_pixel(x, y, [255, 0, 0, 255]);
+            }
+        }
+        let effects = LayerEffects {
+            outer_glow: Some(OuterGlowEffect {
+                size: 0.0,
+                opacity: 1.0,
+                ..Default::default()
+            }),
+            inner_glow: Some(InnerGlowEffect {
+                size: 0.0,
+                opacity: 1.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (with_glow, inset) = render_effects(&img, None, &effects);
+        let (plain, plain_inset) = render_effects(&img, None, &LayerEffects::default());
+        assert_eq!(inset, plain_inset);
+        assert_eq!(with_glow.data, plain.data);
     }
 }

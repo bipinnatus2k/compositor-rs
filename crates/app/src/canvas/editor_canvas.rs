@@ -126,6 +126,9 @@ pub struct CanvasScene {
     pub doc: (f64, f64),
     pub guides: Vec<(bool, f32)>,
     pub grid: Vec<(f32, bool, bool)>,
+    /// The document pixel grid from 800% zoom (`drawPixelGrid`): hairline
+    /// positions over the image, with their axis.
+    pub pixel_grid: Vec<(f32, bool)>,
     pub selection: Vec<Vec<(f32, f32)>>,
     pub lasso: Option<Vec<Vec<(f32, f32)>>>,
     pub crop: Option<((f32, f32), (f32, f32))>,
@@ -445,6 +448,7 @@ impl EditorCanvasView {
         };
         let mut guides = Vec::new();
         let mut grid = Vec::new();
+        let mut pixel_grid = Vec::new();
         let mut selection = Vec::new();
         let mut lasso = None;
         let mut crop = None;
@@ -490,6 +494,10 @@ impl EditorCanvasView {
                 for y in LayoutGrid::lines(document.height as f64) {
                     grid.push((to_screen(0.0, y).1, LayoutGrid::is_major(y), false));
                 }
+            }
+            // The document pixel grid from 800% (EditorCanvas.swift:778-779).
+            if session.shows_pixel_grid && viewport.zoom() >= PIXEL_GRID_ZOOM {
+                pixel_grid = pixel_grid_lines(viewport, doc_size, image_rect);
             }
             // The ants follow a pixel move or outline drag (`displayedSelection`).
             if let Some(selection_state) = session.displayed_selection() {
@@ -571,6 +579,7 @@ impl EditorCanvasView {
             doc: self.doc_size(cx),
             guides,
             grid,
+            pixel_grid,
             selection,
             lasso,
             crop,
@@ -2517,6 +2526,74 @@ fn handle_at(rect: CGRect, doc: CGPoint) -> Option<usize> {
 
 // MARK: Painting
 
+/// `pixelGridZoom` (EditorCanvas.swift:800): the pixel grid appears from 800%.
+const PIXEL_GRID_ZOOM: f64 = 8.0;
+
+/// `drawPixelGrid` (EditorCanvas.swift:1087-1110) — one hairline per document
+/// pixel boundary, over the image only. The lines' extent is the canvas rect;
+/// painting clips them to the window.
+fn pixel_grid_lines(
+    viewport: CanvasViewport,
+    doc_size: CGSize,
+    image_rect: Bounds<Pixels>,
+) -> Vec<(f32, bool)> {
+    if image_rect.size.width <= px(0.0) || image_rect.size.height <= px(0.0) {
+        return Vec::new();
+    }
+    let first = viewport.document_point(
+        CGPoint::new(
+            f64::from(image_rect.origin.x),
+            f64::from(image_rect.origin.y),
+        ),
+        doc_size,
+    );
+    let last = viewport.document_point(
+        CGPoint::new(
+            f64::from(image_rect.origin.x) + f64::from(image_rect.size.width),
+            f64::from(image_rect.origin.y) + f64::from(image_rect.size.height),
+        ),
+        doc_size,
+    );
+    let mut lines = Vec::new();
+    for column in (first.x.ceil() as i64)..=(last.x.floor() as i64) {
+        let x = viewport
+            .view_point(CGPoint::new(column as f64, 0.0), doc_size)
+            .x;
+        lines.push((x as f32, true));
+    }
+    for row in (first.y.ceil() as i64)..=(last.y.floor() as i64) {
+        let y = viewport
+            .view_point(CGPoint::new(0.0, row as f64), doc_size)
+            .y;
+        lines.push((y as f32, false));
+    }
+    lines
+}
+
+/// Paints the pixel grid: hairline quads, one screen pixel wide
+/// (`hairline = 1 / backingScale`), white 0.55 at 0.45 alpha.
+fn paint_pixel_grid(window: &mut Window, image_bounds: Bounds<Pixels>, lines: &[(f32, bool)]) {
+    if image_bounds.size.width <= px(0.0) || image_bounds.size.height <= px(0.0) {
+        return;
+    }
+    let hairline = px(1.0 / window.scale_factor());
+    let color = rgba(0x8c8c8c73);
+    for (position, vertical) in lines {
+        let quad = if *vertical {
+            Bounds::new(
+                point(px(*position) - hairline / 2.0, image_bounds.origin.y),
+                size(hairline, image_bounds.size.height),
+            )
+        } else {
+            Bounds::new(
+                point(image_bounds.origin.x, px(*position) - hairline / 2.0),
+                size(image_bounds.size.width, hairline),
+            )
+        };
+        window.paint_quad(gpui_kit::fill(quad, color));
+    }
+}
+
 fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window) {
     // Viewport background.
     window.paint_quad(gpui_kit::fill(bounds, rgb(0x232326)));
@@ -2543,6 +2620,10 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         );
         paint_rect_outline(window, image_bounds, rgba(0x00000066));
     }
+
+    // The document pixel grid sits over the image, under everything else
+    // (EditorCanvas.draw's drawPixelGrid call).
+    paint_pixel_grid(window, image_bounds, &scene.pixel_grid);
 
     // Layout grid.
     for (position, major, vertical) in &scene.grid {
@@ -2705,6 +2786,20 @@ impl CanvasScene {
                         position + oy
                     },
                     *major,
+                    *vertical,
+                )
+            })
+            .collect();
+        out.pixel_grid = out
+            .pixel_grid
+            .iter()
+            .map(|(position, vertical)| {
+                (
+                    if *vertical {
+                        position + ox
+                    } else {
+                        position + oy
+                    },
                     *vertical,
                 )
             })
@@ -3079,9 +3174,10 @@ mod tests {
     use super::{
         blur_mask_sample, blur_sample, blur_sample_softened, blur_sigma, can_paint,
         clone_layer_sample, guide_axis_position, guide_release_deletes, handle_at, nice_tick,
-        paint_target, ruler_axis_at, shape_drag_rect, transform_press_layer,
+        paint_target, pixel_grid_lines, ruler_axis_at, shape_drag_rect, transform_press_layer,
     };
     use crate::state::RULER_SIZE;
+    use compositor_core::canvas_viewport::CanvasViewport;
     use compositor_core::document::{
         CanvasDocument, GuideAxis, ImageLayer, LayerMask, NavigationTool, ShapeKind,
     };
@@ -3090,6 +3186,7 @@ mod tests {
     use compositor_core::selection::{DocumentSelection, SelectionPath};
     use compositor_core::session::EditorSession;
     use compositor_core::transform::LayerTransform;
+    use gpui_kit::{Bounds, point, px, size};
     use uuid::Uuid;
 
     /// Whole-pixel tick label (`CanvasRulers.label`). Production rendering
@@ -3118,6 +3215,34 @@ mod tests {
         assert_eq!(blur_sigma(5.0), 1.5);
         assert_eq!(blur_sigma(200.0), 20.0);
         assert_eq!(blur_sigma(2000.0), 30.0);
+    }
+
+    /// `drawPixelGrid` (EditorCanvas.swift:1087-1110): one hairline per
+    /// document pixel boundary, vertical and horizontal, over the image only.
+    #[test]
+    fn pixel_grid_lines_follow_the_document_pixel_boundaries() {
+        let mut viewport = CanvasViewport::default();
+        viewport.resize(
+            CGSize::new(160.0, 160.0),
+            1.0,
+            Some(CGSize::new(16.0, 16.0)),
+        );
+        viewport.set_zoom(10.0, CGPoint::new(80.0, 80.0), CGSize::new(16.0, 16.0));
+        let rect = Bounds::new(point(px(0.0), px(0.0)), size(px(160.0), px(160.0)));
+        let lines = pixel_grid_lines(viewport, CGSize::new(16.0, 16.0), rect);
+        let verticals = lines.iter().filter(|(_, vertical)| *vertical).count();
+        let horizontals = lines.iter().filter(|(_, vertical)| !*vertical).count();
+        // The canvas fills the viewport exactly, so every boundary 0..=16
+        // lands inside (Swift's ceil/floor stride keeps the edges).
+        assert_eq!(verticals, 17);
+        assert_eq!(horizontals, 17);
+    }
+
+    #[test]
+    fn pixel_grid_lines_need_an_image() {
+        let viewport = CanvasViewport::default();
+        let empty = Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)));
+        assert!(pixel_grid_lines(viewport, CGSize::new(16.0, 16.0), empty).is_empty());
     }
 
     /// `canPaint` (EditorSession+Brush.swift:5-12) split across
