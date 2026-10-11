@@ -76,6 +76,7 @@ actions!(
         NewLayer,
         DuplicateLayer,
         DeleteLayer,
+        DeleteKeyPressed,
         MergeDown,
         NewGroup,
         AddMask,
@@ -372,7 +373,11 @@ pub(crate) fn bindings_tracked(
     bind!(out, ids, registry, "layer.merge", MergeDown);
     // Group Selected Layers (Cmd-G)
     bind!(out, ids, registry, "layer.group", GroupSelectedLayers);
-    bind!(out, ids, registry, "layer.delete", DeleteLayer);
+    // The Delete key: the selected effect goes first, then a selection clears
+    // its pixels, then the layer falls through (deleteKeyPressed,
+    // SelectionEdits.swift:63). The menu's Delete item dispatches DeleteLayer
+    // — `deleteLayerOrMask` — exactly as the Swift menu does.
+    bind!(out, ids, registry, "layer.delete", DeleteKeyPressed);
     // Select
     bind!(out, ids, registry, "select.all", SelectAllAction);
     bind!(out, ids, registry, "select.deselect", DeselectAction);

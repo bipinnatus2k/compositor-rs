@@ -120,6 +120,7 @@ impl Render for ProjectWorkspaceView {
             .on_action(cx.listener(Self::on_new_layer))
             .on_action(cx.listener(Self::on_duplicate_layer))
             .on_action(cx.listener(Self::on_delete_layer))
+            .on_action(cx.listener(Self::on_delete_key_pressed))
             .on_action(cx.listener(Self::on_merge_down))
             .on_action(cx.listener(Self::on_new_group))
             .on_action(cx.listener(Self::on_add_mask))
@@ -1154,6 +1155,26 @@ impl ProjectWorkspaceView {
             // mask dependency raises the bake/remove-links ask (Swift's
             // finishDeletingLayers dialog).
             t.request_delete_layer(w, cx);
+        });
+    }
+    fn on_delete_key_pressed(
+        &mut self,
+        _: &keys::DeleteKeyPressed,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hotkey(w, cx, |t, w, cx| {
+            // The Delete key (SelectionEdits.swift:63-67): the selected
+            // effect goes first, then a selection clears its pixels; the
+            // fallthrough is deleteLayerOrMask — the live-mask ask entry.
+            let consumed = t.workspace.update(cx, |ws, cx| {
+                ws.current_mut()
+                    .session
+                    .update(cx, |session, _| session.delete_key_pressed())
+            });
+            if !consumed {
+                t.request_delete_layer(w, cx);
+            }
         });
     }
     fn on_merge_down(&mut self, _: &keys::MergeDown, _w: &mut Window, cx: &mut Context<Self>) {

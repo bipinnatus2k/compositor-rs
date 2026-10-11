@@ -28,6 +28,7 @@ use crate::transform::{LayerSampling, LayerTransform, TransformEdit, TransformGr
 use uuid::Uuid;
 // Split impls (verbatim moves; one file per Swift extension boundary).
 mod brush;
+pub use brush::LastBrushPoint;
 mod crop;
 mod gradient;
 mod history;
@@ -435,6 +436,10 @@ pub struct EditorSession {
     pub clone_offset: Option<CGSize>,
     pub mask_paint_white: bool,
     pub background_color: PaletteColor,
+    /// Where the last stroke ended, with the layer/mask it painted on — the
+    /// anchor a Shift-click draws a straight line from (`lastBrushPoint`,
+    /// EditorSession+Brush.swift:61/70).
+    pub last_brush_point: Option<LastBrushPoint>,
     pub gradient_settings: GradientSettings,
 
     // Selection editing
@@ -583,6 +588,7 @@ impl Default for EditorSession {
             clone_offset: None,
             mask_paint_white: false,
             background_color: PaletteColor::WHITE,
+            last_brush_point: None,
             gradient_settings: GradientSettings::default(),
             lasso_draft: None,
             lasso_kind: LassoKind::Freehand,
@@ -2584,9 +2590,7 @@ impl EditorSession {
     /// `groupTransformBox` (EditorSession.swift:320-327) — the upright box
     /// around the group members.
     pub fn group_transform_box(&self) -> Option<LayerTransform> {
-        let Some(document) = self.document.as_ref() else {
-            return None;
-        };
+        let document = self.document.as_ref()?;
         let mut min_x = f64::INFINITY;
         let mut max_x = f64::NEG_INFINITY;
         let mut min_y = f64::INFINITY;
@@ -3261,7 +3265,7 @@ fn adopt_clipping(id: Uuid, layers: &mut [ImageLayer]) {
 
 /// `LiveLayerMask.releaseDetachedClipping` — clipping links whose base no
 /// longer sits directly below them release.
-fn release_detached_clipping(layers: &mut Vec<ImageLayer>) {
+fn release_detached_clipping(layers: &mut [ImageLayer]) {
     let mut groups: std::collections::HashMap<Option<Uuid>, Vec<Uuid>> =
         std::collections::HashMap::new();
     for layer in layers.iter() {
@@ -3307,8 +3311,8 @@ fn decode_image(path: &std::path::Path) -> Option<(Bitmap, Bitmap)> {
     };
     for pixel in bitmap.data.chunks_exact_mut(4) {
         let alpha = pixel[3] as u32;
-        for channel in 0..3 {
-            pixel[channel] = ((pixel[channel] as u32 * alpha + 127) / 255) as u8;
+        for channel in pixel[..3].iter_mut() {
+            *channel = ((*channel as u32 * alpha + 127) / 255) as u8;
         }
     }
     let thumbnail = crate::raster::thumbnail_of(&bitmap);
@@ -3328,6 +3332,7 @@ fn rand_seed() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::LayerEffectKind;
 
     fn session() -> EditorSession {
         let mut s = EditorSession::new();
@@ -4181,6 +4186,57 @@ mod tests {
         assert_eq!(s.history.undo_name(), "Clear");
     }
 
+    // deleteKeyPressed (SelectionEdits.swift:63)
+
+    #[test]
+    fn delete_key_pressed_clears_a_selection() {
+        let mut s = session();
+        s.document.as_mut().unwrap().layers[0].asset =
+            Some(ImportedImage::new(red_image(100), "L"));
+        rectangular_selection(&mut s, 10.0, 10.0, 30.0, 30.0);
+        assert!(s.delete_key_pressed());
+        let image = s
+            .active_layer()
+            .unwrap()
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .clone();
+        assert_eq!(image.pixel(20, 20)[3], 0);
+        assert_eq!(s.history.undo_name(), "Clear");
+    }
+
+    #[test]
+    fn delete_key_pressed_falls_through_without_a_selection_or_effect() {
+        let mut s = session();
+        assert!(!s.delete_key_pressed());
+    }
+
+    #[test]
+    fn delete_key_pressed_removes_the_selected_effect_first() {
+        let mut s = session();
+        let id = s.active_layer_id.unwrap();
+        // Effects need a layer that carries pixels.
+        s.document.as_mut().unwrap().layers[0].asset = Some(ImportedImage::new(red_image(8), "L"));
+        s.add_effect(LayerEffectKind::Shadow);
+        s.finish_effects_editing(true);
+        s.select_effect(LayerEffectKind::Shadow, id, false);
+        assert!(s.delete_key_pressed());
+        // The effect went in one "Remove" step; no layer deletion ran.
+        // Removing a layer's only effect stores an empty set as `None`.
+        assert!(
+            !s.active_layer()
+                .unwrap()
+                .effects
+                .unwrap_or_default()
+                .contains(LayerEffectKind::Shadow)
+        );
+        assert_eq!(s.history.undo_name(), "Remove Drop Shadow");
+        assert_eq!(s.selected_effect(), None);
+    }
+
     #[test]
     fn pixel_move_moves_the_selected_pixels() {
         let mut s = session();
@@ -4868,7 +4924,7 @@ mod tests {
         image
             .save_with_format(&first, image::ImageFormat::Png)
             .unwrap();
-        let failures = s.import_images(&[first.clone()], None);
+        let failures = s.import_images(std::slice::from_ref(&first), None);
         assert!(failures.is_empty(), "{failures:?}");
         let doc = s
             .document
@@ -4882,7 +4938,7 @@ mod tests {
         image
             .save_with_format(&second, image::ImageFormat::Png)
             .unwrap();
-        let failures = s.import_images(&[second.clone()], None);
+        let failures = s.import_images(std::slice::from_ref(&second), None);
         assert!(failures.is_empty(), "{failures:?}");
         let doc = s.document.as_ref().unwrap();
         assert_eq!(doc.layers.len(), 2);
@@ -6237,7 +6293,7 @@ mod tests {
 
         let mut settings = crate::adjust::LevelsSettings::default();
         settings.ranges[0].black = 20.0;
-        s.levels = Some(settings.clone());
+        s.levels = Some(settings);
         // Preview writes the editor's settings into the layer's metadata.
         assert!(s.preview_adjustment_editing(true));
         assert_eq!(adjustment_of(&s, id).levels, settings);
@@ -6294,7 +6350,7 @@ mod tests {
 
         let mut settings = crate::adjust::LevelsSettings::default();
         settings.ranges[0].gamma = 2.0;
-        s.levels = Some(settings.clone());
+        s.levels = Some(settings);
         assert!(s.preview_adjustment_editing(true));
         assert_eq!(
             adjustment_of(&s, id).levels,

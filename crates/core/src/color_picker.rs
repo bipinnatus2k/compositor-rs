@@ -4,6 +4,7 @@
 
 use crate::document::{NavigationTool, PaletteColor};
 use crate::effects::LayerEffectKind;
+use crate::geometry::CGPoint;
 use crate::session::{ColorPickerState, ColorPickerTarget, EditorSession, TextDraft};
 
 /// Swift's `TextDraft` is `Identifiable` with a fresh UUID per draft; the Rust
@@ -18,12 +19,11 @@ fn text_draft_identity(draft: &TextDraft) -> Option<uuid::Uuid> {
 
 impl EditorSession {
     /// `canEditPalette` — `!isProjectBusy && brushStroke == nil` (the `_ =
-    /// showsBusy` prefix only subscribes the view to the busy flag). The core
-    /// session models neither a busy project nor an in-flight brush stroke —
-    /// both live at the app layer, as with `can_edit_layers` — so this is
-    /// always true here and the app conjuncts its own state on top.
+    /// showsBusy` prefix only subscribes the view to the busy flag). Both
+    /// halves live on the session: `is_project_busy` since stage-D ticket 34,
+    /// `has_brush_stroke` mirroring the canvas drag (EditorSession+Brush).
     pub fn can_edit_palette(&self) -> bool {
-        true
+        !self.is_project_busy && !self.has_brush_stroke
     }
 
     /// `setPaletteColor(_:background:)`.
@@ -120,6 +120,22 @@ impl EditorSession {
             ColorPickerTarget::Effect { kind },
             original,
         ));
+    }
+
+    /// `sampleIntoColorPicker(at:)` (ColorPalette.swift:130) — loads the
+    /// canvas color under a document point into the open picker.
+    pub fn sample_into_color_picker(&mut self, point: CGPoint) {
+        let Some(picker) = self.color_picker.as_mut() else {
+            return;
+        };
+        let Some(color) = self
+            .document
+            .as_ref()
+            .and_then(|document| crate::render::sample_composite_color(document, point))
+        else {
+            return;
+        };
+        picker.hsb.set_rgb(color);
     }
 
     /// `closeColorPicker(commit:)`.
@@ -565,6 +581,38 @@ mod tests {
         s.preview_effect_color();
         // The only undo entry is the document creation: nothing was written.
         assert_eq!(s.history.undo_name(), "New Canvas");
+    }
+
+    // (g) sampleIntoColorPicker (ColorPalette.swift:130)
+
+    #[test]
+    fn sample_into_color_picker_loads_the_canvas_color() {
+        let mut s = session();
+        let layer_id = s.active_layer_id.unwrap();
+        {
+            let layer = s.document.as_mut().unwrap().layer_mut(layer_id).unwrap();
+            layer.asset = Some(ImportedImage::new(red_bitmap(8), "Layer 1"));
+        }
+        s.open_color_picker(false);
+        s.sample_into_color_picker(CGPoint::new(4.0, 4.0));
+        let color = s.color_picker.as_ref().unwrap().color();
+        assert_eq!(color, PaletteColor::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sample_into_color_picker_needs_an_open_picker() {
+        let mut s = session();
+        s.sample_into_color_picker(CGPoint::new(4.0, 4.0));
+        assert!(s.color_picker.is_none());
+    }
+
+    fn red_bitmap(size: usize) -> Bitmap {
+        let mut image = Bitmap::new(size, size);
+        for i in (0..image.data.len()).step_by(4) {
+            image.data[i] = 255;
+            image.data[i + 3] = 255;
+        }
+        image
     }
 
     // The Gradient Map target cannot be opened yet (no filter-edit session),

@@ -157,6 +157,16 @@ pub struct EditorCanvasView {
     pub(crate) app: WeakEntity<ProjectWorkspaceView>,
     /// The gesture in progress (`CanvasView`'s plain private drag vars).
     pub(crate) drag: Option<CanvasDrag>,
+    /// The Shift stroke axis (`brushAxisAnchor`/`brushAxisHorizontal`,
+    /// EditorCanvas.swift:49-51): while Shift is held the stroke locks to a
+    /// horizontal or vertical line from the press point; the axis settles
+    /// after the first few pixels so it doesn't flip mid-line.
+    brush_axis_anchor: Option<CGPoint>,
+    brush_axis_horizontal: Option<bool>,
+    /// The last pixel a brush stroke applied (`brushLastPixel`,
+    /// EditorCanvas.swift:48) — the axis anchor falls back to it when Shift
+    /// is pressed mid-stroke.
+    brush_last_pixel: Option<CGPoint>,
     /// The tool saved while Space temporarily turns the canvas into the Hand
     /// tool (`spaceHeld` in EditorCanvas.swift).
     space_saved_tool: Option<NavigationTool>,
@@ -210,6 +220,9 @@ impl EditorCanvasView {
             session,
             app,
             drag: None,
+            brush_axis_anchor: None,
+            brush_axis_horizontal: None,
+            brush_last_pixel: None,
             space_saved_tool: None,
             gradient_cursor: None,
             shape_shape: None,
@@ -725,18 +738,34 @@ impl EditorCanvasView {
             | NavigationTool::SpotHealing
             | NavigationTool::CloneStamp
             | NavigationTool::Blur => {
-                if self.session.read(cx).tool == NavigationTool::Blur {
-                    match self.session.read(cx).blur_mode {
-                        BlurToolMode::Smudge | BlurToolMode::Liquify => {
-                            self.begin_warp(doc, cx);
+                // Shift paints a straight line on from where the last stroke
+                // ended, as in Photoshop (EditorCanvas.swift:1449-1451):
+                // `beginBrush` at the old end, then `continueBrush` at the
+                // click — warp strokes ride the same branch.
+                if shift && let Some(from) = self.session.read(cx).shift_line_start() {
+                    self.begin_brush_at(from, alt, cx);
+                    match self.drag.as_mut() {
+                        Some(CanvasDrag::Stroke(edit, _)) => {
+                            edit.append_smoothed(doc);
                         }
-                        BlurToolMode::Blur => {
-                            self.begin_stroke(doc, alt, cx);
+                        Some(CanvasDrag::Warp(stroke)) => {
+                            stroke.append(doc);
                         }
+                        _ => {}
                     }
+                    self.session.update(cx, |session, _| {
+                        if let Some(last) = session.last_brush_point.as_mut() {
+                            last.point = doc;
+                        }
+                    });
                 } else {
-                    self.begin_stroke(doc, alt, cx);
+                    self.begin_brush_at(doc, alt, cx);
                 }
+                // Shift keeps the stroke straight from the press point
+                // (EditorCanvas.swift:1455-1456).
+                self.brush_axis_anchor = shift.then_some(doc);
+                self.brush_axis_horizontal = None;
+                self.brush_last_pixel = Some(doc);
             }
             NavigationTool::Gradient => {
                 self.begin_gradient(doc, cx);
@@ -748,7 +777,15 @@ impl EditorCanvasView {
                 self.begin_crop(doc, cx);
             }
             NavigationTool::Eyedropper => {
-                if let Some(document) = self.session.read(cx).document.as_ref()
+                // The picker open: the sample loads into its working color
+                // (`sampleIntoColorPicker`, EditorCanvas.swift:2042).
+                // Otherwise the foreground swatch, behind `canEditPalette`
+                // (:2043).
+                if self.session.read(cx).color_picker.is_some() {
+                    self.session
+                        .update(cx, |session, _| session.sample_into_color_picker(doc));
+                } else if self.session.read(cx).can_edit_palette()
+                    && let Some(document) = self.session.read(cx).document.as_ref()
                     && let Some(color) =
                         compositor_core::render::sample_composite_color(document, doc)
                 {
@@ -824,13 +861,40 @@ impl EditorCanvasView {
             }
         }
 
+        // The brush strokes' Shift axis runs on this view's own fields, so it
+        // goes before the drag borrow (EditorCanvas.swift:1551-1561).
+        let stroke_drag = matches!(
+            self.drag,
+            Some(CanvasDrag::Stroke(..)) | Some(CanvasDrag::Warp(..))
+        );
+        let doc = if stroke_drag {
+            self.constrain_stroke_axis(doc, shift)
+        } else {
+            doc
+        };
+
         match self.drag.as_mut() {
             Some(CanvasDrag::Pan { .. }) => {}
             Some(CanvasDrag::Stroke(edit, _)) => {
+                self.brush_last_pixel = Some(doc);
                 edit.append_smoothed(doc);
+                // `lastBrushPoint?.point = painted`
+                // (EditorSession+Brush.swift:70).
+                self.session.update(cx, |session, _| {
+                    if let Some(last) = session.last_brush_point.as_mut() {
+                        last.point = doc;
+                    }
+                });
             }
             Some(CanvasDrag::Warp(stroke)) => {
                 stroke.append(doc);
+                // `lastBrushPoint?.point = point` — warp continues update the
+                // line anchor too (EditorSession+Brush.swift:66).
+                self.session.update(cx, |session, _| {
+                    if let Some(last) = session.last_brush_point.as_mut() {
+                        last.point = doc;
+                    }
+                });
             }
             Some(CanvasDrag::Shape { start }) => {
                 let rect =
@@ -1133,6 +1197,55 @@ impl EditorCanvasView {
 
     // MARK: Strokes
 
+    /// The brush family's mouse-down dispatch (EditorCanvas.swift's
+    /// `isBrushTool` branch): smudge/liquify ride the warp engine, everything
+    /// else starts a raster stroke.
+    fn begin_brush_at(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
+        if self.session.read(cx).tool == NavigationTool::Blur {
+            match self.session.read(cx).blur_mode {
+                BlurToolMode::Smudge | BlurToolMode::Liquify => {
+                    self.begin_warp(doc, cx);
+                }
+                BlurToolMode::Blur => {
+                    self.begin_stroke(doc, alt, cx);
+                }
+            }
+        } else {
+            self.begin_stroke(doc, alt, cx);
+        }
+    }
+
+    /// Shift keeps the stroke straight, horizontal or vertical, from wherever
+    /// it was pressed; letting go carries on freehand. The axis is settled by
+    /// the first few pixels of movement, so it doesn't flip mid-line
+    /// (EditorCanvas.swift:1551-1561): the anchor is the press point, falling
+    /// back to the last applied pixel when Shift comes on mid-stroke, and the
+    /// pointer rides the anchor until the axis settles.
+    fn constrain_stroke_axis(&mut self, doc: CGPoint, shift: bool) -> CGPoint {
+        if !shift {
+            self.brush_axis_anchor = None;
+            self.brush_axis_horizontal = None;
+            return doc;
+        }
+        let anchor = self
+            .brush_axis_anchor
+            .or(self.brush_last_pixel)
+            .unwrap_or(doc);
+        if self.brush_axis_anchor.is_none() {
+            self.brush_axis_anchor = Some(anchor);
+            self.brush_axis_horizontal = None;
+        }
+        if self.brush_axis_horizontal.is_none() && (doc.x - anchor.x).hypot(doc.y - anchor.y) >= 3.0
+        {
+            self.brush_axis_horizontal = Some((doc.x - anchor.x).abs() >= (doc.y - anchor.y).abs());
+        }
+        match self.brush_axis_horizontal {
+            Some(true) => CGPoint::new(doc.x, anchor.y),
+            Some(false) => CGPoint::new(anchor.x, doc.y),
+            None => anchor,
+        }
+    }
+
     fn begin_stroke(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
         let Some(document) = self.session.read(cx).document.clone() else {
             return;
@@ -1242,6 +1355,15 @@ impl EditorCanvasView {
             }
         }
         edit.append_smoothed(doc);
+        // `lastBrushPoint = (point, layer.id, isMaskSelected)`
+        // (EditorSession+Brush.swift:61) — the Shift-click line anchor.
+        self.session.update(cx, |session, _| {
+            session.last_brush_point = Some(compositor_core::session::LastBrushPoint {
+                point: doc,
+                layer_id: id,
+                mask: mask_target,
+            });
+        });
         self.set_drag(Some(CanvasDrag::Stroke(edit, id)), cx);
     }
 

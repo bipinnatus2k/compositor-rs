@@ -667,6 +667,23 @@ impl EditorSession {
         self.commit_pixel_edit(&edit, &composed, "Clear");
     }
 
+    /// `deleteKeyPressed` (SelectionEdits.swift:63) — the Delete key: the
+    /// selected effect goes first, then a selection clears its pixels;
+    /// without either the caller falls through to `deleteLayerOrMask`, whose
+    /// live-mask ask lives at the app layer. Returns whether the key was
+    /// consumed here.
+    pub fn delete_key_pressed(&mut self) -> bool {
+        if self.selected_effect().is_some() {
+            self.remove_selected_effect();
+            return true;
+        }
+        if self.selection().is_some() {
+            self.clear_selected_pixels();
+            return true;
+        }
+        false
+    }
+
     // MARK: Moving selected pixels (SelectionEdits.swift's Cmd-drag / Cmd-arrow)
 
     /// `beginPixelMove`'s guard: `canPaint` for the image target (one visible
@@ -1110,17 +1127,17 @@ impl EditorSession {
         // A new Gradient Map runs from the foreground to the background color,
         // as in Photoshop; Grain gets a pattern of its own.
         if kind == AdjustmentKind::GradientMap {
-            let mut settings = crate::adjust::GradientMapSettings::default();
-            settings.shadows =
-                crate::adjust::AdjustmentColor::from_palette(self.palette_color(false));
-            settings.highlights =
-                crate::adjust::AdjustmentColor::from_palette(self.palette_color(true));
-            adjustment.gradient_map_settings = Some(settings);
+            adjustment.gradient_map_settings = Some(crate::adjust::GradientMapSettings {
+                shadows: crate::adjust::AdjustmentColor::from_palette(self.palette_color(false)),
+                highlights: crate::adjust::AdjustmentColor::from_palette(self.palette_color(true)),
+                ..Default::default()
+            });
         }
         if kind == AdjustmentKind::Grain {
-            let mut settings = crate::adjust::GrainSettings::default();
-            settings.seed = rand_seed();
-            adjustment.grain_settings = Some(settings);
+            adjustment.grain_settings = Some(crate::adjust::GrainSettings {
+                seed: rand_seed(),
+                ..Default::default()
+            });
         }
         if kind == AdjustmentKind::AddNoise {
             adjustment.noise_seed = Some(rand_seed());
@@ -1282,8 +1299,8 @@ impl EditorSession {
                 let mut px = composite.pixel(dx, dy);
                 if let Some(clip) = &clip {
                     let a = clip.alpha_at(dx, dy);
-                    for c in 0..4 {
-                        px[c] = (px[c] as f32 * a) as u8;
+                    for channel in px.iter_mut() {
+                        *channel = (*channel as f32 * a) as u8;
                     }
                 }
                 out.set_pixel(x, y, px);
