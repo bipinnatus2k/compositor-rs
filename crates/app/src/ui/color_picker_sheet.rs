@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     App, AppContext, Bounds, Context, Corners, Entity, Focusable, Global, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathBuilder, Pixels, Point, Render, RenderImage, RenderOnce, Styled, WeakEntity,
+    PathBuilder, Pixels, Point, Render, RenderImage, RenderOnce, Styled, Subscription, WeakEntity,
     Window, canvas, point, px, rgba, size,
 };
 use image::Frame;
@@ -71,6 +71,10 @@ pub struct ColorPickerPanelView {
     /// The hex entry (`ColorPickerSheet.swift:10`'s `@State hexDraft`); a
     /// well-formed entry overrides the field at commit.
     hex: Entity<InputState>,
+    /// Keep-alive for the text-entry subscriptions: dropping a Subscription
+    /// unsubscribes it (the same field every panel entity carries).
+    #[allow(dead_code)]
+    subscriptions: Vec<Subscription>,
 }
 
 impl ColorPickerPanelView {
@@ -88,6 +92,16 @@ impl ColorPickerPanelView {
         let green = text_field(channel_text(color.green), window, cx);
         let blue = text_field(channel_text(color.blue), window, cx);
         let hex = text_field(color.hex(), window, cx);
+        // A valid channel edit re-enters through `picker_apply` — the same
+        // path the field and hue strip drags take, so the preview, the hex
+        // field and the effect color stay live (Swift's binding `set`). The
+        // hex entry follows gpui-kit `ColorPickerState`'s logic: a parseable
+        // draft previews as it is typed, Return commits it.
+        let mut subscriptions = Vec::new();
+        for (field, channel) in [(&red, 0usize), (&green, 1), (&blue, 2)] {
+            subscriptions.push(channel_subscription(field, channel, window, cx));
+        }
+        subscriptions.push(hex_subscription(&hex, window, cx));
         ColorPickerPanelView {
             session,
             app,
@@ -95,6 +109,7 @@ impl ColorPickerPanelView {
             green,
             blue,
             hex,
+            subscriptions,
         }
     }
 
@@ -440,6 +455,102 @@ fn channel_row(label: &'static str, field: Entity<InputState>, width: f32) -> gp
 /// (`Int((channel * 255).rounded())`).
 fn channel_text(channel: CGFloat) -> String {
     format!("{}", (channel * 255.0).round() as i64)
+}
+
+/// One channel entry's live edit: a parseable integer replaces that channel
+/// of the quantized working color, clamped into range (Swift's binding `set`,
+/// :124-137); anything unparseable leaves the color alone, like a formatted
+/// TextField that rejects the draft. The write re-enters `picker_apply`, so
+/// the preview, the hex field and an effect color stay live. Focusing
+/// selects the draft, so typing replaces the pre-filled value instead of
+/// splicing into it — the desktop number-field convention, and what makes
+/// `0` + typing `128` read `128` rather than `1280`.
+fn channel_subscription(
+    field: &Entity<InputState>,
+    channel: usize,
+    window: &mut Window,
+    cx: &mut Context<ColorPickerPanelView>,
+) -> Subscription {
+    let field = field.clone();
+    cx.subscribe_in(
+        &field,
+        window,
+        move |this, input, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::Focus => {
+                    input.update(cx, |input, cx| input.select_all(window, cx));
+                    return;
+                }
+                InputEvent::Change | InputEvent::PressEnter { .. } => {}
+                _ => return,
+            }
+            let Ok(raw) = input.read(cx).value().to_string().trim().parse::<i64>() else {
+                return;
+            };
+            let value = (raw.clamp(0, 255) as CGFloat) / 255.0;
+            this.picker_apply(
+                move |hsb| {
+                    let mut rgb = hsb.rgb().quantized();
+                    match channel {
+                        0 => rgb.red = value,
+                        1 => rgb.green = value,
+                        _ => rgb.blue = value,
+                    }
+                    hsb.set_rgb(rgb);
+                },
+                window,
+                cx,
+            );
+        },
+    )
+}
+
+/// The hex entry's logic, following gpui-kit `ColorPickerState`'s hex
+/// handling: a parseable draft previews the color as it is typed
+/// (`InputEvent::Change` → `preview_hex`), Return commits it
+/// (`PressEnter` → `commit_hex`). The working color is the session's
+/// `color_picker.hsb` — committed only at OK — so preview and commit both
+/// write it, and a parse failure leaves the color alone. Swift's `commitHex`
+/// (:142-145) also snaps the draft back to the working color after a Return.
+/// Focusing selects the draft, so a new hex replaces the old instead of
+/// splicing into it.
+fn hex_subscription(
+    field: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut Context<ColorPickerPanelView>,
+) -> Subscription {
+    let field = field.clone();
+    cx.subscribe_in(
+        &field,
+        window,
+        move |this, input, event: &InputEvent, window, cx| {
+            let commit = match event {
+                InputEvent::Focus => {
+                    input.update(cx, |input, cx| input.select_all(window, cx));
+                    return;
+                }
+                InputEvent::Change => false,
+                InputEvent::PressEnter { .. } => true,
+                _ => return,
+            };
+            let text = input.read(cx).value().to_string();
+            match PaletteColor::from_hex(&text) {
+                Some(rgb) => this.picker_apply(move |hsb| hsb.set_rgb(rgb), window, cx),
+                None if commit => {
+                    // Revert the draft to the working color's hex.
+                    let hex = this
+                        .session
+                        .read(cx)
+                        .color_picker
+                        .as_ref()
+                        .map(|picker| picker.color().hex())
+                        .unwrap_or_default();
+                    input.update(cx, |input, cx| input.set_value(hex, window, cx));
+                }
+                None => {}
+            }
+        },
+    )
 }
 
 /// The saturation/brightness field (`ColorPickerSheet`'s
