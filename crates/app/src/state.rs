@@ -842,7 +842,7 @@ impl ProjectWorkspaceView {
     /// Builds the picker panel for whatever target the session just opened
     /// (`open_color_picker_ui`'s entity half).
     fn build_picker_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((title, hex)) = self
+        let Some((title, color)) = self
             .workspace
             .read(cx)
             .current()
@@ -850,14 +850,16 @@ impl ProjectWorkspaceView {
             .read(cx)
             .color_picker
             .as_ref()
-            .map(|picker| (picker.target.title(), picker.color().hex()))
+            .map(|picker| (picker.target.title(), picker.color()))
         else {
             return;
         };
         let session = self.workspace.read(cx).current().session.clone();
         let app = cx.entity().downgrade();
         let panel = cx.new(|cx| {
-            crate::ui::color_picker_sheet::ColorPickerPanelView::new(session, app, &hex, window, cx)
+            crate::ui::color_picker_sheet::ColorPickerPanelView::new(
+                session, app, color, window, cx,
+            )
         });
         // The text color's picker lives in the same floating panel as the
         // palette one (ColorPickerSheet.swift:170-182).

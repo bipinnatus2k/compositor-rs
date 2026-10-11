@@ -1,17 +1,15 @@
 //! The color picker panel (`UI/ColorPickerSheet.swift`) as its own view
 //! entity (ADR 0003 step D, ticket 41): the drawn saturation/brightness
 //! field, the vertical hue strip with its arrow markers, the new-color
-//! preview swatch, hex entry and OK/Cancel, laid out exactly like Swift's
-//! `HStack { saturationBrightnessField; hueStrip; … }`. The working color is
-//! the session's `color_picker.hsb`, so nothing lands until OK; field/strip
-//! drags feed the same state the former sliders did, including an effect
-//! color's live preview. The hex entry is the panel's own field — Swift's
-//! `@State hexDraft` (ColorPickerSheet.swift:10), the former
+//! preview swatch, the R/G/B and hex entries and OK/Cancel, laid out exactly
+//! like Swift's `HStack { saturationBrightnessField; hueStrip; … }`. The
+//! working color is the session's `color_picker.hsb`, so nothing lands until
+//! OK; field/strip drags feed the same state the former sliders did,
+//! including an effect color's live preview. The text entries are the
+//! panel's own fields — Swift's `@State hexDraft` and the number TextFields
+//! (ColorPickerSheet.swift:10, 104-140), the former
 //! `ProjectWorkspaceView.picker_ui`.
 //!
-//! Layout divergence: Swift also has R/G/B number entry fields. They are not
-//! in this cut — the port kept nowhere to host three more input entities,
-//! and that has not changed with the panel entity.
 //! The hue/saturation/brightness sliders that predated the drawn
 //! field are gone — the field and the hue strip feed the same state.
 
@@ -23,12 +21,13 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::{
     App, AppContext, Bounds, Context, Corners, Entity, Focusable, Global, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathBuilder, Pixels, Point, Render, RenderImage, RenderOnce, Styled, WeakEntity, Window,
-    canvas, point, px, rgba, size,
+    PathBuilder, Pixels, Point, Render, RenderImage, RenderOnce, Styled, WeakEntity,
+    Window, canvas, point, px, rgba, size,
 };
 use image::Frame;
 
 use compositor_core::document::{PaletteColor, PickerHSB};
+use compositor_core::geometry::CGFloat;
 use compositor_core::session::{ColorPickerTarget, EditorSession};
 
 use crate::state::ProjectWorkspaceView;
@@ -52,17 +51,23 @@ const HUE_ARROW_H: f32 = 10.0;
 const BACKING_SCALE: f32 = 2.0;
 
 /// The color picker panel as its own view entity (Swift
-/// `ColorPickerSheet`'s edit state; ticket 41). Its one widget is the hex
-/// entry — the field and the hue strip write the session's
-/// `color_picker.hsb` directly through the drags below. Created by the
-/// shell's `open_color_picker_ui` / `open_text_color_picker_ui`, dropped on
-/// close.
+/// `ColorPickerSheet`'s edit state; ticket 41). Its widgets are the text
+/// entries — the R/G/B channels and the hex field — the field and the hue
+/// strip write the session's `color_picker.hsb` directly through the drags
+/// below. Created by the shell's `open_color_picker_ui` /
+/// `open_text_color_picker_ui`, dropped on close.
 pub struct ColorPickerPanelView {
     session: Entity<EditorSession>,
     /// The root view (the window shell): the commit/close flow stays
     /// there (the OK/Cancel read the hex first, then close the session's
     /// picker).
     app: WeakEntity<ProjectWorkspaceView>,
+    /// The R/G/B channel entries (`fields`' channel rows): a draft of each
+    /// channel's 0-255 integer; a valid edit writes `hsb.set_rgb` with the
+    /// other two channels kept (Swift's binding `set`, :124-137).
+    red: Entity<InputState>,
+    green: Entity<InputState>,
+    blue: Entity<InputState>,
     /// The hex entry (`ColorPickerSheet.swift:10`'s `@State hexDraft`); a
     /// well-formed entry overrides the field at commit.
     hex: Entity<InputState>,
@@ -72,12 +77,25 @@ impl ColorPickerPanelView {
     pub(crate) fn new(
         session: Entity<EditorSession>,
         app: WeakEntity<ProjectWorkspaceView>,
-        hex: &str,
+        color: PaletteColor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let hex = cx.new(|cx| InputState::new(window, cx).default_value(hex));
-        ColorPickerPanelView { session, app, hex }
+        let text_field = |value: String, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).default_value(value))
+        };
+        let red = text_field(channel_text(color.red), window, cx);
+        let green = text_field(channel_text(color.green), window, cx);
+        let blue = text_field(channel_text(color.blue), window, cx);
+        let hex = text_field(color.hex(), window, cx);
+        ColorPickerPanelView {
+            session,
+            app,
+            red,
+            green,
+            blue,
+            hex,
+        }
     }
 
     /// The hex entry's text, for the shell's commit (the one panel read from
@@ -170,17 +188,32 @@ impl ColorPickerPanelView {
                 session.preview_effect_color();
             }
         });
-        let text = self
+        let color = self
             .session
             .read(cx)
             .color_picker
             .as_ref()
-            .map(|picker| picker.color().hex())
-            .unwrap_or_default();
-        let focused = self.hex.read(cx).focus_handle(cx).is_focused(window);
-        if !focused {
-            self.hex
-                .update(cx, |input, cx| input.set_value(text, window, cx));
+            .map(|picker| picker.color());
+        // The text entries ride the working color while not being edited —
+        // Swift's `onChange(of: color)` for the hex draft and the channel
+        // rows' value bindings. A focused entry is the user's draft, left
+        // alone (except on a hex commit, which normalizes it). `set_value`
+        // emits no `InputEvent::Change` (gpui-base sets `emit_events`
+        // false), so a write never re-enters the subscriptions.
+        for (field, text) in [
+            (&self.red, color.as_ref().map(|c| channel_text(c.red))),
+            (&self.green, color.as_ref().map(|c| channel_text(c.green))),
+            (&self.blue, color.as_ref().map(|c| channel_text(c.blue))),
+            (&self.hex, color.as_ref().map(|c| c.hex())),
+        ] {
+            let Some(text) = text else {
+                continue;
+            };
+            let focused = field.read(cx).focus_handle(cx).is_focused(window);
+            if focused || field.read(cx).value() == text.as_str() {
+                continue;
+            }
+            field.update(cx, |input, cx| input.set_value(text, window, cx));
         }
         self.touch(cx);
     }
@@ -201,6 +234,9 @@ impl Render for ColorPickerPanelView {
         };
         let color = picker.color();
         let hsb = picker.hsb;
+        let red = self.red.clone();
+        let green = self.green.clone();
+        let blue = self.blue.clone();
         let hex = self.hex.clone();
 
         // The gradient bitmaps: one per working hue for the field, one strip
@@ -210,6 +246,9 @@ impl Render for ColorPickerPanelView {
 
         ColorPickerSheet::new(
             color,
+            red,
+            green,
+            blue,
             hex,
             SvField::new(hsb, sv_image)
                 .with_on_press(panel_on_press(&this, |panel, event, window, cx| {
@@ -243,6 +282,9 @@ impl Render for ColorPickerPanelView {
 #[derive(IntoElement)]
 pub struct ColorPickerSheet {
     color: PaletteColor,
+    red: Entity<InputState>,
+    green: Entity<InputState>,
+    blue: Entity<InputState>,
     hex: Entity<InputState>,
     sv_field: SvField,
     hue_strip: HueStrip,
@@ -253,12 +295,18 @@ pub struct ColorPickerSheet {
 impl ColorPickerSheet {
     pub fn new(
         color: PaletteColor,
+        red: Entity<InputState>,
+        green: Entity<InputState>,
+        blue: Entity<InputState>,
         hex: Entity<InputState>,
         sv_field: SvField,
         hue_strip: HueStrip,
     ) -> Self {
         ColorPickerSheet {
             color,
+            red,
+            green,
+            blue,
             hex,
             sv_field,
             hue_strip,
@@ -338,19 +386,25 @@ impl RenderOnce for ColorPickerSheet {
                     ),
             )
             .child(gpui_kit::div().h(px(12.0)))
+            // The fields grid (`fields`, :104-119): the R/G/B channel rows
+            // and the hex entry — 14pt labels, 52pt (hex 84pt) entries,
+            // 8pt horizontal and 6pt vertical spacing.
             .child(
                 gpui_kit::div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        gpui_kit::div()
-                            .w(px(14.0))
-                            .flex_shrink_0()
-                            .child(text_label("#", true)),
-                    )
-                    .child(self.hex),
+                    .flex_col()
+                    .gap_1p5()
+                    .child(channel_row("R", self.red, 52.0))
+                    .child(channel_row("G", self.green, 52.0))
+                    .child(channel_row("B", self.blue, 52.0))
+                    .child(channel_row("#", self.hex, 84.0)),
+            )
+            // `Text("Click the canvas to sample")` (:37-38): a caption in
+            // the secondary color, 8pt above it.
+            .child(
+                text_label("Click the canvas to sample", true)
+                    .text_size(px(11.0))
+                    .pt_2(),
             );
 
         // Swift's `HStack(alignment: .top, spacing: 14)` with 20pt padding.
@@ -363,6 +417,29 @@ impl RenderOnce for ColorPickerSheet {
             .child(self.hue_strip)
             .child(side)
     }
+}
+
+/// One fields-grid row (`channelRow`/the hex `GridRow`): the 14pt leading
+/// label and the entry at the row's width.
+fn channel_row(label: &'static str, field: Entity<InputState>, width: f32) -> gpui_kit::Div {
+    gpui_kit::div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            gpui_kit::div()
+                .w(px(14.0))
+                .flex_shrink_0()
+                .child(text_label(label, false)),
+        )
+        .child(gpui_kit::div().w(px(width)).child(field))
+}
+
+/// A channel entry's text: the 0-255 integer Swift's binding get shows
+/// (`Int((channel * 255).rounded())`).
+fn channel_text(channel: CGFloat) -> String {
+    format!("{}", (channel * 255.0).round() as i64)
 }
 
 /// The saturation/brightness field (`ColorPickerSheet`'s
@@ -892,7 +969,7 @@ impl ProjectWorkspaceView {
                 .session
                 .update(cx, |session, _| session.open_color_picker(background))
         });
-        let hex = self
+        let color = self
             .workspace
             .read(cx)
             .current()
@@ -900,8 +977,8 @@ impl ProjectWorkspaceView {
             .read(cx)
             .color_picker
             .as_ref()
-            .map(|picker| picker.color().hex());
-        let Some(hex) = hex else {
+            .map(|picker| picker.color());
+        let Some(color) = color else {
             return;
         };
         let title = self
@@ -918,7 +995,7 @@ impl ProjectWorkspaceView {
         let app = cx.entity().downgrade();
         // A stale drag from a previous open must not survive.
         cx.default_global::<PickerFieldState>().drag = None;
-        let panel = cx.new(|cx| ColorPickerPanelView::new(session, app, &hex, window, cx));
+        let panel = cx.new(|cx| ColorPickerPanelView::new(session, app, color, window, cx));
         self.panel_views.insert(
             crate::ui::floating_panel::panel_names::COLOR_PICKER_PANEL,
             crate::ui::floating_panel::PanelContent::ColorPicker(panel),
@@ -975,10 +1052,12 @@ impl ProjectWorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        circle_points, hue_from_position, hue_marker_y, hue_strip_bitmap, strip_color_at,
-        sv_cache_key, sv_field_bitmap, sv_from_position, sv_marker_center,
+        ColorPickerPanelView, circle_points, hue_from_position, hue_marker_y, hue_strip_bitmap,
+        strip_color_at, sv_cache_key, sv_field_bitmap, sv_from_position, sv_marker_center,
     };
+    use crate::state::ProjectWorkspaceView;
     use compositor_core::document::PickerHSB;
+    use compositor_core::session::EditorSession;
     use gpui_kit::{Bounds, Pixels, point, px, size};
 
     fn field_bounds() -> Bounds<Pixels> {
@@ -1154,5 +1233,114 @@ mod tests {
             let dy = f32::from(vertex.y) - 50.0;
             assert!((dx * dx + dy * dy - 36.0).abs() < 1e-3);
         }
+    }
+
+    /// The live input path, exercised end to end with real text input
+    /// (gpui-kit `ColorPickerState`'s test shape): focusing a channel entry
+    /// and typing re-enters `picker_apply` and moves the working color.
+    #[gpui_kit::test]
+    fn typing_in_a_channel_field_updates_the_working_color(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, WeakEntity};
+        cx.update(gpui_kit::init);
+
+        let session = cx.new(|_| {
+            let mut session = EditorSession::new();
+            session.open_color_picker(false);
+            session
+        });
+        let color = session.read_with(cx, |session, _| {
+            session.color_picker.as_ref().expect("open").color()
+        });
+        let app = WeakEntity::<ProjectWorkspaceView>::new_invalid();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            ColorPickerPanelView::new(session.clone(), app, color, window, cx)
+        });
+
+        let red = panel.read_with(cx, |panel, _| panel.red.clone());
+        cx.update(|window, cx| {
+            red.update(cx, |input, cx| {
+                input.focus(window, cx);
+                // What the focus handler does in a real window (`InputEvent::
+                // Focus`): select the pre-filled draft so typing replaces it.
+                // A headless draw never delivers that event, so the test
+                // performs the selection itself.
+                input.select_all(window, cx);
+            });
+        });
+        // `input` sets `key_char`, the character path real keyboards take
+        // (a bare `simulate_keystrokes` dispatches no text).
+        cx.update(|window, cx| window.input("128", cx));
+
+        let draft = red.read_with(cx, |input, _| input.value().to_string());
+        session.read_with(cx, |session, _| {
+            let picker = session.color_picker.as_ref().expect("open");
+            assert!(
+                (picker.color().red - 128.0 / 255.0).abs() < 1e-6,
+                "red channel: {}, draft: {:?}",
+                picker.color().red,
+                draft
+            );
+        });
+    }
+
+    /// The hex entry follows gpui-kit `ColorPickerState`: a parseable draft
+    /// previews as it is typed, and Return commits — a malformed one leaves
+    /// the color alone and snaps the draft back.
+    #[gpui_kit::test]
+    fn typing_and_committing_hex_updates_the_working_color(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, WeakEntity};
+        cx.update(gpui_kit::init);
+
+        let session = cx.new(|_| {
+            let mut session = EditorSession::new();
+            session.open_color_picker(false);
+            session
+        });
+        let color = session.read_with(cx, |session, _| {
+            session.color_picker.as_ref().expect("open").color()
+        });
+        let app = WeakEntity::<ProjectWorkspaceView>::new_invalid();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            ColorPickerPanelView::new(session.clone(), app, color, window, cx)
+        });
+
+        let hex = panel.read_with(cx, |panel, _| panel.hex.clone());
+        cx.update(|window, cx| {
+            hex.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        });
+        cx.update(|window, cx| window.input("ff0000", cx));
+
+        session.read_with(cx, |session, _| {
+            let picker = session.color_picker.as_ref().expect("open");
+            assert!(
+                (picker.color().red - 1.0).abs() < 1e-6,
+                "live hex preview: {}",
+                picker.color().red
+            );
+        });
+
+        // A malformed draft reverts on Return without touching the color.
+        // (Select-all first: backspacing through `ff0000` would legitimately
+        // parse the `ff0` shorthand — Swift's `PaletteColor(hex:)` accepts
+        // `RGB` too — and change the working color mid-way.)
+        cx.update(|window, cx| {
+            hex.update(cx, |input, cx| input.select_all(window, cx));
+        });
+        cx.update(|window, cx| window.input("nope", cx));
+        cx.update(|window, cx| window.press("enter", cx));
+        session.read_with(cx, |session, _| {
+            let picker = session.color_picker.as_ref().expect("open");
+            assert!((picker.color().red - 1.0).abs() < 1e-6, "nope is not red");
+        });
+        let draft = hex.read_with(cx, |input, _| input.value().to_string());
+        assert_eq!(
+            draft, "FF0000",
+            "the draft snapped back to the working color"
+        );
     }
 }
