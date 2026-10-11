@@ -27,10 +27,13 @@ fn main() {
                     point(px(40.0), px(30.0)),
                     size(px(1560.0), px(920.0)),
                 ))),
+                // The component's base brings `appears_transparent` and the
+                // macOS traffic-light position its 80px left padding assumes;
+                // the title stays for the taskbar. The in-window bar is
+                // rendered by the root view (content_view.rs).
                 titlebar: Some(TitlebarOptions {
                     title: Some("Compositor".into()),
-                    appears_transparent: true,
-                    traffic_light_position: None,
+                    ..TitleBar::title_bar_options()
                 }),
                 window_min_size: Some(size(px(980.0), px(640.0))),
                 ..TitleBar::window_options()

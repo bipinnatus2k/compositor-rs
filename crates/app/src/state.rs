@@ -9,11 +9,13 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::GlobalState;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::SliderState;
 use gpui_kit::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, Pixels, Point, RenderImage,
+    App, AppContext, Bounds, Context, Entity, FocusHandle, Menu, Pixels, Point, RenderImage,
     Subscription, Window, px,
 };
 
@@ -303,6 +305,13 @@ pub struct ProjectWorkspaceView {
     /// away, dropping the flag with this entity). Renders that find work
     /// pending while a pump is already polling are no-ops.
     pub(crate) drain_pump_running: bool,
+    /// The gpui-kit `AppMenuBar` the title bar hosts (the in-window menu
+    /// bar): its menus are a snapshot of the active tab's session, rebuilt
+    /// when [`Self::menu_signature`] drifts.
+    pub(crate) app_menu_bar: Entity<AppMenuBar>,
+    /// The snapshot the menus were last registered from; `None` until the
+    /// first registration.
+    menu_signature: Option<crate::menu::MenuSignature>,
 }
 
 /// What continues after a mid-flow save panel completes.
@@ -432,6 +441,10 @@ impl ProjectWorkspaceView {
             pending_save: None,
             delete_ask_ids: None,
             drain_pump_running: false,
+            // The app menu bar starts empty; the first render head registers
+            // the menus from the session ([`Self::refresh_menus`]).
+            app_menu_bar: AppMenuBar::new(cx),
+            menu_signature: None,
         };
         // The root observes the workspace entity (ADR 0003 step F, ticket
         // 43): a workspace notification re-renders the window, mirroring
@@ -495,6 +508,29 @@ impl ProjectWorkspaceView {
     /// Monotonic seconds since the app started (`systemUptime`).
     pub fn uptime(&self) -> f64 {
         self.key_epoch.elapsed().as_secs_f64()
+    }
+
+    /// Re-registers the app menus when the active session's menu-affecting
+    /// state drifted since the last registration. The `AppMenuBar` reads its
+    /// menus from `GlobalState`, so a drift means rebuilding the snapshot in
+    /// `menu.rs` and reloading the bar — skipped while unchanged, so
+    /// unrelated re-renders never reset an open menu. Runs in the render
+    /// head, where `sync_content` keeps the snapshot on the active tab.
+    pub(crate) fn refresh_menus(&mut self, cx: &mut Context<Self>) {
+        let signature = {
+            let session = self.current_tab(cx).session.read(cx);
+            crate::menu::MenuSignature::of(session)
+        };
+        if Some(&signature) == self.menu_signature.as_ref() {
+            return;
+        }
+        self.menu_signature = Some(signature);
+        let menus = {
+            let session = self.current_tab(cx).session.read(cx);
+            crate::menu::build_menus(session)
+        };
+        GlobalState::global_mut(cx).set_app_menus(menus.into_iter().map(Menu::owned).collect());
+        self.app_menu_bar.update(cx, |bar, cx| bar.reload(cx));
     }
 
     /// Number keys set the active tool's opacity (Photoshop-style).

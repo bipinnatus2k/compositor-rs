@@ -7,6 +7,7 @@
 //! assembly; the per-tab `ContentView` is rebuilt on tab switches by the
 //! root's `sync_content` (the `.id(workspace.current.id)` mirror).
 
+use gpui_kit::component::TitleBar;
 use gpui_kit::{
     App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px, rgb,
@@ -46,6 +47,9 @@ impl Render for ProjectWorkspaceView {
         // content when the workspace's selected tab changed (runs here,
         // where the window is available for the constructors' inputs).
         self.sync_content(window, cx);
+        // The app menus ride the same render head: re-registered only when
+        // the active session's menu-affecting state drifted.
+        self.refresh_menus(cx);
         div()
             .id("workspace")
             .key_context("Compositor")
@@ -207,10 +211,21 @@ impl Render for ProjectWorkspaceView {
             .on_action(cx.listener(Self::on_toggle_levels_preview))
             .on_action(cx.listener(Self::on_finish_lasso))
             .on_action(cx.listener(Self::on_cancel))
-            // Layout
-            .child(crate::menu::MenuBar::new(
-                self.current_tab(cx).session.clone(),
-            ))
+            // Layout. The title bar is the gpui-kit `TitleBar`: it owns the
+            // window drag region and the Windows min/max/close controls that
+            // the transparent system title bar has no surface for (the
+            // macOS original uses the native chrome; the in-window bar is
+            // the port's recorded deviation). The gpui-kit `AppMenuBar`
+            // rides in it — the component's title-bar-with-menu-bar
+            // arrangement; the bar's chrome (panel surface + hairline) is
+            // the title bar's, and the menus themselves are re-registered
+            // from the active session in `refresh_menus`.
+            .child(
+                TitleBar::new()
+                    .bg(crate::ui::panel_bg())
+                    .border_color(gpui_kit::black().opacity(0.4))
+                    .child(self.app_menu_bar.clone()),
+            )
             .child(self.render_tab_bar(cx))
             // The active tab's content (Swift `ContentView`, ticket 43): a
             // fresh per-tab entity hosting the tool rail, the options

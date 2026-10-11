@@ -1,294 +1,280 @@
-//! The in-window menu bar. Each top-level menu is a button whose dropdown
-//! dispatches the app's actions (keyboard hints come from the key bindings).
-//! Labels that depend on session state follow the Swift menu's dynamic
-//! titles (CompositorApp.swift:47-318).
+//! The application menus (`CompositorApp.swift`'s `.commands`, drawn
+//! in-window because the port shows no native menu bar): `build_menus`
+//! snapshots the active session into gpui `Menu`/`MenuItem`s for the
+//! gpui-kit `AppMenuBar` the root hosts inside the title bar. Labels that
+//! depend on session state follow the Swift menu's dynamic titles
+//! (CompositorApp.swift:47-318); the root re-registers the snapshot when
+//! [`MenuSignature`] says it drifted.
 
-use std::rc::Rc;
-
-use gpui_kit::component::Sizable;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
-use gpui_kit::{App, Context, Entity, IntoElement, ParentElement, RenderOnce, Styled, Window, px};
+use gpui_kit::{Menu, MenuItem, SharedString};
 
 use compositor_core::session::EditorSession;
 
 use crate::keys;
 
-/// The in-window menu bar (`CompositorApp.swift`'s `.commands`, drawn
-/// in-window because GPUI has no native menu bar): each top-level menu is a
-/// button whose dropdown dispatches the app's actions (keyboard hints come
-/// from the key bindings). Labels that depend on session state follow the
-/// Swift menu's dynamic titles (CompositorApp.swift:47-318).
-#[derive(IntoElement)]
-pub struct MenuBar {
-    /// The active tab's session: the checkmark flags and dynamic titles read
-    /// from it at render time; every menu item dispatches a gpui action.
-    session: Entity<EditorSession>,
+/// The app menu snapshot: File / Edit / Image / Layer / Select / Filter /
+/// View / Window / Help, with the session-dependent labels and View
+/// checkmarks resolved at build time. Dispatch stays action-based — every
+/// item carries a `keys` action, so the popup needs no app handle.
+pub(crate) fn build_menus(session: &EditorSession) -> Vec<Menu> {
+    // Dynamic titles (CompositorApp.swift).
+    let invert_label = if session.is_mask_selected {
+        "Invert Mask"
+    } else {
+        "Invert"
+    };
+    let transform_label = if session.can_transform_selection() {
+        "Transform Selection"
+    } else {
+        "Transform Layer"
+    };
+    let duplicate_label = if session.selection().is_some() {
+        "Layer via Copy"
+    } else {
+        "Duplicate Layer"
+    };
+    let clipping_label = match session.active_layer() {
+        Some(layer) if layer.mask_source_id.is_some() => "Release Clipping Mask",
+        _ => "Create Clipping Mask",
+    };
+    let visibility_label = match session.active_layer() {
+        Some(layer) if !layer.is_visible => "Show Layer",
+        _ => "Hide Layer",
+    };
+    let delete_label = if session.is_mask_selected
+        && session
+            .active_layer()
+            .map(|layer| layer.mask.is_some())
+            .unwrap_or(false)
+        && session.selected_layer_ids.len() <= 1
+    {
+        "Delete Layer Mask"
+    } else if session.selected_layer_ids.len() > 1 {
+        "Delete Layers"
+    } else {
+        "Delete Layer"
+    };
+    let merge_label = session.merge_title();
+
+    vec![
+        Menu::new("File").items([
+            item("New…", keys::NewCanvas),
+            item("Open…", keys::OpenDocument),
+            sep(),
+            item("Save", keys::SaveDocument),
+            item("Export PNG…", keys::ExportPng),
+            item("Export JPEG…", keys::ExportJpeg),
+            sep(),
+            item("Import Images…", keys::ImportImages),
+            sep(),
+            item("Close", keys::CloseDocument),
+            sep(),
+            item("Quit", keys::Quit),
+        ]),
+        Menu::new("Edit").items([
+            item("Undo", keys::Undo),
+            item("Redo", keys::Redo),
+            sep(),
+            item("Cut", keys::Cut),
+            item("Copy", keys::CopyPixels),
+            item("Copy Merged", keys::CopyMerged),
+            item("Paste", keys::PastePixels),
+            sep(),
+            item("Fill Foreground", keys::FillForeground),
+            item("Fill Background", keys::FillBackground),
+            item("Clear Selection Pixels", keys::ClearSelectionPixels),
+            item("Content-Aware Fill", keys::ContentAwareFill),
+            sep(),
+            item("Free Transform", keys::FreeTransform),
+            sep(),
+            item("Keyboard Shortcuts…", keys::ShowShortcuts),
+        ]),
+        Menu::new("Image").items([
+            item("Curves…", keys::CurvesSheet),
+            item("Levels…", keys::LevelsSheet),
+            item("Hue/Saturation…", keys::HueSaturationSheet),
+            item("Black & White…", keys::FilterBlackWhite),
+            item("Color Balance…", keys::FilterColorBalance),
+            item("Exposure…", keys::FilterExposure),
+            item("Gradient Map…", keys::FilterGradientMap),
+            item("Grain…", keys::FilterGrain),
+            item(invert_label, keys::InvertPixels),
+            sep(),
+            item("Image Size…", keys::ImageSize),
+            item("Canvas Size…", keys::CanvasSize),
+            sep(),
+            item("Trim…", keys::TrimSheet),
+            item("Crop to Selection", keys::CropToSelection),
+            sep(),
+            item("Flip Canvas Horizontal", keys::FlipCanvasHorizontal),
+            item("Flip Canvas Vertical", keys::FlipCanvasVertical),
+        ]),
+        Menu::new("Layer").items([
+            MenuItem::submenu(Menu::new("New Adjustment Layer").items([
+                item("Hue/Saturation", keys::AddAdjustmentHsv),
+                item("Levels", keys::AddAdjustmentLevels),
+                item("Curves", keys::AddAdjustmentCurves),
+                item("Exposure", keys::AddAdjustmentExposure),
+                item("Gradient Map", keys::AddAdjustmentGradientMap),
+                item("Grain", keys::AddAdjustmentGrain),
+                item("Add Noise", keys::AddAdjustmentAddNoise),
+                item("Gaussian Blur", keys::AddAdjustmentGaussianBlur),
+                item("Motion Blur", keys::AddAdjustmentMotionBlur),
+                item("Invert", keys::AddAdjustmentInvert),
+                item("Black & White", keys::AddAdjustmentBlackWhite),
+                item("Color Balance", keys::AddAdjustmentColorBalance),
+            ])),
+            item("Edit Adjustment…", keys::EditAdjustment),
+            sep(),
+            item(transform_label, keys::FreeTransform),
+            item(duplicate_label, keys::DuplicateLayer),
+            sep(),
+            item(clipping_label, keys::ToggleClippingMask),
+            sep(),
+            item("Group Selected Layers", keys::GroupSelectedLayers),
+            item("Move Out of Folder", keys::MoveOutOfFolder),
+            item("New Blank Layer", keys::NewLayer),
+            item("Rename Layer…", keys::RenameLayer),
+            item(visibility_label, keys::ToggleLayerVisibility),
+            sep(),
+            item("Move Layer Up", keys::MoveLayerUp),
+            item("Move Layer Down", keys::MoveLayerDown),
+            sep(),
+            item(merge_label, keys::MergeDown),
+            item("Add Mask", keys::AddMask),
+            sep(),
+            item("Flip Horizontal", keys::FlipLayerHorizontal),
+            item("Flip Vertical", keys::FlipLayerVertical),
+            sep(),
+            item(delete_label, keys::DeleteLayer),
+        ]),
+        Menu::new("Select").items([
+            item("All", keys::SelectAllAction),
+            item("Deselect", keys::DeselectAction),
+            item("Inverse", keys::InvertSelection),
+            sep(),
+            item("Layer's Pixels", keys::LoadLayerSelection),
+            item("Mask's Black Areas", keys::LoadMaskSelection),
+            sep(),
+            item("Feather…", keys::FeatherSheet),
+            item("Expand…", keys::ExpandSheet),
+            item("Contract…", keys::ContractSheet),
+        ]),
+        Menu::new("Filter").items([
+            item("Gaussian Blur…", keys::FilterGaussianBlur),
+            item("Motion Blur…", keys::FilterMotionBlur),
+            item("Add Noise…", keys::FilterAddNoise),
+            sep(),
+            item("Lens Correction…", keys::FilterLensCorrection),
+            item("Camera Raw Filter…", keys::FilterCameraRaw),
+        ]),
+        Menu::new("View").items([
+            item("Fit Canvas", keys::ZoomFit),
+            item("Actual Pixels", keys::Zoom100),
+            item("Zoom In", keys::ZoomIn),
+            item("Zoom Out", keys::ZoomOut),
+            sep(),
+            check(
+                "Show Transform Controls",
+                keys::ShowTransformControls,
+                session.shows_transform_controls,
+            ),
+            check("Rulers", keys::ToggleRulers, session.shows_rulers),
+            check("Grid", keys::ToggleGrid, session.shows_grid),
+            check("Guides", keys::ToggleGuides, session.shows_guides),
+            check(
+                "Pixel Grid",
+                keys::TogglePixelGrid,
+                session.shows_pixel_grid,
+            ),
+            sep(),
+            check("Snap", keys::SnapToggle, session.snapping_enabled),
+            check("Snap to Guides", keys::SnapGuides, session.snap_to_guides),
+            check("Snap to Grid", keys::SnapGrid, session.snap_to_grid),
+            check("Snap to Layers", keys::SnapLayers, session.snap_to_layers),
+            check(
+                "Snap to Document Bounds",
+                keys::SnapBounds,
+                session.snap_to_document_bounds,
+            ),
+            sep(),
+            check("Lock Guides", keys::LockGuides, session.locks_guides),
+            item("Clear Guides", keys::ClearGuides),
+        ]),
+        Menu::new("Window").items([item("Reset Panel Layout", keys::ResetPanels)]),
+        Menu::new("Help").items([item("About Compositor", keys::About)]),
+    ]
 }
 
-impl MenuBar {
-    pub fn new(session: Entity<EditorSession>) -> Self {
-        MenuBar { session }
-    }
+/// Every menu-affecting bit of the session, in one comparable value: the
+/// root rebuilds the app menus only when this drifted since the last
+/// registration, so unrelated re-renders don't drop an open popup state.
+#[derive(Clone, PartialEq)]
+pub(crate) struct MenuSignature {
+    rulers: bool,
+    grid: bool,
+    guides: bool,
+    pixel_grid: bool,
+    snapping: bool,
+    snap_guides: bool,
+    snap_grid: bool,
+    snap_layers: bool,
+    snap_bounds: bool,
+    lock_guides: bool,
+    transform_controls: bool,
+    mask_selected: bool,
+    has_selection: bool,
+    transformable: bool,
+    layer_visible: bool,
+    layer_has_mask: bool,
+    clipping_mask: bool,
+    selected_count: usize,
+    merge_title: &'static str,
 }
 
-impl RenderOnce for MenuBar {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let session = self.session.read(cx);
-        let rulers = session.shows_rulers;
-        let grid = session.shows_grid;
-        let guides = session.shows_guides;
-        let pixel_grid = session.shows_pixel_grid;
-        let snap_guides = session.snap_to_guides;
-        let snap_grid = session.snap_to_grid;
-        let snap_layers = session.snap_to_layers;
-        let snap_bounds = session.snap_to_document_bounds;
-        let snapping = session.snapping_enabled;
-        let lock_guides = session.locks_guides;
-        let transform_controls = session.shows_transform_controls;
-        // Dynamic titles (CompositorApp.swift).
-        let invert_label = if session.is_mask_selected {
-            "Invert Mask"
-        } else {
-            "Invert"
-        };
-        let transform_label = if session.can_transform_selection() {
-            "Transform Selection"
-        } else {
-            "Transform Layer"
-        };
-        let duplicate_label = if session.selection().is_some() {
-            "Layer via Copy"
-        } else {
-            "Duplicate Layer"
-        };
-        let clipping_label = match session.active_layer() {
-            Some(layer) if layer.mask_source_id.is_some() => "Release Clipping Mask",
-            _ => "Create Clipping Mask",
-        };
-        let visibility_label = match session.active_layer() {
-            Some(layer) if !layer.is_visible => "Show Layer",
-            _ => "Hide Layer",
-        };
-        let delete_label = if session.is_mask_selected
-            && session
+impl MenuSignature {
+    pub(crate) fn of(session: &EditorSession) -> Self {
+        MenuSignature {
+            rulers: session.shows_rulers,
+            grid: session.shows_grid,
+            guides: session.shows_guides,
+            pixel_grid: session.shows_pixel_grid,
+            snapping: session.snapping_enabled,
+            snap_guides: session.snap_to_guides,
+            snap_grid: session.snap_to_grid,
+            snap_layers: session.snap_to_layers,
+            snap_bounds: session.snap_to_document_bounds,
+            lock_guides: session.locks_guides,
+            transform_controls: session.shows_transform_controls,
+            mask_selected: session.is_mask_selected,
+            has_selection: session.selection().is_some(),
+            transformable: session.can_transform_selection(),
+            layer_visible: session
+                .active_layer()
+                .map(|layer| layer.is_visible)
+                .unwrap_or_default(),
+            layer_has_mask: session
                 .active_layer()
                 .map(|layer| layer.mask.is_some())
-                .unwrap_or(false)
-            && session.selected_layer_ids.len() <= 1
-        {
-            "Delete Layer Mask"
-        } else if session.selected_layer_ids.len() > 1 {
-            "Delete Layers"
-        } else {
-            "Delete Layer"
-        };
-        let merge_label = session.merge_title();
-        let bar = gpui_kit::div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(28.0))
-            .px_1()
-            .gap_0p5()
-            .flex_shrink_0()
-            .bg(crate::ui::panel_bg())
-            .border_b_1()
-            .border_color(gpui_kit::black().opacity(0.4))
-            .child(MenuButton::new("menu-file", "File", |menu, _, _| {
-                menu.menu("New…", Box::new(keys::NewCanvas))
-                    .menu("Open…", Box::new(keys::OpenDocument))
-                    .separator()
-                    .menu("Save", Box::new(keys::SaveDocument))
-                    .menu("Export PNG…", Box::new(keys::ExportPng))
-                    .menu("Export JPEG…", Box::new(keys::ExportJpeg))
-                    .separator()
-                    .menu("Import Images…", Box::new(keys::ImportImages))
-                    .separator()
-                    .menu("Close", Box::new(keys::CloseDocument))
-                    .separator()
-                    .menu("Quit", Box::new(keys::Quit))
-            }))
-            .child(MenuButton::new("menu-edit", "Edit", |menu, _, _| {
-                menu.menu("Undo", Box::new(keys::Undo))
-                    .menu("Redo", Box::new(keys::Redo))
-                    .separator()
-                    .menu("Cut", Box::new(keys::Cut))
-                    .menu("Copy", Box::new(keys::CopyPixels))
-                    .menu("Copy Merged", Box::new(keys::CopyMerged))
-                    .menu("Paste", Box::new(keys::PastePixels))
-                    .separator()
-                    .menu("Fill Foreground", Box::new(keys::FillForeground))
-                    .menu("Fill Background", Box::new(keys::FillBackground))
-                    .menu(
-                        "Clear Selection Pixels",
-                        Box::new(keys::ClearSelectionPixels),
-                    )
-                    .menu("Content-Aware Fill", Box::new(keys::ContentAwareFill))
-                    .separator()
-                    .menu("Free Transform", Box::new(keys::FreeTransform))
-                    .separator()
-                    .menu("Keyboard Shortcuts…", Box::new(keys::ShowShortcuts))
-            }))
-            .child(MenuButton::new("menu-image", "Image", move |menu, _, _| {
-                menu.menu("Curves…", Box::new(keys::CurvesSheet))
-                    .menu("Levels…", Box::new(keys::LevelsSheet))
-                    .menu("Hue/Saturation…", Box::new(keys::HueSaturationSheet))
-                    .menu("Black & White…", Box::new(keys::FilterBlackWhite))
-                    .menu("Color Balance…", Box::new(keys::FilterColorBalance))
-                    .menu("Exposure…", Box::new(keys::FilterExposure))
-                    .menu("Gradient Map…", Box::new(keys::FilterGradientMap))
-                    .menu("Grain…", Box::new(keys::FilterGrain))
-                    .menu(invert_label, Box::new(keys::InvertPixels))
-                    .separator()
-                    .menu("Image Size…", Box::new(keys::ImageSize))
-                    .menu("Canvas Size…", Box::new(keys::CanvasSize))
-                    .separator()
-                    .menu("Trim…", Box::new(keys::TrimSheet))
-                    .menu("Crop to Selection", Box::new(keys::CropToSelection))
-                    .separator()
-                    .menu(
-                        "Flip Canvas Horizontal",
-                        Box::new(keys::FlipCanvasHorizontal),
-                    )
-                    .menu("Flip Canvas Vertical", Box::new(keys::FlipCanvasVertical))
-            }))
-            .child(MenuButton::new(
-                "menu-layer",
-                "Layer",
-                move |menu, window, cx| {
-                    menu.submenu("New Adjustment Layer", window, cx, |menu, _, _| {
-                        menu.menu("Hue/Saturation", Box::new(keys::AddAdjustmentHsv))
-                            .menu("Levels", Box::new(keys::AddAdjustmentLevels))
-                            .menu("Curves", Box::new(keys::AddAdjustmentCurves))
-                            .menu("Exposure", Box::new(keys::AddAdjustmentExposure))
-                            .menu("Gradient Map", Box::new(keys::AddAdjustmentGradientMap))
-                            .menu("Grain", Box::new(keys::AddAdjustmentGrain))
-                            .menu("Add Noise", Box::new(keys::AddAdjustmentAddNoise))
-                            .menu("Gaussian Blur", Box::new(keys::AddAdjustmentGaussianBlur))
-                            .menu("Motion Blur", Box::new(keys::AddAdjustmentMotionBlur))
-                            .menu("Invert", Box::new(keys::AddAdjustmentInvert))
-                            .menu("Black & White", Box::new(keys::AddAdjustmentBlackWhite))
-                            .menu("Color Balance", Box::new(keys::AddAdjustmentColorBalance))
-                    })
-                    .menu("Edit Adjustment…", Box::new(keys::EditAdjustment))
-                    .separator()
-                    .menu(transform_label, Box::new(keys::FreeTransform))
-                    .menu(duplicate_label, Box::new(keys::DuplicateLayer))
-                    .separator()
-                    .menu(clipping_label, Box::new(keys::ToggleClippingMask))
-                    .separator()
-                    .menu("Group Selected Layers", Box::new(keys::GroupSelectedLayers))
-                    .menu("Move Out of Folder", Box::new(keys::MoveOutOfFolder))
-                    .menu("New Blank Layer", Box::new(keys::NewLayer))
-                    .menu("Rename Layer…", Box::new(keys::RenameLayer))
-                    .menu(visibility_label, Box::new(keys::ToggleLayerVisibility))
-                    .separator()
-                    .menu("Move Layer Up", Box::new(keys::MoveLayerUp))
-                    .menu("Move Layer Down", Box::new(keys::MoveLayerDown))
-                    .separator()
-                    .menu(merge_label, Box::new(keys::MergeDown))
-                    .menu("Add Mask", Box::new(keys::AddMask))
-                    .separator()
-                    .menu("Flip Horizontal", Box::new(keys::FlipLayerHorizontal))
-                    .menu("Flip Vertical", Box::new(keys::FlipLayerVertical))
-                    .separator()
-                    .menu(delete_label, Box::new(keys::DeleteLayer))
-                },
-            ))
-            .child(MenuButton::new("menu-select", "Select", |menu, _, _| {
-                menu.menu("All", Box::new(keys::SelectAllAction))
-                    .menu("Deselect", Box::new(keys::DeselectAction))
-                    .menu("Inverse", Box::new(keys::InvertSelection))
-                    .separator()
-                    .menu("Layer's Pixels", Box::new(keys::LoadLayerSelection))
-                    .menu("Mask's Black Areas", Box::new(keys::LoadMaskSelection))
-                    .separator()
-                    .menu("Feather…", Box::new(keys::FeatherSheet))
-                    .menu("Expand…", Box::new(keys::ExpandSheet))
-                    .menu("Contract…", Box::new(keys::ContractSheet))
-            }))
-            .child(MenuButton::new("menu-filter", "Filter", |menu, _, _| {
-                menu.menu("Gaussian Blur…", Box::new(keys::FilterGaussianBlur))
-                    .menu("Motion Blur…", Box::new(keys::FilterMotionBlur))
-                    .menu("Add Noise…", Box::new(keys::FilterAddNoise))
-                    .separator()
-                    .menu("Lens Correction…", Box::new(keys::FilterLensCorrection))
-                    .menu("Camera Raw Filter…", Box::new(keys::FilterCameraRaw))
-            }))
-            .child(MenuButton::new("menu-view", "View", move |menu, _, _| {
-                menu.menu("Fit Canvas", Box::new(keys::ZoomFit))
-                    .menu("Actual Pixels", Box::new(keys::Zoom100))
-                    .menu("Zoom In", Box::new(keys::ZoomIn))
-                    .menu("Zoom Out", Box::new(keys::ZoomOut))
-                    .separator()
-                    .menu_with_check(
-                        "Show Transform Controls",
-                        transform_controls,
-                        Box::new(keys::ShowTransformControls),
-                    )
-                    .menu_with_check("Rulers", rulers, Box::new(keys::ToggleRulers))
-                    .menu_with_check("Grid", grid, Box::new(keys::ToggleGrid))
-                    .menu_with_check("Guides", guides, Box::new(keys::ToggleGuides))
-                    .menu_with_check("Pixel Grid", pixel_grid, Box::new(keys::TogglePixelGrid))
-                    .separator()
-                    .menu_with_check("Snap", snapping, Box::new(keys::SnapToggle))
-                    .menu_with_check("Snap to Guides", snap_guides, Box::new(keys::SnapGuides))
-                    .menu_with_check("Snap to Grid", snap_grid, Box::new(keys::SnapGrid))
-                    .menu_with_check("Snap to Layers", snap_layers, Box::new(keys::SnapLayers))
-                    .menu_with_check(
-                        "Snap to Document Bounds",
-                        snap_bounds,
-                        Box::new(keys::SnapBounds),
-                    )
-                    .separator()
-                    .menu_with_check("Lock Guides", lock_guides, Box::new(keys::LockGuides))
-                    .menu("Clear Guides", Box::new(keys::ClearGuides))
-            }))
-            .child(MenuButton::new("menu-window", "Window", |menu, _, _| {
-                menu.menu("Reset Panel Layout", Box::new(keys::ResetPanels))
-            }))
-            .child(MenuButton::new("menu-help", "Help", |menu, _, _| {
-                menu.menu("About Compositor", Box::new(keys::About))
-            }));
-
-        bar.into_any_element()
-    }
-}
-
-/// One top-level menu's button: a ghost button whose dropdown is built by
-/// `build` (the menu items dispatch gpui actions, so the builder needs no
-/// app handle).
-#[derive(IntoElement)]
-pub struct MenuButton {
-    id: &'static str,
-    label: &'static str,
-    build: MenuBuild,
-}
-
-/// The dropdown's builder, run each time the menu opens.
-pub type MenuBuild = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
-
-impl MenuButton {
-    pub fn new(
-        id: &'static str,
-        label: &'static str,
-        build: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
-    ) -> Self {
-        MenuButton {
-            id,
-            label,
-            build: Rc::new(build),
+                .unwrap_or_default(),
+            clipping_mask: session
+                .active_layer()
+                .map(|layer| layer.mask_source_id.is_some())
+                .unwrap_or_default(),
+            selected_count: session.selected_layer_ids.len(),
+            merge_title: session.merge_title(),
         }
     }
 }
 
-impl RenderOnce for MenuButton {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        Button::new(self.id)
-            .label(self.label)
-            .ghost()
-            .small()
-            .dropdown_menu(move |menu, window, cx| (self.build)(menu, window, cx))
-    }
+fn item(label: impl Into<SharedString>, action: impl gpui_kit::Action) -> MenuItem {
+    MenuItem::action(label, action)
+}
+
+fn check(label: impl Into<SharedString>, action: impl gpui_kit::Action, checked: bool) -> MenuItem {
+    MenuItem::action(label, action).checked(checked)
+}
+
+fn sep() -> MenuItem {
+    MenuItem::separator()
 }
