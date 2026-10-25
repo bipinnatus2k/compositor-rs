@@ -175,6 +175,7 @@ parked 的 37 号票（history/对话框拆实体）卡在一个死结：单 Ren
   双真相税）。失效仪表已就位（票 37），量测路径现成。
 - 帧缓存 `(tab_id, revision)` 的进一步作用域化：合成是失效的必要成本，
   仅在 profile 证明可细分（如按 dirty rect）时再动。
+  （→ 2026-10-25 已由 ADR 0004 立项落地路线：票 49–54。）
 - 三面板 `session` 死字段（levels/hue_saturation/filter 的 house 惯例
   保持项）：下次触及对应面板票时顺手清理。
 - sync_content 亚帧窗若在真实使用中显形（尚未观察到）：评估

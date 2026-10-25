@@ -90,6 +90,29 @@ premultiplied RGBA8 位图；灰度蒙版单独称 gray mask。对应原版 CGCo
 **Dab**:
 笔刷笔画离散出的最小着色单位，由向心 Catmull-Rom 插值与间距控制生成。
 
+**Settled segment / tail**:
+描边曲线中已最终确定、进入 permanent 覆盖率的段，与仍会被下一点改写的
+临时直尾段（只进 preview，绝不入 permanent）。对应原版 settled / tail
+（`drawTail` / `removeTail`）。
+
+**Tile（瓦片）**:
+描边像素工作的最小分配单元（256px 方格）：只有被笔触触及的瓦片才分配
+可写像素，一次 mouse-move 永不触碰整层。对应原版 `BrushStroke.tileSize`
+与 `TiledLayerRenderer.strokeCell`。
+
+**Coverage（覆盖率）**:
+描边沉积在每个像素上的灰度 paint 量：settled 部分累积进 permanent，
+临时尾段只出现在 preview；每块重合成公式为 原图 + 颜色 × 覆盖率 ×
+不透明度。对应原版 `MetalBrushCoverage` 的 permanent / preview。
+
+**Patch（补丁）**:
+描边期间悬浮于已提交内容之上、只覆盖脏区的临时显示单元；mouse-up 提交
+时并入图层像素。对应原版 `BrushPatch` / `TiledLayerRenderer.drawStroke`。
+
+**Dirty rect（脏矩形）**:
+一次描边更新中实际被触及的区域；显示与合成只重作此区域。对应原版
+`dirtyDocumentRect` / `dirtyTiles`。
+
 **DownsampleCache**:
 图层降采样缓存（缩放视图时的性能层）。对应原版 `DownsampleCache`。
 

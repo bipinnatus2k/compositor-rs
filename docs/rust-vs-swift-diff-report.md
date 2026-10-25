@@ -21,12 +21,38 @@
   （1 亿像素预算、LRU 淘汰），避免每次绘制重算降采样链；Rust 已移植
   档位算法（`downsample_level`，diff report §6.1-12/表 11-12）但无任何
   缓存，每次绘制全量重算 halving。语义无损、纯性能缺口；待失效卫生
-  （票 37 同款）量测后立票实现。
+  （票 37 同款）量测后立票实现。（2026-10-25：已立项——量测=票 49 先行、
+  实现=票 54，见下方「性能规划」节与 ADR 0004。）
 - **蚂蚁线 dash 无相位动画**：Swift 选区蚂蚁线的黑虚线带相位动画
   （EditorCanvas.swift:2001-2015 一带，0.12s 周期）；Rust
   `editor_canvas.rs` 画静态 4/4 dash（颜色已于 2026-09-28 批次对齐——
   白实线底 + 黑虚线上层，§8 表 14 的"颜色相反"半边已闭合）。原注释
   自称 "animated" 与实现不符，已改为如实描述；动画缺口留票待做。
+
+## 性能规划（2026-10-25：描边实时执行瓦片模型——ADR 0004，票 49–54）
+
+2026-10-25 性能排查（三路子代理 + 人工核验）确认：描边每 mouse-move 在
+UI 线程同步执行全图级流水线——覆盖率全段重积分（整条描边平方级）、每
+move 全文档重合成（每层整图深拷贝、effects 缓存每帧清空）、整图 BGRA
+纹理重建上传（12MP ≈48MB/帧）且旧纹理不 `drop_image` 图集 tile 只增不
+减、每 move 全图缩略图重采样。原版对应结构（256px 瓦片 + dirtyTiles、
+`MetalBrushCoverage` permanent 增量、`drawStroke` 补丁悬浮、
+`DownsampleCache`、缩略图 mouse-up 更新）均未移植。ADR 0004 裁定六票对齐
+（`.scratch/parity-review-tickets` 49–54，来源四）；本节为规划留痕，各票
+落地后逐项回填。
+
+- **GPU→CPU 执行模型**：连续引擎数学逐项镜像 MetalBrushCoverage
+  （Gauss-Legendre 常量同字面值，§2 表末行已记），瓦片化只重构存储/调度
+  （permanent 持久 + 只积分新 settled 段 + tailBackup + dirtyTiles），数学
+  零改动、`assert_bit_identical` 逐位复现（票 53）。GPU 并行本身不移植
+  （core 不依赖 gpui、无 GPU 计算设施），属既定平台偏差。
+- **补丁打包粒度**：描边脏区将打为单张 bbox 补丁纹理一次叠画，非原版逐
+  瓦片 patch（票 52）——内容同源，仅打包粒度不同。
+- **DownsampleCache 立项**：上方「记录补全」节的缺口条目原注"待失效卫生
+  量测后立票实现"——量测=票 49 先行、实现=票 54 殿后，前置条件以此满足；
+  键采用 `Arc<Bitmap>` 指针身份（对应 `ObjectIdentifier`）。
+- **缩略图时机对齐**：描边期间图层缩略图冻结、mouse-up 提交时更新（票
+  50）——对齐 `commitPaintSnapshot` 语义，非偏差。
 
 ## 架构裁定（2026-10-10：废除 AppState 票 37——失效卫生：缩略图内容键控 + bypass 统一 + 失效仪表，ADR 0003 步 G）
 
@@ -861,7 +887,7 @@ reverses siblings」）的等价性声明自此成立。
 | `Compositor/Compositor/Document/ToolDefaults.swift` | ~30 | UserDefaults 持久化工具开关 | `session.rs:252-260` 只硬编码 fallback 值 |
 | `Compositor/Compositor/Document/LevelsAutomatic.swift` | ~90 | 自动色阶三模式 + 吸管校准 | core 无；app 层 `crates/app/src/sheets.rs:382-422` 的 `levels_auto` 是**算法不同的重写**（见 §7.1） |
 | `Compositor/Compositor/Document/Distort.swift` | ~392 | DistortWarp/homography/warp 全套 + session distort 流程 | ✅ 已移植（`tools/distort.rs` + session distort 流程，见顶部修复进度；效果预览扭曲缓存属渲染端未移植） |
-| `Compositor/Compositor/Rendering/TiledLayerRenderer.swift` + `RasterSnapshot.swift` + `DownsampleCache.swift` + `LiveMaskRenderer.swift` + `AdjustmentSurface.swift` + `LayerEffectsSurface.swift` + `EffectsPreviewCache.swift` | ~1100 | 瓦片渲染/稀疏快照/降采样缓存/剪贴蒙版运行时/效果预览缓存 | `render.rs:1-4` 注释声称"复刻语义"，实际是整图单次仿射绘制；无任何 tile/patch/cache 结构。语义后果见 §6 |
+| `Compositor/Compositor/Rendering/TiledLayerRenderer.swift` + `RasterSnapshot.swift` + `DownsampleCache.swift` + `LiveMaskRenderer.swift` + `AdjustmentSurface.swift` + `LayerEffectsSurface.swift` + `EffectsPreviewCache.swift` | ~1100 | 瓦片渲染/稀疏快照/降采样缓存/剪贴蒙版运行时/效果预览缓存 | `render.rs:1-4` 注释声称"复刻语义"，实际是整图单次仿射绘制；无任何 tile/patch/cache 结构。语义后果见 §6（规划对齐：票 51–54，见 2026-10-25「性能规划」节 / ADR 0004） |
 | `Compositor/Compositor/Rendering/InlineTextEditor.swift` | ~700 | 行内文字编辑器 | 无 |
 | `Compositor/Compositor/IO/RawImporter.swift` | ~123 | RAW 导入（CIRAWFilter 队列/asShot/develop） | 无（`camera_raw.rs` 是作用于位图的滤镜，与 RAW 解码无关） |
 | `Compositor/Compositor/UI/` 下约 25 个面板/控件文件 | ~7000 | CurvesControls、EffectsSheet、ColorPickerSheet、PSDConversionSheet、RawDevelopSheet、FloatingPanel 系统、TransformInspector、CanvasRulers 交互、ProjectTabs、KeyboardShortcuts 自定义系统等 | 详见 §9 |
