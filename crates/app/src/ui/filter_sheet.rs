@@ -492,6 +492,16 @@ impl ProjectWorkspaceView {
         };
         self.panels
             .show(panel_names::FILTER_PANEL, kind.label(), placement);
+        // Swift renders the preview the moment the panel opens (beginFilter →
+        // updateFilter(edit.settings, preview: true)): the blur's default
+        // radius already needs its grown grid, and OK on a fresh panel still
+        // commits the softened pixels. The other filters' preview-at-open is
+        // not wired yet (their sliders drive the first apply, as before).
+        if matches!(kind, FilterKind::GaussianBlur | FilterKind::MotionBlur) {
+            let settings = self.filter_settings_from_panel(cx).unwrap_or_default();
+            let seed = self.filter_seed_from_panel(cx);
+            self.apply_filter_preview(kind, settings, seed, cx);
+        }
         self.sync_panel_guard(cx);
         self.touch(cx);
     }

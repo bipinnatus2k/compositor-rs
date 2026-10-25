@@ -536,26 +536,15 @@ pub fn run_filter(job: &FilterJob) -> Bitmap {
         FilterKind::RemoveBackground => crate::tools::subject_removal::run(image, &settings),
         FilterKind::ContentAwareFill => crate::tools::content_fill::run(image),
         FilterKind::GaussianBlur => {
-            // Filters.swift: the blur runs on the whole image and is cropped
-            // back to the extent. CI's input is transparent outside its finite
-            // extent, so the blur spreads into transparent room and content at
-            // the bitmap's own edge softens outwards instead of the border
-            // smearing inwards. Grow the bitmap by transparent padding, blur
-            // the grown image (the edge clamp in `gaussian_blur_rgba` then only
-            // ever lands in the transparent pad), and trim the pad away.
-            let sigma = settings.radius * job.scale();
-            let pad = (sigma * 3.0).ceil().max(1.0) as usize;
-            let grown = grow_to_fit(image, pad);
-            let blurred = crate::raster::gaussian_blur_rgba(&grown, sigma);
-            crop_bitmap(
-                &blurred,
-                &CGRect::new(
-                    pad as f64,
-                    pad as f64,
-                    image.width as f64,
-                    image.height as f64,
-                ),
-            )
+            // Filters.swift runs the blur on the job's image as-is ("Not
+            // clamped: a blur softens the layer's edges and spreads into the
+            // room made for it, rather than smearing the border outwards and
+            // stopping at it"). The room is the caller's grown grid
+            // (`grow_for_blur`, Filters.swift's `growForBlur`), which keeps
+            // the edge clamp in `gaussian_blur_rgba` inside transparent
+            // padding; a blur without one clamps at its bitmap's edge, as CI
+            // does without a finite extent.
+            crate::raster::gaussian_blur_rgba(image, settings.radius * job.scale())
         }
         FilterKind::MotionBlur => {
             motion_blur(image, settings.distance * job.scale(), settings.angle)
@@ -691,18 +680,95 @@ pub fn crop_bitmap(image: &Bitmap, rect: &CGRect) -> Bitmap {
     out
 }
 
-/// Expands `image` by `pad` transparent pixels on every side, with the
-/// original pixels landing at (pad, pad): the room a Core Image blur spreads
-/// into (`CIImage(cgImage:)` is transparent outside its extent).
-fn grow_to_fit(image: &Bitmap, pad: usize) -> Bitmap {
-    let mut out = Bitmap::new(image.width + pad * 2, image.height + pad * 2);
+/// `FilterEdit.blurMargin` — the room a blur needs around the layer: about
+/// three standard deviations, or half a streak (Filters.swift:298-303).
+pub fn blur_margin(kind: FilterKind, settings: &FilterSettings) -> f64 {
+    match kind {
+        FilterKind::GaussianBlur => settings.radius * 3.0 + 2.0,
+        FilterKind::MotionBlur => settings.distance / 2.0 + 2.0,
+        _ => 0.0,
+    }
+}
+
+/// `FilterEdit`'s grown grid (Filters.swift:213-218): the layer's pixels
+/// drawn into a larger grid — a blur's room to spread — with the transform
+/// placing that grid, and how far the padding reaches beyond the layer on
+/// every side (`grownMargin`).
+#[derive(Debug, Clone)]
+pub struct GrownGrid {
+    pub image: Bitmap,
+    pub transform: crate::transform::LayerTransform,
+    pub margin: f64,
+}
+
+/// `FilterEdit.grow(to:)`'s size guards (Filters.swift:318): a grid past
+/// 30,000 pixels a side or 100 megapixels is `ProjectError.tooLarge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLarge;
+
+fn grown_target_too_large(width: usize, height: usize) -> bool {
+    width > 30_000 || height > 30_000 || width * height > 100_000_000
+}
+
+/// `FilterEdit.growForBlur` (Filters.swift:308): pads the layer out so the
+/// blur has somewhere to spread — only ever grows, so easing the amount back
+/// off doesn't rebuild anything. `grown_margin` is the padding the grid
+/// already carries; `Ok(None)` means it already covers this blur.
+pub fn grow_for_blur(
+    image: &Bitmap,
+    transform: &crate::transform::LayerTransform,
+    kind: FilterKind,
+    settings: &FilterSettings,
+    grown_margin: f64,
+) -> Result<Option<GrownGrid>, TooLarge> {
+    let margin = blur_margin(kind, settings);
+    if margin <= grown_margin {
+        return Ok(None);
+    }
+    let bounds = image.bounds();
+    let pad = margin.ceil();
+    let extent = bounds.inset_by(-pad, -pad);
+    let target = bounds.union(&extent).integral();
+    if target == bounds {
+        return Ok(None);
+    }
+    let width = target.width() as usize;
+    let height = target.height() as usize;
+    if grown_target_too_large(width, height) {
+        return Err(TooLarge);
+    }
+    // The layer's pixels drawn into the target grid (grow(to:) draws at
+    // `bounds.offsetBy(dx: -target.minX, dy: -target.minY)`).
+    let mut grown = Bitmap::new(width, height);
+    let at_x = (-target.min_x()) as usize;
+    let at_y = (-target.min_y()) as usize;
     for y in 0..image.height {
         let src = y * image.width * 4;
-        let dst = ((pad + y) * out.width + pad) * 4;
-        out.data[dst..dst + image.width * 4]
+        let dst = ((at_y + y) * grown.width + at_x) * 4;
+        grown.data[dst..dst + image.width * 4]
             .copy_from_slice(&image.data[src..src + image.width * 4]);
     }
-    out
+    // The transform stretches with the grid and keeps the original pixels
+    // where they were (grow(to:)'s `expanded`).
+    let mut placed = *transform;
+    placed.size = crate::geometry::CGSize::new(
+        target.width() * transform.size.width / bounds.width(),
+        target.height() * transform.size.height / bounds.height(),
+    );
+    let to_document = crate::raster::pixel_to_document(transform, bounds.width(), bounds.height());
+    let middle = CGPoint::new(target.mid_x(), target.mid_y()).applying(&to_document);
+    placed.origin = CGPoint::new(
+        middle.x - placed.size.width / 2.0,
+        middle.y - placed.size.height / 2.0,
+    );
+    Ok(Some(GrownGrid {
+        image: grown,
+        transform: placed,
+        margin: (bounds.min_x() - target.min_x())
+            .min(bounds.min_y() - target.min_y())
+            .min(target.max_x() - bounds.max_x())
+            .min(target.max_y() - bounds.max_y()),
+    }))
 }
 
 #[cfg(test)]
@@ -717,6 +783,88 @@ mod tests {
         assert_eq!(s.amount, 10.0);
         let n = s.normalized();
         assert_eq!(n.radius, 1.0);
+    }
+
+    #[test]
+    fn blur_margin_is_three_sigmas_or_half_a_streak_plus_two() {
+        // Filters.swift:298-303.
+        let mut s = FilterSettings::default();
+        s.radius = 3.0;
+        assert_eq!(blur_margin(FilterKind::GaussianBlur, &s), 11.0);
+        assert_eq!(blur_margin(FilterKind::MotionBlur, &s), 7.0);
+        assert_eq!(blur_margin(FilterKind::Curves, &s), 0.0);
+        s.distance = 16.0;
+        assert_eq!(blur_margin(FilterKind::MotionBlur, &s), 10.0);
+    }
+
+    #[test]
+    fn grow_for_blur_pads_the_layer_by_the_ceiled_margin() {
+        // Filters.swift growForBlur / grow(to:): a 10x10 grid at radius 3
+        // grows by ceil(11) = 11 a side, the transform stretches with the
+        // grid around the same center, and grownMargin records the padding.
+        let image = Bitmap::new(10, 10);
+        let transform = crate::transform::LayerTransform::new(
+            CGPoint::new(100.0, 50.0),
+            crate::geometry::CGSize::new(20.0, 40.0),
+        );
+        let mut s = FilterSettings::default();
+        s.radius = 3.0;
+        let grown = grow_for_blur(&image, &transform, FilterKind::GaussianBlur, &s, 0.0)
+            .unwrap()
+            .expect("a fresh blur always grows");
+        assert_eq!((grown.image.width, grown.image.height), (32, 32));
+        assert_eq!(grown.margin, 11.0);
+        assert_eq!(
+            grown.transform.size,
+            crate::geometry::CGSize::new(64.0, 128.0)
+        );
+        // grow(to:)'s origin: the target's pixel-space middle (5, 5 — the
+        // grid spans −11..21) through the original pixelToDocument.
+        assert_eq!(grown.transform.origin, CGPoint::new(78.0, 6.0));
+    }
+
+    #[test]
+    fn grow_for_blur_only_ever_grows() {
+        // Easing the radius back off doesn't rebuild the grid
+        // (Filters.swift growForBlur's `guard margin > grownMargin`).
+        let image = Bitmap::new(10, 10);
+        let transform = crate::transform::LayerTransform::new(
+            CGPoint::ZERO,
+            crate::geometry::CGSize::new(10.0, 10.0),
+        );
+        let mut s = FilterSettings::default();
+        s.radius = 3.0;
+        let grown = grow_for_blur(&image, &transform, FilterKind::GaussianBlur, &s, 0.0)
+            .unwrap()
+            .expect("the first grow runs");
+        let eased = grow_for_blur(
+            &image,
+            &transform,
+            FilterKind::GaussianBlur,
+            &s,
+            grown.margin,
+        )
+        .unwrap();
+        assert!(eased.is_none(), "a smaller margin keeps the grid");
+        s.radius = 6.0;
+        let raised = grow_for_blur(
+            &image,
+            &transform,
+            FilterKind::GaussianBlur,
+            &s,
+            grown.margin,
+        )
+        .unwrap();
+        assert!(raised.is_some(), "a raised radius regrows");
+    }
+
+    #[test]
+    fn grown_target_refuses_the_oversized_grid() {
+        // grow(to:)'s 30k/100MP guards throw ProjectError.tooLarge.
+        assert!(grown_target_too_large(30_001, 10));
+        assert!(grown_target_too_large(10, 30_001));
+        assert!(grown_target_too_large(10_000, 10_001));
+        assert!(!grown_target_too_large(30_000, 3_333));
     }
 
     #[test]
@@ -860,19 +1008,32 @@ mod tests {
     #[test]
     fn gaussian_edge_content_spreads_outward() {
         // A fully opaque 50x50 image with 10 transparent rows appended: the
-        // bitmap's top edge is content. The blur decays it into the transparent
-        // room instead of the edge clamp holding the border at full alpha.
+        // bitmap's top edge is content. The session grows the grid first
+        // (Filters.swift growForBlur — the room run's unclamped blur needs),
+        // so the blur decays the edge into the transparent room instead of
+        // the edge clamp holding the border at full alpha.
         let mut img = Bitmap::new(50, 60);
         for y in 0..50 {
             for x in 0..50 {
                 img.set_pixel(x, y, [255, 255, 255, 255]);
             }
         }
-        let out = run_filter(&gaussian_job(&img, 0.5));
-        let edge = out.pixel(25, 0)[3];
-        assert!(edge > 0 && edge < 255, "top edge decays outward: {edge}");
+        let transform = crate::transform::LayerTransform::new(
+            CGPoint::ZERO,
+            crate::geometry::CGSize::new(50.0, 60.0),
+        );
+        let mut settings = FilterSettings::default();
+        settings.radius = 0.5;
+        let grown = grow_for_blur(&img, &transform, FilterKind::GaussianBlur, &settings, 0.0)
+            .unwrap()
+            .expect("a blur grows the grid");
+        // Original pixel (x, y) sits at grown (x + 4, y + 4): the row above
+        // the original top edge is grown row 3.
+        let out = run_filter(&gaussian_job(&grown.image, 0.5));
+        let edge = out.pixel(29, 3)[3];
+        assert!(edge > 0, "top edge decays outward: {edge}");
         // Deeper in, the content stays fully solid.
-        assert_eq!(out.pixel(25, 12)[3], 255);
+        assert_eq!(out.pixel(29, 16)[3], 255);
     }
 
     #[test]

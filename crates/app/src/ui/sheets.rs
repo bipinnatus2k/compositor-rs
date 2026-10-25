@@ -161,6 +161,10 @@ impl ProjectWorkspaceView {
             .as_ref()
             .and_then(|layer| layer.asset.as_ref().map(|asset| asset.image.clone()));
         self.preview_base_transform = layer.as_ref().map(|layer| layer.transform);
+        self.preview_grown = None;
+        self.preview_grown_transform = None;
+        self.preview_grown_margin = 0.0;
+        self.preview_kind = None;
         self.preview = self.preview_base.clone();
     }
 

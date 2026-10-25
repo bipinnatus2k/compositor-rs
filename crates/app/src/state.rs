@@ -287,6 +287,15 @@ pub struct ProjectWorkspaceView {
     pub camera_raw_readout: Option<[u8; 3]>,
     pub preview: Option<Arc<Bitmap>>,
     pub preview_base_transform: Option<LayerTransform>,
+    /// The filter's grown grid (`FilterEdit.grownImage`/`grownTransform`/
+    /// `grownMargin`): the blur's room to spread, grown from the preview base
+    /// as the margin rises. `None` for the filters that never grow.
+    pub preview_grown: Option<Arc<Bitmap>>,
+    pub preview_grown_transform: Option<LayerTransform>,
+    pub preview_grown_margin: f64,
+    /// The kind the preview pipeline last ran (`FilterEdit.kind`): the commit
+    /// reads whether the pixels spread (`gaussianBlur`/`motionBlur`).
+    pub preview_kind: Option<FilterKind>,
     pub subscriptions: Vec<Subscription>,
     /// Monotonic epoch for the opacity-digit pair window (0.6 s).
     key_epoch: std::time::Instant,
@@ -436,6 +445,10 @@ impl ProjectWorkspaceView {
             camera_raw_readout: None,
             preview: None,
             preview_base_transform: None,
+            preview_grown: None,
+            preview_grown_transform: None,
+            preview_grown_margin: 0.0,
+            preview_kind: None,
             subscriptions: Vec::new(),
             key_epoch: std::time::Instant::now(),
             pending_save: None,
@@ -1088,10 +1101,12 @@ impl ProjectWorkspaceView {
             };
 
         // Preview pixels override the active layer while a sheet is open.
-        if let (Some(preview), Some(base_transform)) = (&self.preview, &self.preview_base_transform)
-        {
+        // A blur's grown preview places by its grown grid's transform; every
+        // other preview places by the layer's own.
+        let preview_placement = self.preview_grown_transform.or(self.preview_base_transform);
+        if let (Some(preview), Some(base_transform)) = (&self.preview, preview_placement) {
             let mut doc = document.clone();
-            override_pixels(&mut doc, preview, *base_transform);
+            override_pixels(&mut doc, preview, base_transform);
             return Some(self.composite_bitmap(&doc, cx));
         }
         // A pixel move shows the lifted pixels rebuilt at the offset, placed
@@ -1241,6 +1256,10 @@ impl ProjectWorkspaceView {
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
+        self.preview_grown = None;
+        self.preview_grown_transform = None;
+        self.preview_grown_margin = 0.0;
+        self.preview_kind = None;
         // The gradient cursor is canvas gesture state (ticket 39); closing
         // the sheet clears it exactly as it did when the field lived here.
         if let Some(content) = self.content.as_ref() {
@@ -1256,30 +1275,132 @@ impl ProjectWorkspaceView {
     /// Commits the preview into the active layer's pixels as one undo step,
     /// then drops the preview (the canvas shows the layer's own pixels — now
     /// the committed ones). The sheet/panel caller closes its own UI after.
+    ///
+    /// The blur commit follows `commitFilter` (Filters.swift): the pixels
+    /// spread on the grown grid, `trimmed` cuts whatever stayed empty away —
+    /// the layer keeps the spread — and an owned mask is carried onto the new
+    /// grid. A layer changed since the edit opened drops the commit silently.
     pub fn commit_preview_pixels(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(preview) = self.preview.clone() {
-            let transform = self.preview_base_transform.unwrap_or_default();
-            self.history_edit(
-                name,
-                move |session| {
-                    if let Some(id) = session.active_layer_id
-                        && let Some(doc) = session.document.as_mut()
-                        && let Some(layer) = doc.layer_mut(id)
-                    {
-                        layer.asset = Some(ImportedImage::new(
-                            preview.as_ref().clone(),
-                            layer.name.clone(),
-                        ));
-                        layer.transform = transform;
-                    }
-                },
-                cx,
+            let base = self.preview_base.clone();
+            let base_transform = self.preview_base_transform.unwrap_or_default();
+            let grown_transform = self.preview_grown_transform;
+            let spread = matches!(
+                self.preview_kind,
+                Some(FilterKind::GaussianBlur | FilterKind::MotionBlur)
             );
+            // `current.asset?.image === edit.original.image, current.transform
+            // == edit.transform` — otherwise the commit drops (the panel still
+            // closes, as Swift's defer runs either way).
+            let unchanged = base.as_ref().is_some_and(|base| {
+                self.active_layer_read(cx).is_some_and(|layer| {
+                    layer
+                        .asset
+                        .as_ref()
+                        .is_some_and(|asset| Arc::ptr_eq(&asset.image, base))
+                        && layer.transform == base_transform
+                })
+            });
+            let mut commit: Option<(
+                Bitmap,
+                LayerTransform,
+                Option<compositor_core::document::LayerMask>,
+            )> = None;
+            if unchanged {
+                let (pixels, transform) = if spread && let Some(grown) = grown_transform {
+                    let (image, placed) = compositor_core::filters::trimmed(&preview, grown);
+                    (image, placed)
+                } else {
+                    (preview.as_ref().clone(), base_transform)
+                };
+                let mask = if spread && let Some(grown) = grown_transform {
+                    self.carried_mask(grown, &pixels, base_transform, cx)
+                } else {
+                    Ok(None)
+                };
+                match mask {
+                    Ok(mask) => commit = Some((pixels, transform, mask)),
+                    // The carry threw in Swift: brushError (ExportError
+                    // .render's description), no undo step.
+                    Err(()) => {
+                        self.workspace.update(cx, |ws, cx| {
+                            ws.current_mut().session.update(cx, |session, _| {
+                                session.brush_error = Some(
+                                    "The canvas could not be rendered. Try a smaller canvas."
+                                        .into(),
+                                );
+                            })
+                        });
+                    }
+                }
+            }
+            if let Some((pixels, transform, mask)) = commit {
+                self.history_edit(
+                    name,
+                    move |session| {
+                        if let Some(id) = session.active_layer_id
+                            && let Some(doc) = session.document.as_mut()
+                            && let Some(layer) = doc.layer_mut(id)
+                        {
+                            layer.asset = Some(ImportedImage::new(pixels, layer.name.clone()));
+                            layer.transform = transform;
+                            if let Some(mask) = mask {
+                                layer.mask = Some(mask);
+                            }
+                        }
+                    },
+                    cx,
+                );
+            }
         }
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
+        self.preview_grown = None;
+        self.preview_grown_transform = None;
+        self.preview_grown_margin = 0.0;
+        self.preview_kind = None;
         self.touch(cx);
+    }
+
+    /// The active layer, read straight off the workspace (the commit's
+    /// unchanged-guard and the mask carry read it outside the history edit).
+    fn active_layer_read(&self, cx: &App) -> Option<compositor_core::document::ImageLayer> {
+        let session = self.current_tab(cx).session.read(cx);
+        session.active_layer().cloned()
+    }
+
+    /// `commitFilter`'s mask carry: an owned mask (covering the old grid,
+    /// past a 1×1 solid) is resampled onto the grown grid — `enabled
+    /// .clipImage(placement: current.transform, over: grown, width:…
+    /// height:…)`, its edge tone past the old edge — and replaces the mask's
+    /// asset. A carry failure throws in Swift, dropping the whole commit; the
+    /// caller surfaces it (`Err`) as brushError.
+    fn carried_mask(
+        &self,
+        grown: LayerTransform,
+        pixels: &Bitmap,
+        base_transform: LayerTransform,
+        cx: &App,
+    ) -> Result<Option<compositor_core::document::LayerMask>, ()> {
+        let Some(owned) = self.active_layer_read(cx).and_then(|layer| layer.mask) else {
+            return Ok(None);
+        };
+        if owned.placement.is_some()
+            || (owned.asset.image.width <= 1 && owned.asset.image.height <= 1)
+        {
+            return Ok(None);
+        }
+        let mut enabled = owned.clone();
+        enabled.is_enabled = true;
+        enabled.placement = Some(base_transform);
+        let carried =
+            compositor_core::render::mask_clip_image(&enabled, &grown, pixels.width, pixels.height)
+                .ok_or(())?;
+        Ok(Some(owned.replacing(ImportedImage::new(
+            carried,
+            owned.asset.name.clone(),
+        ))))
     }
 
     /// The active selection clipped to the canvas (`selection?.clip(canvas:)`).
@@ -1395,8 +1516,45 @@ impl ProjectWorkspaceView {
         let Some(base) = self.preview_base.clone() else {
             return;
         };
+        let Some(base_transform) = self.preview_base_transform else {
+            return;
+        };
+        self.preview_kind = Some(kind);
+        // A bigger blur needs more room around the layer than it was given
+        // (Filters.swift updateFilter → growForBlur): the grid only ever
+        // grows, regrowing from the original pixels when the margin rises.
+        match compositor_core::filters::grow_for_blur(
+            &base,
+            &base_transform,
+            kind,
+            &settings.normalized(),
+            self.preview_grown_margin,
+        ) {
+            Ok(Some(grown)) => {
+                self.preview_grown = Some(Arc::new(grown.image));
+                self.preview_grown_transform = Some(grown.transform);
+                self.preview_grown_margin = grown.margin;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                // grow(to:)'s 30k/100MP guards throw ProjectError.tooLarge,
+                // surfaced as brushError like every begin/updateFilter catch.
+                self.workspace.update(cx, |ws, cx| {
+                    ws.current_mut().session.update(cx, |session, _| {
+                        session.brush_error = Some(
+                            "This project exceeds the supported canvas, layer, file-size, or 100-megapixel image limit."
+                                .into(),
+                        );
+                    })
+                });
+                return;
+            }
+        }
         let selection = self.selection_clip(cx);
-        let job = FilterJob::builder(kind, &base, settings)
+        // The filter runs on the grown grid when one is up
+        // (`edit.grownImage ?? edit.original.image`).
+        let grown = self.preview_grown.clone().unwrap_or_else(|| base.clone());
+        let job = FilterJob::builder(kind, &grown, settings)
             .with_selection(selection)
             .with_seed(seed)
             .build();
@@ -2181,6 +2339,96 @@ mod tests {
                     !root.panel_views.contains_key(panel_names::FILTER_PANEL),
                     "the confirm closed the panel"
                 );
+            });
+        }
+
+        /// `gaussianBlurSoftensAHardEdgeAndSpreadsPastTheLayerEdgeAsOneUndoStep`
+        /// (FilterTests.swift): the blur is not clamped at the layer's edge —
+        /// the layer is given room, the blur spreads into it and whatever
+        /// stays empty is cut away again (Filters.swift `growForBlur` /
+        /// `PixelFilter.trimmed`). The 40x20 layer, opaque across its full
+        /// height for its left half, could not have grown vertically unless
+        /// the blur went past the edge.
+        #[gpui_kit::test]
+        fn gaussian_blur_softens_a_hard_edge_and_spreads_past_the_layer_edge_as_one_undo_step(
+            cx: &mut TestAppContext,
+        ) {
+            let (root, mut cx) = open_scenario_window(cx);
+            root.update(&mut cx, |root, cx| {
+                root.workspace.update(cx, |workspace, cx| {
+                    workspace.current_mut().session.update(cx, |session, _| {
+                        session.create_document(40, 20, true);
+                        // Left half opaque white, right half transparent.
+                        let mut image = compositor_core::raster::Bitmap::new(40, 20);
+                        for y in 0..20 {
+                            for x in 0..20 {
+                                image.set_pixel(x, y, [255, 255, 255, 255]);
+                            }
+                        }
+                        session.insert_image(ImportedImage::new(image, "Half"), None);
+                    });
+                });
+                root.open_filter_panel(FilterKind::GaussianBlur, cx);
+                // session.updateFilter(FilterSettings(radius: 3), preview: true).
+                root.apply_filter_preview(
+                    FilterKind::GaussianBlur,
+                    compositor_core::filters::FilterSettings {
+                        radius: 3.0,
+                        ..Default::default()
+                    },
+                    0,
+                    cx,
+                );
+            });
+            let undo_count = root.read_with(&cx, |root, cx| {
+                root.workspace
+                    .read(cx)
+                    .current()
+                    .session
+                    .read(cx)
+                    .history
+                    .undo_count()
+            });
+            root.update(&mut cx, |root, cx| root.confirm_filter_panel(cx));
+            root.read_with(&cx, |root, cx| {
+                let session = root.workspace.read(cx).current().session.read(cx);
+                assert_eq!(
+                    session.history.undo_count(),
+                    undo_count + 1,
+                    "the commit is one undo step"
+                );
+                let layer = session.active_layer().expect("the layer survives");
+                let result = layer.asset.as_ref().expect("pixels").image.as_ref();
+                let origin = layer.transform.origin;
+                assert!(
+                    origin.x < 0.0 && origin.y < 0.0,
+                    "the layer grew on every side: origin {origin:?}"
+                );
+                assert!(
+                    result.height > 20,
+                    "the blur spread past the layer's edge: height {}",
+                    result.height
+                );
+                assert!(
+                    result.width < 40,
+                    "and the half that stayed empty was trimmed away: width {}",
+                    result.width
+                );
+                let middle: Vec<u8> = (0..result.width)
+                    .map(|x| result.data[(result.height / 2 * result.width + x) * 4 + 3])
+                    .collect();
+                // 250 rather than 255: the block's centre is 10 px from its
+                // edges, which at this radius leaves it a fraction of a level
+                // below full opacity. What would break here is the inside
+                // fading, not rounding.
+                let max = middle.iter().max().copied().unwrap();
+                assert!(max >= 250, "the block's inside is untouched: {max}");
+                assert!(
+                    middle.iter().any(|a| *a > 20 && *a < 235),
+                    "the hard edge is now soft"
+                );
+                let last = *middle.last().unwrap();
+                assert!(last < 20, "and it fades out on the far side: {last}");
             });
         }
     }

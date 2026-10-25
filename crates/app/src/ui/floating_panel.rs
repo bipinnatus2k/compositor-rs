@@ -913,6 +913,10 @@ impl ProjectWorkspaceView {
         self.preview = None;
         self.preview_base = None;
         self.preview_base_transform = None;
+        self.preview_grown = None;
+        self.preview_grown_transform = None;
+        self.preview_grown_margin = 0.0;
+        self.preview_kind = None;
         self.sync_panel_guard(cx);
         self.touch(cx);
     }
