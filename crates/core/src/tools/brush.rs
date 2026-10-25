@@ -1540,14 +1540,6 @@ fn render_continuous_tile_reference(tile: &mut ContinuousTile, params: &Continuo
 mod tests {
     use super::*;
 
-    fn white_bitmap(size: usize) -> Bitmap {
-        let mut image = Bitmap::new(size, size);
-        for pixel in image.data.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[255, 255, 255, 255]);
-        }
-        image
-    }
-
     fn blank_layer_transform() -> LayerTransform {
         LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0))
     }
@@ -2137,18 +2129,6 @@ mod heal_tests {
     fn continuous_deposition_is_rotation_invariant() {
         // The engine works in document space: the same stroke seen through a
         // 45° layer mapping deposits the same way relative to the stroke.
-        let base = ContinuousParams {
-            settled: &[[10.0f32, 10.0, 60.0, 10.0]],
-            tail: &[],
-            origin: CGPoint::ZERO,
-            axis_x: CGPoint::new(1.0, 0.0),
-            axis_y: CGPoint::new(0.0, 1.0),
-            radius: 12.0,
-            hardness: 0.5,
-            antialias: 1.0,
-            spacing: 1.0,
-            canvas: CGSize::new(200.0, 200.0),
-        };
         // The layer's pixel axes rotated 45°: the same document stroke is
         // sampled through a rotated grid, and deposition per pixel stays.
         let segments: Vec<StrokeSegment> = vec![[10.0, 10.0, 60.0, 10.0]];

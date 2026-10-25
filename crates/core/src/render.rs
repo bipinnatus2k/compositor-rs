@@ -3,8 +3,6 @@
 //! each through its transform, adjustment, effects, masks and clipping, with
 //! its opacity and blend mode. Folders are pass-through.
 
-#![allow(dead_code)]
-
 use crate::blend::composite_pixel;
 use crate::document::{CanvasDocument, ImageLayer, LayerMask, LayerShape, ShapeKind};
 use crate::geometry::{CGPoint, CGRect, CGSize};
@@ -1730,7 +1728,7 @@ mod tests {
             base.data[i] = 255;
             base.data[i + 3] = 255;
         }
-        let mut base_layer = ImageLayer::with_asset(
+        let base_layer = ImageLayer::with_asset(
             ImportedImage::with_thumbnail(base, Bitmap::new(2, 2), "B"),
             CGPoint::ZERO,
         );

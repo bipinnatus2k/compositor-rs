@@ -1,8 +1,6 @@
 //! Port of `Compositor/Document/CameraRaw*.swift` — the Camera Raw filter —
 //! and of the `adjust_camera_raw*` pixel kernels in `Rendering/AdjustPixels.c`.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use super::curves::{CurvePoint, CurvesSettings};

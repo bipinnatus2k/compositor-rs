@@ -12,8 +12,6 @@
 //! continue in a straight line are dropped, the same collapse the C wand
 //! tracer performs. `None` when nothing passes the test.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use crate::geometry::CGPoint;

@@ -14,8 +14,6 @@
 //! the clicked instance's coarse soft mask (`select`) — `instance_index`
 //! keeps the click-to-instance lookup for callers that have the index mask.
 
-#![allow(dead_code)]
-
 use crate::geometry::{CGPoint, CGSize};
 use crate::raster::{Bitmap, GrayMask};
 use crate::selection::SelectionPath;

@@ -4,8 +4,6 @@
 //! `LayerFlip.swift`, `DocumentHistory` integration, `Crop.swift`,
 //! `CanvasSize`/`ImageSize`/`Trim` operations).
 
-#![allow(dead_code)]
-
 use crate::blend::LayerBlendMode;
 use crate::canvas::{
     CanvasSizeOptions, CropDrag, CropDragMode, CropGeometry, TrimOptions, mirrored_transform,

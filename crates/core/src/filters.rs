@@ -2,8 +2,6 @@
 //! `LensPixels.c` kernels: the Filter menu (Gaussian Blur, Motion Blur, Add
 //! Noise, Lens Correction), running on a layer inside the selection.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::adjust::camera_raw::CameraRawSettings;

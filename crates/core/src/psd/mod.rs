@@ -3,8 +3,6 @@
 //! that maps PSD concepts onto the app model. The `fixture` module is the port
 //! of the Swift test-support byte builder, kept so round trips stay byte-exact.
 
-#![allow(dead_code)]
-
 pub mod channel_coder;
 pub mod document_builder;
 pub mod fixture;

@@ -4,8 +4,6 @@
 //! (`effects_editing`), every change commits a real undo step (Swift's
 //! `changeEffects` → `setEffects`), and Cancel restores only the edited kind.
 
-#![allow(dead_code)]
-
 use uuid::Uuid;
 
 use crate::effects::{

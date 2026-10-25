@@ -2,8 +2,6 @@
 //! content-aware fill by coherent offset propagation plus randomized patch
 //! search, spreading inward from the selection's boundary.
 
-#![allow(dead_code)]
-
 use crate::geometry::CGAffineTransform;
 use crate::raster::Bitmap;
 use crate::selection::SelectionClip;

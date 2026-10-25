@@ -1,8 +1,6 @@
 //! Port of `Compositor/Document/LayerEffects.swift` and
 //! `Rendering/GuidedMatte.swift`-based effect rendering.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::document::PaletteColor;

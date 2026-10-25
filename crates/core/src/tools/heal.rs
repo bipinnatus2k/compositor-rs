@@ -2,8 +2,6 @@
 //! coverage bounds, a membrane solve over the spot anchored to its ring, and
 //! the Content-Aware / Proximity Match / Create Texture patch sources.
 
-#![allow(dead_code)]
-
 use crate::geometry::CGRect;
 use crate::raster::{Bitmap, GrayMask};
 

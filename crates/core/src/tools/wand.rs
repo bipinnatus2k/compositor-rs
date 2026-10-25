@@ -1,8 +1,6 @@
 //! Port of `Rendering/WandPixels.c`: the Magic Wand — color matching with a
 //! seed-radius reference, scanline flood fill, and outline tracing.
 
-#![allow(dead_code)]
-
 use crate::raster::Bitmap;
 
 /// Outlines with more pixel edges than this are refused: the path would be

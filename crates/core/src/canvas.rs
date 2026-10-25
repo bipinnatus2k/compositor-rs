@@ -2,12 +2,10 @@
 //! `Document/CanvasSize.swift`, `Document/Crop.swift` and
 //! `Document/ImageTrim.swift`: canvas size, image size, crop and trim.
 
-#![allow(dead_code)]
-
 use crate::document::{CanvasDocument, ImageLayer};
 use crate::geometry::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use crate::raster::{Bitmap, ImportedImage};
-use crate::transform::{LayerSampling, LayerTransform};
+use crate::transform::LayerTransform;
 use serde::{Deserialize, Serialize};
 
 /// `CanvasUnit`.
@@ -881,6 +879,7 @@ pub fn mirrored_transform(
 mod tests {
     use super::*;
     use crate::document::CanvasGuide;
+    use crate::transform::LayerSampling;
 
     #[test]
     fn draft_units_roundtrip() {
