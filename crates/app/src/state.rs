@@ -474,6 +474,15 @@ impl ProjectWorkspaceView {
         state
             .subscriptions
             .push(cx.observe_self(|_, cx| invalidation_counter::root_notify(cx)));
+        // The ticket-49 debug readout (ADR 0004): a launch that sets
+        // `COMPOSITOR_INVALIDATION_STATS` tallies the same counters and
+        // prints the totals on quit.
+        #[cfg(any(test, debug_assertions))]
+        if let Some(subscription) =
+            invalidation_counter::install_readout(invalidation_counter::readout_requested(), cx)
+        {
+            state.subscriptions.push(subscription);
+        }
         // `on_window_should_close` → `workspace.close_window` (two-phase):
         // a pending unsaved-changes dialog vetoes the close and presents
         // itself; once the flow completes the window closes for real.
@@ -1672,7 +1681,7 @@ fn straight_of(color: compositor_core::document::PaletteColor) -> [u8; 4] {
 pub(crate) mod invalidation_counter {
     use std::cell::Cell;
 
-    use gpui_kit::{App, Global};
+    use gpui_kit::{App, Global, Subscription};
 
     /// The tallies as a gpui Global: every increment site runs against
     /// `&App`, so the fields are `Cell`s. The global is absent outside the
@@ -1717,6 +1726,19 @@ pub(crate) mod invalidation_counter {
             self.thumbnail_regen.set(0);
             self.mask_thumbnail_regen.set(0);
         }
+
+        /// One labeled line with all five tallies, in tally order — the quit
+        /// printout the debug readout (ticket 49) writes.
+        pub(crate) fn totals_line(&self) -> String {
+            format!(
+                "root_notify={} composite={} frame_rebuild={} thumbnail_regen={} mask_thumbnail_regen={}",
+                self.root_notify.get(),
+                self.composite.get(),
+                self.frame_rebuild.get(),
+                self.thumbnail_regen.get(),
+                self.mask_thumbnail_regen.get()
+            )
+        }
     }
 
     /// Installs a fresh counter (the scenario tests' first call); absent
@@ -1734,6 +1756,37 @@ pub(crate) mod invalidation_counter {
     #[cfg(test)]
     pub(crate) fn snapshot(cx: &App) -> [u64; 5] {
         cx.global::<InvalidationCounters>().snapshot()
+    }
+
+    /// Whether the launch environment asked for the debug readout
+    /// (`COMPOSITOR_INVALIDATION_STATS`, ticket 49 / ADR 0004): a run with
+    /// the flag set tallies the same counters the scenario tests read and
+    /// prints the totals on quit.
+    pub(crate) fn readout_requested() -> bool {
+        static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *REQUESTED.get_or_init(|| std::env::var_os("COMPOSITOR_INVALIDATION_STATS").is_some())
+    }
+
+    /// Installs the counters plus the on-quit printout — the debug-run half
+    /// of the ticket-49 harness. A run without the flag, a second window,
+    /// or the scenario tests' own `install` (the global already present)
+    /// gets `None`; the caller keeps the subscription so the printout lives
+    /// as long as its window.
+    pub(crate) fn install_readout(enabled: bool, cx: &mut App) -> Option<Subscription> {
+        if !enabled || cx.try_global::<InvalidationCounters>().is_some() {
+            return None;
+        }
+        cx.set_global(InvalidationCounters::default());
+        Some(cx.on_app_quit(|cx| {
+            let line = cx
+                .try_global::<InvalidationCounters>()
+                .map(|counters| counters.totals_line());
+            async move {
+                if let Some(line) = line {
+                    eprintln!("invalidation totals: {line}");
+                }
+            }
+        }))
     }
 
     pub(crate) fn root_notify(cx: &App) {
@@ -2024,8 +2077,11 @@ mod tests {
     /// the ticket's landing record and the diff report carry.
     mod invalidation_scenarios {
         use super::super::{ProjectWorkspaceView, invalidation_counter};
+        use crate::canvas::editor_canvas::{CanvasDrag, EditorCanvasView};
         use crate::ui::floating_panel::{PanelContent, panel_names};
         use compositor_core::document::LayerMask;
+        use compositor_core::document::NavigationTool;
+        use compositor_core::geometry::CGPoint;
         use compositor_core::raster::{Bitmap, ImportedImage};
         use compositor_core::session::EditorSession;
         use gpui_kit::component::slider::{SliderEvent, SliderValue};
@@ -2216,6 +2272,212 @@ mod tests {
                 [1, 1, 1, 1, 0],
                 "undo: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
             );
+        }
+
+        /// Moves per stroke scenario: each move renders one full frame, the
+        /// same shape a pointer drag produces.
+        const STROKE_MOVES: usize = 5;
+
+        /// A strokeable document (ticket 49), shared by the fast scenario and
+        /// both baselines: one full-size asset layer (so the composite's
+        /// per-layer clone is real at the measured size), the Brush tool and
+        /// ADR 0004's baseline tip — a 100px diameter at medium hardness.
+        fn seed_stroke_document(
+            session: &Entity<EditorSession>,
+            cx: &mut gpui_kit::VisualTestContext,
+            width: usize,
+            height: usize,
+        ) {
+            session.update(cx, |session, _| {
+                session.create_document(width, height, true);
+                let document = session.document.as_mut().unwrap();
+                document.layers[0].asset = Some(ImportedImage::new(
+                    Bitmap::new_clearing(width, height, [96, 128, 160, 255]),
+                    "L",
+                ));
+                session.tool = NavigationTool::Brush;
+                session.brush_settings.diameter = 100.0;
+                session.brush_settings.hardness = 0.5;
+            });
+        }
+
+        /// The open tab's canvas view — the owner of the gesture state the
+        /// stroke scenarios drive.
+        fn canvas_view(
+            root: &Entity<ProjectWorkspaceView>,
+            cx: &impl gpui_kit::AppContext,
+        ) -> Entity<EditorCanvasView> {
+            root.read_with(cx, |root, cx| {
+                root.content
+                    .as_ref()
+                    .expect("the content view")
+                    .read(cx)
+                    .canvas_view
+                    .clone()
+            })
+        }
+
+        /// One brush move through the production move branch
+        /// (editor_canvas.rs:885-897 plus the trailing `touch`): append the
+        /// smoothed point, keep the line anchor current, then invalidate.
+        /// The branch's `brush_last_pixel` write is private and feeds only
+        /// the Shift axis, so the mirror leaves it out.
+        fn stroke_move(
+            canvas: &Entity<EditorCanvasView>,
+            cx: &mut gpui_kit::VisualTestContext,
+            doc: CGPoint,
+        ) {
+            canvas.update(cx, |view, cx| {
+                if let Some(CanvasDrag::Stroke(edit, _)) = view.drag.as_mut() {
+                    edit.append_smoothed(doc);
+                    view.session.update(cx, |session, _| {
+                        if let Some(last) = session.last_brush_point.as_mut() {
+                            last.point = doc;
+                        }
+                    });
+                }
+                view.touch(cx);
+            });
+        }
+
+        /// Stroke-drag scenario (ticket 49, ADR 0004's measure-first
+        /// harness): the begin runs the production `begin_stroke`; each move
+        /// appends one point and renders one full frame. The first three
+        /// tallies are the necessary per-frame work — one frame per event,
+        /// the same shape the slider scenario pins.
+        #[gpui_kit::test]
+        fn stroke_drag_invalidation(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_stroke_document(&session, &mut cx, 256, 256);
+            let canvas = canvas_view(&root, &cx);
+            render_frame(&mut cx); // warm the caches; the tallies start clean
+
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            canvas.update(&mut cx, |view, cx| {
+                view.begin_stroke(CGPoint::new(48.0, 128.0), false, cx)
+            });
+            for step in 0..STROKE_MOVES {
+                let x = 48.0 + (step + 1) as f64 * (160.0 / STROKE_MOVES as f64);
+                stroke_move(&canvas, &mut cx, CGPoint::new(x, 128.0));
+            }
+            let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            // The begin is silent (`set_drag` carries no notify — the first
+            // dab rides the first move's frame, and mouse-up commits); each
+            // move delivers exactly one frame. The layers panel's rows stay
+            // frozen: the content key (ticket 37) already covers the stroke
+            // path, so the per-move thumbnail resample ADR 0004's background
+            // item 4 lists rides the Shape drag, not the brush.
+            assert_eq!(
+                counts,
+                [
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64,
+                    0,
+                    0
+                ],
+                "stroke drag: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
+        }
+
+        /// The ADR 0004 baseline scenarios (ticket 49): real-sized documents
+        /// whose per-move frame cost tickets 50–53 re-measure. Opt-in so the
+        /// gates stay fast — run with `COMPOSITOR_STROKE_BASELINE=1 cargo
+        /// test -p compositor stroke_baseline -- --nocapture` (debug build);
+        /// the printed numbers land in the ADR 0004 ledger by hand. Without
+        /// the flag there is nothing to run: a measurement has nothing to
+        /// assert.
+        const BASELINE_FLAG: &str = "COMPOSITOR_STROKE_BASELINE";
+
+        #[gpui_kit::test]
+        fn stroke_baseline_1200x900(cx: &mut TestAppContext) {
+            stroke_baseline(cx, 1200, 900, 40);
+        }
+
+        #[gpui_kit::test]
+        fn stroke_baseline_4000x3000(cx: &mut TestAppContext) {
+            stroke_baseline(cx, 4000, 3000, 12);
+        }
+
+        fn stroke_baseline(cx: &mut TestAppContext, width: usize, height: usize, moves: usize) {
+            if std::env::var_os(BASELINE_FLAG).is_none() {
+                return;
+            }
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_stroke_document(&session, &mut cx, width, height);
+            let canvas = canvas_view(&root, &cx);
+            render_frame(&mut cx);
+
+            let mut frame_ms = Vec::with_capacity(moves + 1);
+            // Each event's update flushes its own frame (the same
+            // auto-render the fast scenario counts on), so the timed span
+            // covers one full production frame: append, invalidate, render.
+            let frame_started = std::time::Instant::now();
+            canvas.update(&mut cx, |view, cx| {
+                view.begin_stroke(
+                    CGPoint::new(width as f64 * 0.2, height as f64 * 0.5),
+                    false,
+                    cx,
+                )
+            });
+            frame_ms.push(frame_started.elapsed().as_secs_f64() * 1000.0);
+            for step in 0..moves {
+                let x =
+                    width as f64 * 0.2 + (step + 1) as f64 * (width as f64 * 0.6 / moves as f64);
+                let doc = CGPoint::new(x, height as f64 * 0.5);
+                let frame_started = std::time::Instant::now();
+                stroke_move(&canvas, &mut cx, doc);
+                frame_ms.push(frame_started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            let total: f64 = frame_ms.iter().sum();
+            let mean = total / frame_ms.len() as f64;
+            let max = frame_ms.iter().copied().fold(0.0, f64::max);
+            eprintln!(
+                "stroke baseline {width}x{height}: frames={} counts={counts:?} frame_ms total={total:.0} mean={mean:.1} max={max:.1}",
+                frame_ms.len(),
+            );
+        }
+    }
+
+    /// The ticket-49 debug readout: the quit printout's line and the
+    /// flag-gated install the launch path takes.
+    mod invalidation_readout_tests {
+        use super::super::invalidation_counter::{self, InvalidationCounters};
+        use gpui_kit::TestAppContext;
+
+        /// The quit line carries all five tallies, labeled, in tally order.
+        #[test]
+        fn totals_line_labels_all_five_tallies() {
+            let counters = InvalidationCounters::default();
+            counters.root_notify.set(3);
+            counters.composite.set(5);
+            counters.frame_rebuild.set(5);
+            counters.thumbnail_regen.set(15);
+            counters.mask_thumbnail_regen.set(0);
+            assert_eq!(
+                counters.totals_line(),
+                "root_notify=3 composite=5 frame_rebuild=5 thumbnail_regen=15 mask_thumbnail_regen=0",
+            );
+        }
+
+        /// The install follows the flag and never doubles: a second request
+        /// (or the scenario tests' own `install`) finds the global present.
+        #[gpui_kit::test]
+        fn install_readout_follows_the_flag_and_never_doubles(cx: &mut TestAppContext) {
+            cx.update(|cx| {
+                assert!(invalidation_counter::install_readout(false, cx).is_none());
+                assert!(cx.try_global::<InvalidationCounters>().is_none());
+                assert!(invalidation_counter::install_readout(true, cx).is_some());
+                assert!(cx.try_global::<InvalidationCounters>().is_some());
+                assert!(invalidation_counter::install_readout(true, cx).is_none());
+            });
         }
     }
 

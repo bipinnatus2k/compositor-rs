@@ -1255,7 +1255,10 @@ impl EditorCanvasView {
         }
     }
 
-    fn begin_stroke(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
+    /// `pub(crate)` for the ticket-49 stroke scenario: the harness drives
+    /// the production stroke begin (paint target, guards, `RasterEdit::new`
+    /// and all).
+    pub(crate) fn begin_stroke(&mut self, doc: CGPoint, alt: bool, cx: &mut Context<Self>) {
         let Some(document) = self.session.read(cx).document.clone() else {
             return;
         };
