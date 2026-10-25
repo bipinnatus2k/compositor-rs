@@ -178,9 +178,11 @@ pub struct EditorCanvasView {
     /// The Shape tool's drag: the shape being placed and its current rect
     /// (`shapeDraft` lives on the session in Swift; the port carries the
     /// same data in the `CanvasDrag::Shape` gesture family — recorded
-    /// deviation, ticket 39's field audit).
-    shape_shape: Option<compositor_core::document::LayerShape>,
-    shape_rect: Option<CGRect>,
+    /// deviation, ticket 39's field audit). `pub(crate)` alongside `drag`
+    /// for the ticket-50 shape scenario, which drives the production move
+    /// branch.
+    pub(crate) shape_shape: Option<compositor_core::document::LayerShape>,
+    pub(crate) shape_rect: Option<CGRect>,
     /// The Type tool's in-progress box drag (`textBoxRect`).
     text_box_rect: Option<CGRect>,
     /// Where an external file drag hovers, in document coordinates — the
@@ -306,7 +308,20 @@ impl EditorCanvasView {
 }
 
 impl Render for EditorCanvasView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The retired frame textures leave the sprite atlas here (ticket
+        // 50, ADR 0004): gpui frees atlas tiles only through `drop_image`,
+        // and during a window update the current window is absent from
+        // `App::windows` — so the drop goes through this `Window` at the
+        // top of the render, before the new frame's scene references its
+        // own texture.
+        let retired = self
+            .app
+            .update(cx, |app, _| app.take_retired_frame_images())
+            .unwrap_or_default();
+        for image in retired {
+            window.drop_image(image).ok();
+        }
         // An empty tab shows the welcome form in place of a canvas (Swift's
         // `if session.document == nil { welcome }`, ContentView.swift:99-110 —
         // the tab-embedded NewCanvasSheet). The form is its own view entity
@@ -1629,7 +1644,9 @@ impl ProjectWorkspaceView {
     // MARK: Shape
 
     /// The shape the current drag places, from the tool's settings.
-    fn build_shape_for_drag(
+    /// `pub(crate)` for the ticket-50 shape scenario (the `begin_stroke`
+    /// precedent: the harness drives the production path).
+    pub(crate) fn build_shape_for_drag(
         &self,
         _rect: CGRect,
         cx: &App,

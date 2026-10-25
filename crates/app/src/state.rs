@@ -264,6 +264,12 @@ pub struct ProjectWorkspaceView {
     /// The tab the cached frame was rendered for — the cache key is
     /// `(tab_id, revision)`, so switching tabs never shows a stale frame.
     frame_image_tab: crate::project::TabId,
+    /// Frame textures retired by a cache rebuild, waiting for the canvas
+    /// render to drop them from the sprite atlas (ticket 50, ADR 0004):
+    /// gpui frees atlas tiles only through `drop_image`, and during a
+    /// window update the current window is absent from `App::windows`, so
+    /// the drop must go through the rendering `Window` itself.
+    retired_frame_images: Vec<Arc<RenderImage>>,
     /// The active tab's content (Swift `ContentView`, ADR 0003 step F /
     /// ticket 43): a fresh entity per tab, rebuilt by [`Self::sync_content`]
     /// whenever the workspace's selected tab changed — the `.id(workspace
@@ -436,6 +442,7 @@ impl ProjectWorkspaceView {
             frame_image: None,
             frame_image_rev: 0,
             frame_image_tab: crate::project::TabId::nil(),
+            retired_frame_images: Vec::new(),
             content: None,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
@@ -1064,10 +1071,20 @@ impl ProjectWorkspaceView {
 
     // MARK: Frame image
 
+    /// A 1×1 stand-in for the thumbnails of transient, composite-only
+    /// assets: nothing reads them (the layers panel keys the real
+    /// document's layers, and commit builds a fresh `ImportedImage` with a
+    /// real thumbnail), and the original draws no per-frame thumbnails —
+    /// the full-image resample these clones used to pay was pure drag-time
+    /// waste on every preview frame (ticket 50, ADR 0004).
+    fn transient_thumbnail() -> Bitmap {
+        Bitmap::new_clearing(1, 1, [0, 0, 0, 0])
+    }
+
     fn set_preview_layer(layer: &mut ImageLayer, pixels: &Bitmap, transform: LayerTransform) {
         layer.asset = Some(ImportedImage::with_thumbnail(
             pixels.clone(),
-            compositor_core::raster::thumbnail_of(pixels),
+            Self::transient_thumbnail(),
             layer.name.clone(),
         ));
         layer.transform = transform;
@@ -1160,7 +1177,13 @@ impl ProjectWorkspaceView {
                 rect.height().round() as usize,
             );
             let mut layer = ImageLayer::with_asset(
-                compositor_core::raster::ImportedImage::new(raster, String::new()),
+                // The transient clone's thumbnail is the placeholder — see
+                // `transient_thumbnail` (ticket 50).
+                compositor_core::raster::ImportedImage::with_thumbnail(
+                    raster,
+                    Self::transient_thumbnail(),
+                    String::new(),
+                ),
                 rect.origin,
             );
             layer.transform =
@@ -1206,7 +1229,9 @@ impl ProjectWorkspaceView {
     }
 
     /// The cached BGRA texture for the composite, rebuilt when the tab or the
-    /// revision changes (cache key `(tab_id, revision)` — design doc §1).
+    /// revision changes (cache key `(tab_id, revision)` — design doc §1). A
+    /// rebuild retires the previous texture into `retired_frame_images` for
+    /// the canvas render to drop from the sprite atlas (ticket 50).
     pub fn frame_image(&mut self, composite: &Bitmap, cx: &App) -> Arc<RenderImage> {
         let tab_id = self.workspace.read(cx).selected_id();
         if self.frame_image.is_none()
@@ -1214,11 +1239,20 @@ impl ProjectWorkspaceView {
             || self.frame_image_tab != tab_id
         {
             invalidation_counter::frame_rebuild(cx);
+            if let Some(retired) = self.frame_image.take() {
+                self.retired_frame_images.push(retired);
+            }
             self.frame_image = Some(bgra_render_image(composite));
             self.frame_image_rev = self.revision;
             self.frame_image_tab = tab_id;
         }
         self.frame_image.clone().unwrap()
+    }
+
+    /// Hands the retired frame textures to the canvas render, which drops
+    /// them from the sprite atlas through its `Window` (ticket 50).
+    pub(crate) fn take_retired_frame_images(&mut self) -> Vec<Arc<RenderImage>> {
+        std::mem::take(&mut self.retired_frame_images)
     }
 
     // MARK: Status
@@ -2081,7 +2115,9 @@ mod tests {
         use crate::ui::floating_panel::{PanelContent, panel_names};
         use compositor_core::document::LayerMask;
         use compositor_core::document::NavigationTool;
+        use compositor_core::document::ShapeKind;
         use compositor_core::geometry::CGPoint;
+        use compositor_core::geometry::CGRect;
         use compositor_core::raster::{Bitmap, ImportedImage};
         use compositor_core::session::EditorSession;
         use gpui_kit::component::slider::{SliderEvent, SliderValue};
@@ -2381,6 +2417,95 @@ mod tests {
                 ],
                 "stroke drag: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
             );
+        }
+
+        /// Shape-drag scenario (ticket 50): each move mirrors the move
+        /// branch's Shape arm (editor_canvas.rs, `CanvasDrag::Shape` in
+        /// `canvas_mouse_move`) — the rect from the
+        /// drag (the plain rectangle case of `shape_drag_rect`), the shape
+        /// from the production `build_shape_for_drag`, both stored on the
+        /// view, then the invalidation. One frame per move, like the stroke
+        /// scenario; the layers panel stays frozen because the preview
+        /// layer lives only in the composite's transient clone.
+        #[gpui_kit::test]
+        fn shape_drag_invalidation(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_stroke_document(&session, &mut cx, 256, 256);
+            session.update(&mut cx, |session, _| {
+                session.tool = NavigationTool::Shape;
+                session.shape_kind = ShapeKind::Rectangle;
+            });
+            let canvas = canvas_view(&root, &cx);
+            render_frame(&mut cx); // warm the caches; the tallies start clean
+
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            let start = CGPoint::new(32.0, 32.0);
+            canvas.update(&mut cx, |view, cx| {
+                view.set_drag(Some(CanvasDrag::Shape { start }), cx)
+            });
+            for step in 0..STROKE_MOVES {
+                let doc = CGPoint::new(
+                    32.0 + (step + 1) as f64 * 20.0,
+                    32.0 + (step + 1) as f64 * 14.0,
+                );
+                canvas.update(&mut cx, |view, cx| {
+                    if let Some(CanvasDrag::Shape { start }) = view.drag {
+                        let rect = CGRect::new(start.x, start.y, doc.x - start.x, doc.y - start.y);
+                        let shape = view
+                            .app
+                            .update(cx, |app, cx| app.build_shape_for_drag(rect, cx))
+                            .expect("the root view");
+                        view.shape_shape = Some(shape);
+                        view.shape_rect = Some(rect);
+                    }
+                    view.touch(cx);
+                });
+            }
+            let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            assert_eq!(
+                counts,
+                [
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64,
+                    0,
+                    0
+                ],
+                "shape drag: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
+        }
+
+        /// Ticket 50: replacing the frame texture must retire the old one
+        /// from the sprite atlas — gpui frees atlas tiles only through
+        /// `drop_image`, so without the recycle every frame rebuild leaves
+        /// a full-canvas tile behind (a 12MP canvas is ~63 tiles against
+        /// the atlas's 16384-tile budget).
+        #[gpui_kit::test]
+        fn frame_image_recycles_the_retired_texture(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_layers(&mut cx, &session, 0);
+            render_frame(&mut cx); // the first texture lands in the atlas
+
+            let first = root.read_with(&cx, |root, _| root.frame_image.clone().unwrap());
+            cx.update(|window, _| assert!(window.has_image_atlas_entry(&first)));
+            // Any document mutation bumps the revision; the next frame
+            // builds a new texture and retires the first.
+            root.update(&mut cx, |root, cx| root.touch(cx));
+            render_frame(&mut cx);
+            let second = root.read_with(&cx, |root, _| root.frame_image.clone().unwrap());
+            cx.update(|window, _| {
+                assert!(
+                    !window.has_image_atlas_entry(&first),
+                    "the retired texture left the atlas"
+                );
+                assert!(window.has_image_atlas_entry(&second));
+            });
         }
 
         /// The ADR 0004 baseline scenarios (ticket 49): real-sized documents

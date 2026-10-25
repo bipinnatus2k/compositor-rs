@@ -145,8 +145,8 @@ debuginfo`，非纯 debug）；每帧 = 生产 move 分支（append + invalidate
 
 | 场景 | 基线（2026-10-25） | 票 50 后 | 票 51 后 | 票 52 后 | 票 53 后 |
 |---|---|---|---|---|---|
-| 1200×900 / 100px 软笔刷 / 41 帧 | counts [40, 42, 41, 1, 0]；337ms 均值 / 440ms 峰值 | | | | |
-| 4000×3000 / 同上 / 13 帧 | counts [12, 14, 13, 1, 0]；2714ms 均值 / 3029ms 峰值 | | | | |
+| 1200×900 / 100px 软笔刷 / 41 帧 | counts [40, 42, 41, 1, 0]；337ms 均值 / 440ms 峰值 | 208ms 均值（-38%）/ 452ms 峰值（首帧含建档噪声，均值为准） | | | |
+| 4000×3000 / 同上 / 13 帧 | counts [12, 14, 13, 1, 0]；2714ms 均值 / 3029ms 峰值 | 1120ms 均值（-59%）/ 1709ms 峰值 | | | |
 
 （counts 为 (root_notify, composite, frame_rebuild, thumbnail_regen,
 mask)；数字取 invalidation_counter 计数 + 帧耗时 min/mean/max，口径由票 49
@@ -155,6 +155,9 @@ mask)；数字取 invalidation_counter 计数 + 帧耗时 min/mean/max，口径�
 
 ## Future work
 
+- **纹理回收的两个低频替换点**（票 50 复查披露）：`refresh_jpeg_preview`
+  与图层面板缩略图缓存的纹理替换尚未接 `drop_image`——低频小额，随票 52
+  的纹理生命周期重构一并收口。
 - **gpui-fast 局部重绘研究**（用户裁定）：gpui-kit 升级到可配 gpui-fast
   引擎的版本后，评估画布作用域失效/局部重绘如何接入本模型（补丁叠画与
   局部重绘正交，可叠加）。
