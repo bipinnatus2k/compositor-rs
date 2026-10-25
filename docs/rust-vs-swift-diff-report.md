@@ -4,6 +4,30 @@
 - 对比方法：按 8 个功能域逐文件通读两侧代码，逐公式/常量/守卫核对；关键结论均经 grep/Read 复核行号。
 - 日期：2026-09-24。所有路径为仓库根相对路径。
 
+## 记录补全（2026-10-25：票 48——第三轮 parity 审查的记录义务收口）
+
+2026-10-12 第三轮全项目 parity 审查（六个分区并行）发现的"缺口已存在但
+无偏差记录"三项，按 §1 的代码注释 + docs 双记录义务补账。均为记录，不
+改行为（蚂蚁线注释除外——原文失实）。
+
+- **CompositorUITests 不移植（裁定留痕）**：`CompositorUITests/
+  CompositorUITests.swift`、`CompositorUITestsLaunchTests.swift` 两个
+  XCUITest 文件不移植。XCUITest 是宿主应用的启动/UI 自动化测试，gpui
+  侧无对应设施；app 层行为以 `#[gpui::test]` 实体测试覆盖（见
+  `state.rs` 的 panel/invalidation 场景）。此前 README/docs 零提及，
+  在此记录为有意不移植。
+- **DownsampleCache 身份键 LRU 缓存缺失（性能向，实现留待 profile 票）**：
+  Swift `Rendering/DownsampleCache.swift` 以身份键缓存 halving 结果
+  （1 亿像素预算、LRU 淘汰），避免每次绘制重算降采样链；Rust 已移植
+  档位算法（`downsample_level`，diff report §6.1-12/表 11-12）但无任何
+  缓存，每次绘制全量重算 halving。语义无损、纯性能缺口；待失效卫生
+  （票 37 同款）量测后立票实现。
+- **蚂蚁线 dash 无相位动画**：Swift 选区蚂蚁线的黑虚线带相位动画
+  （EditorCanvas.swift:2001-2015 一带，0.12s 周期）；Rust
+  `editor_canvas.rs` 画静态 4/4 dash（颜色已于 2026-09-28 批次对齐——
+  白实线底 + 黑虚线上层，§8 表 14 的"颜色相反"半边已闭合）。原注释
+  自称 "animated" 与实现不符，已改为如实描述；动画缺口留票待做。
+
 ## 架构裁定（2026-10-10：废除 AppState 票 37——失效卫生：缩略图内容键控 + bypass 统一 + 失效仪表，ADR 0003 步 G）
 
 ADR 0003 票序 G（性能票，量测先行：数字来自票内新建的失效计数仪表，

@@ -2640,8 +2640,10 @@ fn paint_scene(scene: &CanvasScene, bounds: Bounds<Pixels>, window: &mut Window)
         paint_line(window, bounds, *position, *vertical, rgba(0x00c8ffcc));
     }
 
-    // Selection outline: a white solid line under an animated black dash
-    // (TransformOverlay.drawSelection's marching ants).
+    // Selection outline: a white solid line under a static black dash.
+    // Swift's marching ants animate the dash phase
+    // (TransformOverlay.drawSelection); the port paints them still — the
+    // animation gap is recorded in the diff report.
     for ring in &scene.selection {
         if ring.len() >= 3 {
             paint_polygon(window, ring, rgba(0xffffffff), false);
