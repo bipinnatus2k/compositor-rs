@@ -27,13 +27,16 @@ use crate::tools::brush::RasterEdit;
 use crate::transform::{LayerSampling, LayerTransform, TransformEdit, TransformGroup};
 use uuid::Uuid;
 // Split impls (verbatim moves; one file per Swift extension boundary).
+mod adjustment_editing;
 mod brush;
 pub use brush::LastBrushPoint;
 mod crop;
+mod effects;
 mod gradient;
 mod history;
 mod layer_groups;
 mod mask;
+mod projects;
 mod selection;
 mod text;
 
@@ -646,39 +649,6 @@ impl EditorSession {
 
     // MARK: Document
 
-    /// `createDocument` — File > New. `isProjectBusy`/`isImporting` join
-    /// the size guard (EditorSession.swift:893-895).
-    pub fn create_document(&mut self, width: usize, height: usize, empty_layer: bool) {
-        if self.is_project_busy
-            || self.is_importing
-            || !(1..=30_000).contains(&width)
-            || !(1..=30_000).contains(&height)
-        {
-            return;
-        }
-        self.commit_transform();
-        self.begin_edit("New Canvas");
-        let mut document = CanvasDocument::new(width, height);
-        let layer = if empty_layer {
-            Some(ImageLayer::blank("Layer 1", document.size()))
-        } else {
-            None
-        };
-        let layer_id = layer.as_ref().map(|l| l.id);
-        if let Some(layer) = layer {
-            document.layers = vec![layer];
-        }
-        self.document = Some(document);
-        self.active_layer_id = layer_id;
-        self.selected_layer_ids = layer_id.map(|i| vec![i]).unwrap_or_default();
-        self.history.end(&self.document, self.active_layer_id);
-        // `viewport.fit(documentSize: document.size)` (EditorSession.swift:904).
-        if let Some(size) = self.document_size() {
-            self.viewport.fit(size);
-        }
-        self.shows_new_document = false;
-    }
-
     pub fn document_size(&self) -> Option<CGSize> {
         self.document.as_ref().map(|d| d.size())
     }
@@ -725,102 +695,6 @@ impl EditorSession {
 
     pub fn selection(&self) -> Option<&DocumentSelection> {
         self.document.as_ref()?.selection.as_ref()
-    }
-
-    // MARK: Projects
-
-    /// `EditorSession.installProject(_:from:)`
-    /// (Document/EditorSession+Projects.swift:20-40). Called only after the
-    /// whole package has validated and loaded; replaces the document and all
-    /// project state in one go. The live session is untouched on error.
-    pub fn install_project(
-        &mut self,
-        data: &crate::project::ProjectData,
-        url: &std::path::Path,
-    ) -> Result<(), crate::project::ProjectError> {
-        // `document_from_project` revalidates, so a hand-built `ProjectData`
-        // cannot smuggle in damaged metadata.
-        let (document, active_layer_id) = crate::project::document_from_project(data)?;
-        self.collapsed_group_ids.clear();
-        self.is_mask_selected = false;
-        self.cancel_crop();
-        // A pending gradient recorded against the old document must not leak
-        // into the freshly installed one (apply_gradient commits by draft
-        // layer id; dropping the draft keeps that safe).
-        self.gradient_edit = None;
-        self.guide_drag = None;
-        self.transform_edit = None;
-        self.active_layer_id = active_layer_id;
-        self.selected_layer_ids = active_layer_id.map(|id| vec![id]).unwrap_or_default();
-        self.document = Some(document);
-        self.project_url = Some(url.to_path_buf());
-        self.history.reset();
-        // `viewport.fit(documentSize: document!.size)` — installProject's
-        // last line (EditorSession+Projects.swift:39).
-        if let Some(size) = self.document_size() {
-            self.viewport.fit(size);
-        }
-        Ok(())
-    }
-
-    /// `EditorSession.clearProject` (Document/EditorSession+Projects.swift:42-53):
-    /// File > New / close without a workspace. Everything the open project
-    /// owned is dropped and the session is left as a fresh, empty canvas.
-    pub fn clear_project(&mut self) {
-        self.collapsed_group_ids.clear();
-        self.is_mask_selected = false;
-        self.cancel_crop();
-        self.gradient_edit = None;
-        self.transform_edit = None;
-        self.guide_drag = None;
-        self.document = None;
-        self.active_layer_id = None;
-        self.selected_layer_ids = Vec::new();
-        self.project_url = None;
-        self.history.reset();
-    }
-
-    // MARK: Project-operation guards
-
-    /// `canStartProjectOperation` (EditorSession.swift:150-152), condition
-    /// for condition — complete since stage-D ticket 35 moved the last four
-    /// flags (`showsImporter`, `renamingLayerID`, `importError`,
-    /// `showsConversionSheet`) in.
-    pub fn can_start_project_operation(&self) -> bool {
-        self.selection_amount_operation.is_none() // selectionAmountOperation == nil
-            && self.text_draft.is_none() // textDraft == nil
-            && !self.is_project_busy // !isProjectBusy
-            && !self.is_importing // !isImporting
-            && !self.has_brush_stroke // brushStroke == nil && warpStroke == nil
-            && self.levels.is_none() // levels == nil
-            && !self.shows_new_document // !showsNewDocument
-            && !self.shows_importer // !showsImporter
-            && self.renaming_layer_id.is_none() // renamingLayerID == nil
-            && self.import_error.is_none() // importError == nil
-            && self.adjustment_editing_id.is_none() // adjustmentEditingID == nil
-            && !self.shows_conversion_sheet // !showsConversionSheet
-    }
-
-    /// `ProjectController.begin` (ProjectController.swift:16-22), moved onto
-    /// the session with the busy flag it guards: refuse unless
-    /// `can_start_project_operation`, then cancel a pending crop, commit a
-    /// pending transform, and hold `is_project_busy` until the matching
-    /// [`EditorSession::end_project_access`] (Swift's per-flow `defer` /
-    /// the app's two-phase `finish_*`).
-    pub fn begin_project_access(&mut self) -> bool {
-        if !self.can_start_project_operation() {
-            return false;
-        }
-        self.cancel_crop();
-        self.commit_transform();
-        self.is_project_busy = true;
-        true
-    }
-
-    /// Releases the project-busy hold taken by
-    /// [`EditorSession::begin_project_access`].
-    pub fn end_project_access(&mut self) {
-        self.is_project_busy = false;
     }
 
     // MARK: Layers
@@ -1414,119 +1288,6 @@ impl EditorSession {
             NavigationTool::Gradient => self.gradient_settings.opacity = value,
             _ => self.set_selected_layers_opacity(value),
         }
-    }
-
-    // MARK: Adjustment editing (AdjustmentEditing.swift)
-
-    /// `beginAdjustmentEditing(_:)` — opens the editors on the adjustment
-    /// layer `id` (the menu passes the active layer). One undo step named
-    /// "Edit X Adjustment" folds every preview until
-    /// `finish_adjustment_editing` closes it. Refuses while an editor is
-    /// already open or the layer carries no adjustment.
-    pub fn begin_adjustment_editing(&mut self, id: Uuid) -> bool {
-        if self.adjustment_editing_id.is_some()
-            || self.adjustment_original.is_some()
-            || self.levels.is_some()
-            || self.hue_saturation.is_some()
-            || self.filter_edit.is_some()
-        {
-            return false;
-        }
-        let Some(adjustment) = self
-            .document
-            .as_ref()
-            .and_then(|document| document.layer(id))
-            .and_then(|layer| layer.adjustment.clone())
-        else {
-            return false;
-        };
-        self.adjustment_editing_id = Some(id);
-        self.adjustment_original = Some(adjustment.clone());
-        self.begin_edit(&format!("Edit {} Adjustment", adjustment.kind.label()));
-        true
-    }
-
-    /// `editedAdjustment` — the opening value overlaid with the open editors'
-    /// settings. None while no edit is open, or when the kind's editor is
-    /// missing (Invert has none: nothing to carry back).
-    pub fn edited_adjustment(&self) -> Option<crate::adjustment::LayerAdjustment> {
-        use crate::adjustment::AdjustmentKind;
-        let mut value = self.adjustment_original.clone()?;
-        match value.kind {
-            // Nothing to carry back: Invert has no settings.
-            AdjustmentKind::Invert => {}
-            AdjustmentKind::Levels => value.levels = self.levels?,
-            AdjustmentKind::Hsv => value.hsv_settings = Some(self.hue_saturation.clone()?),
-            _ => {
-                let settings = self.filter_edit.as_ref()?;
-                match value.kind {
-                    AdjustmentKind::Exposure => value.set_exposure(settings.exposure),
-                    AdjustmentKind::GradientMap => value.set_gradient_map(settings.gradient_map),
-                    AdjustmentKind::Grain => value.set_grain(settings.grain),
-                    AdjustmentKind::BlackWhite => value.set_black_white(settings.black_white),
-                    AdjustmentKind::ColorBalance => value.set_color_balance(settings.color_balance),
-                    AdjustmentKind::GaussianBlur => value.set_gaussian_radius(settings.radius),
-                    AdjustmentKind::MotionBlur => {
-                        value.set_motion_angle(settings.angle);
-                        value.set_motion_distance(settings.distance);
-                    }
-                    AdjustmentKind::AddNoise => {
-                        value.set_noise_amount(settings.amount);
-                        value.noise_gaussian = Some(settings.gaussian);
-                        value.noise_monochromatic = Some(settings.monochromatic);
-                    }
-                    // Curves (and any filter kind without a slot of its own).
-                    _ => value.curves = settings.curves.clone(),
-                }
-            }
-        }
-        Some(value)
-    }
-
-    /// `previewAdjustmentEditing(preview:)` — pushes the editors' settings
-    /// into the edited layer (or restores the opening value), which the
-    /// canvas renders live. Stays bound to the layer the edit opened on,
-    /// whatever the active layer is by now.
-    pub fn preview_adjustment_editing(&mut self, preview: bool) -> bool {
-        let Some(id) = self.adjustment_editing_id else {
-            return false;
-        };
-        let Some(original) = self.adjustment_original.clone() else {
-            return false;
-        };
-        let Some(value) = self.edited_adjustment() else {
-            return false;
-        };
-        self.update_adjustment(id, if preview { value } else { original });
-        true
-    }
-
-    /// `finishAdjustmentEditing(commit:)` — OK keeps the editors' settings;
-    /// Cancel (including the window close button) restores the opening
-    /// value. Either way the editors close and the folded undo step ends.
-    pub fn finish_adjustment_editing(&mut self, commit: bool) -> bool {
-        let Some(id) = self.adjustment_editing_id else {
-            return false;
-        };
-        let Some(original) = self.adjustment_original.clone() else {
-            return false;
-        };
-        self.update_adjustment(
-            id,
-            if commit {
-                self.edited_adjustment().unwrap_or_else(|| original.clone())
-            } else {
-                original.clone()
-            },
-        );
-        self.levels = None;
-        self.hue_saturation = None;
-        self.filter_edit = None;
-        self.end_edit();
-        self.adjustment_original = None;
-        self.adjustment_editing_id = None;
-        self.canvas_focus_request += 1;
-        true
     }
 
     // MARK: Import pipeline (EditorSession+Import / ImageImporter)

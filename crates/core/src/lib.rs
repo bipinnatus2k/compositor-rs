@@ -31,7 +31,6 @@ pub mod adjust;
 pub mod adjustment;
 pub mod canvas;
 pub mod color_picker;
-pub mod effects_session;
 pub mod export;
 pub mod filters;
 pub mod project;
