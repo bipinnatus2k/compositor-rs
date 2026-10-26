@@ -53,6 +53,17 @@ move 全文档重合成（每层整图深拷贝、effects 缓存每帧清空）�
   键采用 `Arc<Bitmap>` 指针身份（对应 `ObjectIdentifier`）。
 - **缩略图时机对齐**：描边期间图层缩略图冻结、mouse-up 提交时更新（票
   50）——对齐 `commitPaintSnapshot` 语义，非偏差。
+- **票 51 落地（2026-10-25）**：①`composite_onto_interactive` 不再无条件清
+  effects 缓存——清理由 app 主路径按手势分流（非描边帧全清保安全，描边帧
+  只丢活动层条目）；export/缩略图等直接调 `draw_live_composite` 的路径依赖
+  该主帧清的跨文件纪律（当前流程窗口≈0，效果缓存键含像素 Arc 身份，像素
+  变更自然 miss）。②合成缓存落地为逐层 placement 缓存而非 below/above 双
+  段（见 ADR 0004 裁定 10 的落地修订：任意混合模式逐位精确、clip 依赖层
+  与 adjustment/stack 不缓存）。③蒙版整图拷贝点（`mask_gray_as_bitmap`
+  等）未收敛——蒙版像素无 Arc 身份可键控，留待票 54 身份键体系一并处理。
+- **票 53 前的剩余大头**：`effective_coverage` 每 move 全段重积分（描边越
+  长越贵，平方级）——瓦片化+permanent 增量是票 53 的目标，票 51 的增量
+  result 已把 compose 限制到脏区。
 
 ## 架构裁定（2026-10-10：废除 AppState 票 37——失效卫生：缩略图内容键控 + bypass 统一 + 失效仪表，ADR 0003 步 G）
 

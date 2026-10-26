@@ -79,6 +79,17 @@ the_reference`（`brush.rs:2403`）等测试用 `assert_bit_identical` 把重构
 10. **合成缓存切分**（Q11）：活动层 below/above **双段**持久缓冲，键挂文档
     revision——描边层上方图层必须盖在描边之上，单段缓存不成立；对齐
     `TiledPieceCache` 只缓存已提交 raster 的 piece 语义。
+    **落地修订（票 51，2026-10-25）**：实现为**逐层 placement 缓存**
+    （`PlacementCache`：每层按 `draw_layer_full` 渲到"落版"为止、缓存之、
+    每帧只重跑同一 `blend_bitmap_onto` 尾段）——严格强于 below/above：
+    src-over 结合律保证 below 拍平与 above 逐层重 blend 逐位精确，但
+    above 层带非 Normal 混合模式或 above 有 adjustment 层时双段方案必须
+    回退；逐层缓存对任意混合模式都精确（重跑真实 blend），仅 adjustment
+    层、clip stack 成员、clip 依赖层（placement 会烘进 fresh 层变化的
+    coverage）与 fresh 层本身不缓存。缓存键 (tab, revision)——live epoch
+    刻意不在键内（缓存就是要跨描边 move 存活）；预算对齐原版
+    TiledPieceCache 的 150M 像素。等价性由
+    `placement_cache_walk_matches_the_full_composite` 逐位钉死。
 11. **补丁形状**（Q12）：单张覆盖触及瓦片的 bbox 补丁纹理一次叠画，非逐
     瓦片多补丁——内容同源、仅打包粒度不同，偏差记 diff report。
 12. **DownsampleCache 键**（Q13）：`Arc<Bitmap>` 指针身份（对应
@@ -145,8 +156,12 @@ debuginfo`，非纯 debug）；每帧 = 生产 move 分支（append + invalidate
 
 | 场景 | 基线（2026-10-25） | 票 50 后 | 票 51 后 | 票 52 后 | 票 53 后 |
 |---|---|---|---|---|---|
-| 1200×900 / 100px 软笔刷 / 41 帧 | counts [40, 42, 41, 1, 0]；337ms 均值 / 440ms 峰值 | 208ms 均值（-38%）/ 452ms 峰值（首帧含建档噪声，均值为准） | | | |
-| 4000×3000 / 同上 / 13 帧 | counts [12, 14, 13, 1, 0]；2714ms 均值 / 3029ms 峰值 | 1120ms 均值（-59%）/ 1709ms 峰值 | | | |
+| 1200×900 / 100px 软笔刷 / 41 帧 | counts [40, 42, 41, 1, 0]；337ms 均值 / 440ms 峰值 | 208ms 均值（-38%）/ 452ms 峰值（首帧含建档噪声，均值为准） | 186ms 均值（-45% 累计）/ 268ms 峰值 | | |
+| 4000×3000 / 同上 / 13 帧 | counts [12, 14, 13, 1, 0]；2714ms 均值 / 3029ms 峰值 | 1120ms 均值（-59%）/ 1709ms 峰值 | 1064ms 均值（-61% 累计）/ 1250ms 峰值 | | |
+
+（单图层文档上票 51 的收益有限——无邻居层可缓存；其收益在多层文档的
+placement 缓存与描边引擎的增量 compose。剩余大头是覆盖率全量重积分，票
+53 的目标。）
 
 （counts 为 (root_notify, composite, frame_rebuild, thumbnail_regen,
 mask)；数字取 invalidation_counter 计数 + 帧耗时 min/mean/max，口径由票 49

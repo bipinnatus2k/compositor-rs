@@ -271,6 +271,14 @@ impl EditorCanvasView {
         self.app.update(cx, |app, cx| app.touch(cx)).ok();
     }
 
+    /// The live-preview variant (ticket 51): the move handler's per-tick
+    /// repaint bumps the shell's live epoch — the frame rebuilds, the
+    /// document revision and the composite caches stay put until the
+    /// gesture commits through `touch` on mouse-up.
+    pub(crate) fn touch_live(&mut self, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| app.touch_live(cx)).ok();
+    }
+
     /// The active tab's view transform (`CanvasViewport` is `Copy`). Reads
     /// this view's session directly, mirroring Swift's `session.viewport`
     /// reads; the app-side twins (`ProjectWorkspaceView`'s `canvas_viewport` family)
@@ -1054,7 +1062,10 @@ impl EditorCanvasView {
             }
             None => return false,
         }
-        self.touch(cx);
+        // Every move arm funnels here: the tick is a live preview (the
+        // drag's result stays uncommitted until mouse-up), so the shell's
+        // live epoch — not the document revision — moves (ticket 51).
+        self.touch_live(cx);
         sync_fields
     }
 

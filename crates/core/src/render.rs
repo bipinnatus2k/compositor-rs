@@ -55,6 +55,16 @@ pub fn clear_effects_cache() {
     EFFECTS_CACHE.with(|c| c.borrow_mut().clear());
 }
 
+/// Drops one layer's effects entries, keeping every other layer's (ticket
+/// 51): a stroke re-renders the active layer's effects every move — its
+/// pixels are a fresh grid — so its entries would only churn the cache's
+/// few slots.
+pub fn clear_effects_cache_for(layer_id: uuid::Uuid) {
+    EFFECTS_CACHE.with(|c| {
+        c.borrow_mut().retain(|(id, _, _, _)| *id != layer_id);
+    });
+}
+
 /// A layer's own pixels placed on the document (no blend/opacity), the way
 /// `LayerRenderer.draw` draws into a context.
 pub fn draw_layer_pixels(image: &Bitmap, transform: &LayerTransform, dst: &mut Bitmap) {
@@ -266,12 +276,106 @@ pub fn composite_onto(canvas: &mut Bitmap, document: &CanvasDocument) {
 
 /// `composite_onto` with the interactive flag: mask resamples cap at 2048
 /// pixels across while a transform edit drives the placements.
+///
+/// The effects cache is NOT cleared here (ticket 51, ADR 0004): entries key
+/// on the pixels' `Arc` identity, so changed pixels re-render and unchanged
+/// layers hit. The caller decides the clearing policy — the app clears fully
+/// on non-stroke frames (mask edits carry no pixel identity into the key)
+/// and drops only the stroked layer's entries on stroke frames.
 pub fn composite_onto_interactive(
     canvas: &mut Bitmap,
     document: &CanvasDocument,
     interactive: bool,
 ) {
-    clear_effects_cache();
+    let (order, mut ctx) = render_plan(document, (canvas.width, canvas.height), interactive);
+    walk_composite(canvas, &order, &mut ctx, None, None);
+}
+
+/// The stroke-frame composite (ticket 51, ADR 0004): each self-contained
+/// plain layer reads its cached placement and re-blends it against the
+/// canvas behind it — the same blend call the uncached path makes, so the
+/// output is bit-identical to [`composite_onto_interactive`] (the tests pin
+/// it). `fresh` names the layer whose pixels change per frame (the stroke
+/// target); layers clipped by a live-clipping source also render fresh,
+/// since their placement would bake the source's changing coverage.
+/// Adjustment layers and clipping stacks always render fresh — their output
+/// depends on the canvas behind them — and the caller clears the cache
+/// whenever the document revision moves.
+pub fn composite_onto_with_placements(
+    canvas: &mut Bitmap,
+    document: &CanvasDocument,
+    placements: &mut PlacementCache,
+    fresh: Option<uuid::Uuid>,
+    interactive: bool,
+) {
+    let (order, mut ctx) = render_plan(document, (canvas.width, canvas.height), interactive);
+    walk_composite(canvas, &order, &mut ctx, Some(placements), fresh);
+}
+
+/// The per-layer placement cache (ticket 51): plain layers rendered exactly
+/// as `draw_layer_full` renders them, minus the final blend. The app owns
+/// the cache and clears it whenever the document revision or tab moves;
+/// entries are keyed by layer id, so a layer's stale entry can never
+/// survive a revision (the whole cache dies with it).
+#[derive(Default)]
+pub struct PlacementCache {
+    entries: HashMap<uuid::Uuid, LayerPlacement>,
+    total_pixels: usize,
+}
+
+/// One cached placement: the layer as it lands on the canvas (pixels,
+/// effects, masks and clipping coverage baked in) plus the blend mode the
+/// final blend needs. The effective opacity stays with the walk's context.
+pub struct LayerPlacement {
+    placed: Bitmap,
+    blend_mode: crate::blend::LayerBlendMode,
+}
+
+impl PlacementCache {
+    pub fn get(&self, id: uuid::Uuid) -> Option<&LayerPlacement> {
+        self.entries.get(&id)
+    }
+
+    pub fn insert(
+        &mut self,
+        id: uuid::Uuid,
+        placed: Bitmap,
+        blend_mode: crate::blend::LayerBlendMode,
+    ) {
+        self.total_pixels += placed.width * placed.height;
+        self.entries
+            .insert(id, LayerPlacement { placed, blend_mode });
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.total_pixels = 0;
+    }
+
+    /// The sum of cached placement pixels — the caller's memory-budget input
+    /// (the original's TiledPieceCache caps its LRU the same way).
+    pub fn total_pixels(&self) -> usize {
+        self.total_pixels
+    }
+}
+
+impl LayerPlacement {
+    pub fn placed(&self) -> &Bitmap {
+        &self.placed
+    }
+
+    pub fn blend_mode(&self) -> crate::blend::LayerBlendMode {
+        self.blend_mode
+    }
+}
+
+/// The shared walk state: render order, folder-multiplied opacities,
+/// clipping stacks and the coverage cache.
+fn render_plan<'a>(
+    document: &'a CanvasDocument,
+    canvas_size: (usize, usize),
+    interactive: bool,
+) -> (Vec<&'a crate::document::ImageLayer>, RenderContext<'a>) {
     let order = document.render_layers();
     let by_id: HashMap<uuid::Uuid, &crate::document::ImageLayer> =
         document.layers.iter().map(|l| (l.id, l)).collect();
@@ -280,7 +384,7 @@ pub fn composite_onto_interactive(
         .map(|l| (l.id, effective_opacity(l, &by_id)))
         .collect();
     let (stacks, stacked) = prepare_stacks(&order);
-    let mut ctx = RenderContext {
+    let ctx = RenderContext {
         document,
         by_id,
         opacities,
@@ -288,9 +392,23 @@ pub fn composite_onto_interactive(
         stacked,
         coverage: HashMap::new(),
         visiting: std::collections::HashSet::new(),
-        canvas_size: (canvas.width, canvas.height),
+        canvas_size,
         interactive,
     };
+    (order, ctx)
+}
+
+/// The composite walk both entry points share. With a cache, plain layers
+/// read their placement (or render-and-store) and re-blend against the
+/// canvas; without one, every layer renders fresh and blends — the same
+/// `render_layer_placement` + `blend_bitmap_onto` pair either way.
+fn walk_composite(
+    canvas: &mut Bitmap,
+    order: &[&crate::document::ImageLayer],
+    ctx: &mut RenderContext,
+    mut placements: Option<&mut PlacementCache>,
+    fresh: Option<uuid::Uuid>,
+) {
     let mut i = 0;
     while i < order.len() {
         let layer = order[i];
@@ -302,20 +420,57 @@ pub fn composite_onto_interactive(
         // of drawing pixels (`LiveMaskRenderer.drawComposite`).
         if let Some(adjustment) = &layer.adjustment {
             if layer.mask_source_id.is_none() && adjustment.is_valid() {
-                apply_adjustment_layer(canvas, &ctx, layer);
+                apply_adjustment_layer(canvas, ctx, layer);
             }
             i += 1;
             continue;
         }
         if let Some(children) = ctx.stacks.get(&layer.id).cloned() {
-            draw_clipping_stack(canvas, &mut ctx, layer, &children);
+            draw_clipping_stack(canvas, ctx, layer, &children);
             i += 1 + children.len();
             continue;
         }
         let clip = layer
             .mask_source_id
             .and_then(|source_id| ctx.coverage_of(source_id).cloned());
-        draw_layer_full(canvas, &ctx, layer, clip.as_ref());
+        // A layer clipped by a live-clipping source bakes that source's
+        // coverage into its placement — coverage that changes when the
+        // source is the fresh layer — so clip-dependent layers render
+        // fresh too (ticket 51's cache covers self-contained layers only).
+        let cacheable = fresh != Some(layer.id) && layer.mask_source_id.is_none();
+        match placements
+            .as_deref()
+            .filter(|_| cacheable)
+            .and_then(|cache| cache.get(layer.id))
+        {
+            Some(entry) => {
+                let opacity = ctx.opacity_of(layer.id);
+                blend_bitmap_onto(canvas, entry.placed(), entry.blend_mode(), opacity as f32);
+            }
+            None => {
+                if let Some((placed, mode)) =
+                    render_layer_placement((canvas.width, canvas.height), ctx, layer, clip.as_ref())
+                {
+                    match placements.as_deref_mut().filter(|_| cacheable) {
+                        Some(cache) => {
+                            cache.insert(layer.id, placed, mode);
+                            let entry = cache.get(layer.id).expect("just inserted");
+                            let opacity = ctx.opacity_of(layer.id);
+                            blend_bitmap_onto(
+                                canvas,
+                                entry.placed(),
+                                entry.blend_mode(),
+                                opacity as f32,
+                            );
+                        }
+                        None => {
+                            let opacity = ctx.opacity_of(layer.id);
+                            blend_bitmap_onto(canvas, &placed, mode, opacity as f32);
+                        }
+                    }
+                }
+            }
+        }
         i += 1;
     }
 }
@@ -425,30 +580,55 @@ fn prepare_stacks(
 }
 
 /// Draws one layer as it draws itself (`EditorCanvas.drawOwn` +
-/// `LayerRenderer.draw`): pixels through the transform, effects with the mask
-/// baked in, then the own mask, folder masks and an optional live-clipping
-/// coverage multiplying where it lands, and finally its blend mode at its
-/// effective opacity. `clip` is a canvas-sized alpha from a clipping source.
+/// `LayerRenderer.draw`): the placement rendered through
+/// [`render_layer_placement`], then the blend onto the target with the
+/// layer's effective opacity and blend mode.
 fn draw_layer_full(
     target: &mut Bitmap,
     ctx: &RenderContext,
     layer: &crate::document::ImageLayer,
     clip: Option<&Bitmap>,
 ) {
+    if let Some((placed, mode)) =
+        render_layer_placement((target.width, target.height), ctx, layer, clip)
+    {
+        let opacity = ctx.opacity_of(layer.id);
+        blend_bitmap_onto(target, &placed, mode, opacity as f32);
+    }
+}
+
+/// `draw_layer_full`'s first half (`LayerRenderer.draw`): pixels through the
+/// transform, effects with the mask baked in, then the own mask, folder
+/// masks and an optional live-clipping coverage multiplying where it lands.
+/// The final blend is left to the caller so the placement cache (ticket 51)
+/// can store the result and re-blend it against the live canvas — the same
+/// `blend_bitmap_onto` call either way, so the two paths agree bit for bit.
+/// `clip` is a canvas-sized alpha from a clipping source.
+fn render_layer_placement(
+    size: (usize, usize),
+    ctx: &RenderContext,
+    layer: &crate::document::ImageLayer,
+    clip: Option<&Bitmap>,
+) -> Option<(Bitmap, crate::blend::LayerBlendMode)> {
     let mut transform = layer.transform;
     // A shape layer without committed pixels draws its shape live, which is
-    // what keeps it editable.
-    let mut pixels = match &layer.shape {
+    // what keeps it editable. The asset path borrows the pixels through
+    // their `Arc` — the render only reads, so the deep copy this used to
+    // pay per layer per composite is gone (ticket 51's Arc-ification); the
+    // shape path and the effects growth below produce owned buffers.
+    let shape_pixels = match &layer.shape {
         Some(shape) if layer.asset.is_none() => {
             let w = transform.size.width.round().max(1.0) as usize;
             let h = transform.size.height.round().max(1.0) as usize;
-            render_shape_image(shape, w, h)
+            Some(render_shape_image(shape, w, h))
         }
-        _ => match &layer.asset {
-            Some(asset) => asset.image.as_ref().clone(),
-            None => return,
-        },
+        _ => None,
     };
+    let mut owned_pixels = shape_pixels;
+    let mut pixels: &Bitmap = owned_pixels
+        .as_ref()
+        .map(|p| p as &Bitmap)
+        .or_else(|| layer.asset.as_ref().map(|asset| asset.image.as_ref()))?;
     // The layer's own mask, in its pixel grid.
     let mut own_mask = layer.mask.as_ref().and_then(|mask| {
         if ctx.interactive {
@@ -480,13 +660,14 @@ fn draw_layer_full(
             .map(|a| std::sync::Arc::as_ptr(&a.image) as usize)
             .unwrap_or(0);
         let (grown, inset) =
-            render_effects_cached(layer.id, &pixels, image_key, mask_grid.as_ref(), effects);
-        pixels = grown;
+            render_effects_cached(layer.id, pixels, image_key, mask_grid.as_ref(), effects);
+        owned_pixels = Some(grown);
+        pixels = owned_pixels.as_ref().expect("just stored");
         own_mask = None;
         if inset > 0.0 {
             // The grown grid lands where the layer was: the transform
             // grows by the margin around the same center.
-            transform = crate::effects::placed_transform(&layer.transform, &pixels, inset);
+            transform = crate::effects::placed_transform(&layer.transform, pixels, inset);
         }
     }
 
@@ -531,17 +712,17 @@ fn draw_layer_full(
     }
 
     // Where this layer lands, drawn through its transform.
-    let mut placed = Bitmap::new(target.width, target.height);
-    draw_layer_pixels(&pixels, &transform, &mut placed);
+    let mut placed = Bitmap::new(size.0, size.1);
+    draw_layer_pixels(pixels, &transform, &mut placed);
 
     // The own mask, folder masks and a live clipping source all multiply
     // coverage where the layer lands.
     if own_mask.is_some() || !folder_masks.is_empty() || clip.is_some() {
         let doc_to_grid =
             pixel_to_document(&transform, pixels.width as f64, pixels.height as f64).inverted();
-        for y in 0..target.height {
-            for x in 0..target.width {
-                let o = (y * target.width + x) * 4;
+        for y in 0..size.1 {
+            for x in 0..size.0 {
+                let o = (y * size.0 + x) * 4;
                 if placed.data[o + 3] == 0 {
                     continue;
                 }
@@ -561,7 +742,7 @@ fn draw_layer_full(
                     alpha *= mask_alpha_at(mask_grid, mask_placement, doc);
                 }
                 if let Some(coverage) = clip {
-                    let co = (y * target.width + x) * 4;
+                    let co = (y * size.0 + x) * 4;
                     alpha *= coverage.data[co + 3] as f32 / 255.0;
                 }
                 if alpha < 1.0 {
@@ -573,9 +754,9 @@ fn draw_layer_full(
         }
     }
 
-    // Blend onto the target with the layer's effective opacity and blend mode.
-    let opacity = ctx.opacity_of(layer.id);
-    blend_bitmap_onto(target, &placed, layer.blend_mode, opacity as f32);
+    // The blend onto the target stays with the walk (`draw_layer_full`'s
+    // tail): the placement cache re-runs exactly this call per frame.
+    Some((placed, layer.blend_mode))
 }
 
 /// An adjustment layer (`LiveMaskRenderer.adjust`): the adjustment applies to
@@ -1112,6 +1293,38 @@ mod tests {
         let out = draw_live_composite(&doc);
         assert_eq!(out.pixel(5, 5), [255, 0, 0, 255]);
         assert_eq!(out.pixel(15, 5), [0, 0, 255, 255]);
+    }
+
+    /// Ticket 51: the placement-cache walk must be bit-identical to the
+    /// full composite — cold cache, warm cache, with a fresh (never
+    /// cached) layer standing in for the stroke target, and with no fresh
+    /// layer at all.
+    #[test]
+    fn placement_cache_walk_matches_the_full_composite() {
+        let mut doc = CanvasDocument::new(24, 12);
+        let bottom = red_layer(&doc, 0.0, crate::blend::LayerBlendMode::Normal, 0.8);
+        let middle = red_layer(&doc, 6.0, crate::blend::LayerBlendMode::Multiply, 1.0);
+        let mut top = red_layer(&doc, 12.0, crate::blend::LayerBlendMode::Normal, 1.0);
+        top.mask = Some(LayerMask::solid(true));
+        doc.layers = vec![bottom, middle, top];
+        let fresh = doc.layers[1].id;
+
+        let mut full = Bitmap::new(24, 12);
+        composite_onto_interactive(&mut full, &doc, false);
+
+        let mut cache = PlacementCache::default();
+        let mut cold = Bitmap::new(24, 12);
+        composite_onto_with_placements(&mut cold, &doc, &mut cache, Some(fresh), false);
+        assert_eq!(cold.data, full.data, "cold cache");
+        assert!(cache.total_pixels() > 0, "the plain layers cached");
+
+        let mut warm = Bitmap::new(24, 12);
+        composite_onto_with_placements(&mut warm, &doc, &mut cache, Some(fresh), false);
+        assert_eq!(warm.data, full.data, "warm cache");
+
+        let mut all = Bitmap::new(24, 12);
+        composite_onto_with_placements(&mut all, &doc, &mut cache, None, false);
+        assert_eq!(all.data, full.data, "no fresh layer");
     }
 
     #[test]

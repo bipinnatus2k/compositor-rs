@@ -121,6 +121,21 @@ pub struct RasterEdit {
     /// pointer is kept so flush can end the stroke where the hand did.
     smoothing_anchor: Option<CGPoint>,
     smoothing_pointer: Option<CGPoint>,
+    /// The incrementally composed `result()` (ticket 51, ADR 0004): the
+    /// composed grid as of the last compose plus the grid-space region whose
+    /// coverage changed since. Coverage changes only where new stroke
+    /// geometry lands, so recomposing just that region reproduces a full
+    /// recompose bit for bit. The `RefCell` keeps `result(&self)`'s
+    /// signature; an edit is UI-thread state, never shared across threads.
+    result_cache: std::cell::RefCell<ResultCache>,
+}
+
+/// The incremental `result()` state (ticket 51). `bitmap` is `None` until
+/// the first compose; `dirty` accumulates until the next `result` consumes it.
+#[derive(Default)]
+struct ResultCache {
+    bitmap: Option<Bitmap>,
+    dirty: Option<CGRect>,
 }
 
 impl RasterEdit {
@@ -228,6 +243,7 @@ impl RasterEdit {
             lifted: None,
             smoothing_anchor: None,
             smoothing_pointer: None,
+            result_cache: std::cell::RefCell::new(ResultCache::default()),
         }
     }
 
@@ -332,7 +348,9 @@ impl RasterEdit {
         if count == 1 {
             // The first event is a zero-length segment: the initial click.
             let p = [point.x as f32, point.y as f32];
-            self.segments.push([p[0], p[1], p[0], p[1]]);
+            let segment = [p[0], p[1], p[0], p[1]];
+            self.note_result_dirty(self.segment_dirty(&segment));
+            self.segments.push(segment);
             self.walk_to(point, true);
             return;
         }
@@ -340,12 +358,18 @@ impl RasterEdit {
         // cursor; rendered separately so it never becomes permanent
         // (`appendContinuous`, BrushStroke.swift:252-266).
         let previous_sample = self.samples[count - 2];
+        // The tail moves: its old region must recompose back to base before
+        // the new tail lands (ticket 51's incremental result).
+        if let Some(old) = self.tail_segment {
+            self.note_result_dirty(self.segment_dirty(&old));
+        }
         self.tail_segment = Some([
             previous_sample.x as f32,
             previous_sample.y as f32,
             point.x as f32,
             point.y as f32,
         ]);
+        self.note_result_dirty(self.segment_dirty(self.tail_segment.as_ref().unwrap()));
         if count >= 3 {
             // The sample two back settles into a spline piece (the engine's
             // settled set and the dab grid's curve both consume it).
@@ -383,17 +407,24 @@ impl RasterEdit {
             self.curve(start, end, before, after);
             self.samples = vec![self.samples[n - 1]];
         }
+        // The provisional tail dies with the stroke: its region recomposes
+        // back to base before the final settled pieces stand alone.
+        if let Some(old) = self.tail_segment {
+            self.note_result_dirty(self.segment_dirty(&old));
+        }
         self.tail_segment = None;
     }
 
     fn extend_settled(&mut self, points: Vec<CGPoint>) {
         for pair in points.windows(2) {
-            self.segments.push([
+            let segment = [
                 pair[0].x as f32,
                 pair[0].y as f32,
                 pair[1].x as f32,
                 pair[1].y as f32,
-            ]);
+            ];
+            self.note_result_dirty(self.segment_dirty(&segment));
+            self.segments.push(segment);
         }
     }
 
@@ -574,6 +605,7 @@ impl RasterEdit {
         if affected.is_null() || affected.is_empty() {
             return;
         }
+        self.note_result_dirty(affected);
         let hard = self.settings.hardness >= 1.0;
         for y in affected.min_y() as usize..affected.max_y() as usize {
             for x in affected.min_x() as usize..affected.max_x() as usize {
@@ -676,6 +708,7 @@ impl RasterEdit {
             self.coverage = GrayMask::new(self.width, self.height);
             self.segments.clear();
             self.tail_segment = None;
+            self.note_result_dirty(self.grid_rect());
             return false;
         }
         for row in 0..rh {
@@ -688,6 +721,7 @@ impl RasterEdit {
         // is the healed pixels.
         self.segments.clear();
         self.tail_segment = None;
+        self.note_result_dirty(self.grid_rect());
         true
     }
 
@@ -736,8 +770,120 @@ impl RasterEdit {
     }
 
     /// The composed grid: original content + edit × coverage × opacity.
+    /// Incremental (ticket 51, ADR 0004): coverage changes only where new
+    /// stroke geometry lands, so the cache recomposes just the dirty region
+    /// onto the base — bit-identical to a full recompose, which the tests
+    /// pin against a from-scratch reference.
     pub fn result(&self) -> Bitmap {
-        let mut out = self.base.clone();
+        let coverage = self.effective_coverage();
+        let mut cache = self.result_cache.borrow_mut();
+        let cache = &mut *cache;
+        if cache.bitmap.is_none() {
+            cache.bitmap = Some(self.base.clone());
+            // Nothing is composed yet: the whole grid is due once.
+            cache.dirty = Some(match cache.dirty.take() {
+                Some(pending) => pending.union(&self.grid_rect()),
+                None => self.grid_rect(),
+            });
+        }
+        if let Some(dirty) = cache.dirty.take() {
+            let bitmap = cache.bitmap.as_mut().expect("composed above");
+            self.compose_region(bitmap, &coverage, dirty);
+        }
+        cache.bitmap.clone().expect("composed above")
+    }
+
+    /// The composed grid cropped to `rect` — bit-identical to the same
+    /// region of [`Self::result`] by construction (ticket 52's patch path).
+    /// `rect` is in grid coordinates; [`Self::dirty_document_rect`] speaks
+    /// document coordinates, so a patch consumer maps between them through
+    /// `pixel_to_document`.
+    pub fn result_in(&self, rect: CGRect) -> Bitmap {
+        crate::filters::crop_bitmap(&self.result(), &rect)
+    }
+
+    /// The stroke's document-space dirty box: every settled segment plus
+    /// the provisional tail (`dirtyDocumentRect`, BrushStroke.swift:132,
+    /// 492-494). Ticket 52 builds the overlay patch from it — note it
+    /// describes the stroke's current geometry only: regions the moving
+    /// tail vacated are the incremental `result` cache's concern, and a
+    /// patch consumer covering several frames must accumulate the boxes
+    /// itself.
+    pub fn dirty_document_rect(&self) -> Option<CGRect> {
+        let mut dirty: Option<CGRect> = None;
+        for segment in self.segments.iter().chain(self.tail_segment.iter()) {
+            let x0 = segment[0].min(segment[2]) as f64;
+            let x1 = segment[0].max(segment[2]) as f64;
+            let y0 = segment[1].min(segment[3]) as f64;
+            let y1 = segment[1].max(segment[3]) as f64;
+            let rect = CGRect::new(x0, y0, x1 - x0, y1 - y0);
+            dirty = Some(match dirty {
+                Some(existing) => existing.union(&rect),
+                None => rect,
+            });
+        }
+        dirty
+    }
+
+    fn grid_rect(&self) -> CGRect {
+        CGRect::new(0.0, 0.0, self.width as f64, self.height as f64)
+    }
+
+    /// Notes a grid-space region whose coverage changed. Over-estimates are
+    /// free — a recomposed pixel lands on the same bytes — so callers need
+    /// not be tight.
+    fn note_result_dirty(&self, rect: CGRect) {
+        if rect.is_null() || rect.is_empty() {
+            return;
+        }
+        let mut cache = self.result_cache.borrow_mut();
+        let cache = &mut *cache;
+        cache.dirty = Some(match cache.dirty.take() {
+            Some(existing) => existing.union(&rect),
+            None => rect,
+        });
+    }
+
+    /// The grid-space dirty box of one document-space engine segment,
+    /// inflated for the tip radius and the soft falloff's reach. The margin
+    /// divides by the tighter axis scale so a squashed grid over-covers —
+    /// an over-estimate is free, an under-estimate leaves stale bytes.
+    fn segment_dirty(&self, segment: &[f32; 4]) -> CGRect {
+        let inverse = self.pixel_to_document.inverted();
+        let a = CGPoint::new(segment[0] as f64, segment[1] as f64).applying(&inverse);
+        let b = CGPoint::new(segment[2] as f64, segment[3] as f64).applying(&inverse);
+        let scale_x = self.pixel_to_document.a.hypot(self.pixel_to_document.b);
+        let scale_y = self.pixel_to_document.c.hypot(self.pixel_to_document.d);
+        let scale = scale_x.min(scale_y).max(0.000_001);
+        let margin = self.settings.diameter / 2.0 / scale * 3.0 + 4.0;
+        let x0 = a.x.min(b.x) - margin;
+        let y0 = a.y.min(b.y) - margin;
+        CGRect::new(
+            x0,
+            y0,
+            a.x.max(b.x) + margin - x0,
+            a.y.max(b.y) + margin - y0,
+        )
+    }
+
+    /// Composes `coverage` into `out` within `dirty` (grid space): the
+    /// region resets to the base first — coverage can shrink back to zero
+    /// (the provisional tail moves each sample) and the compose skips
+    /// zero-coverage pixels — then runs the per-pixel compose, then the
+    /// selection clip. The per-pixel math is exactly the full compose's.
+    fn compose_region(&self, out: &mut Bitmap, coverage: &GrayMask, dirty: CGRect) {
+        let x0 = (dirty.min_x().floor().max(0.0) as usize).min(self.width);
+        let x1 = (dirty.max_x().ceil().max(0.0) as usize).min(self.width);
+        let y0 = (dirty.min_y().floor().max(0.0) as usize).min(self.height);
+        let y1 = (dirty.max_y().ceil().max(0.0) as usize).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for row in y0..y1 {
+            let start = (row * self.width + x0) * 4;
+            let end = (row * self.width + x1) * 4;
+            out.data[start..end].copy_from_slice(&self.base.data[start..end]);
+        }
         let opacity = self.settings.opacity as f32;
         let color: [u8; 4] = [
             (self.settings.red * 255.0).round() as u8,
@@ -747,68 +893,70 @@ impl RasterEdit {
         ];
         let erase = self.settings.erasing && !self.is_mask;
         let heal = self.settings.healing && !self.is_mask;
-        let coverage = self.effective_coverage();
-        for i in 0..(self.width * self.height) {
-            let cov = coverage.data[i] as u32;
-            if cov == 0 {
-                continue;
-            }
-            let x = (i % self.width) as f64 + 0.5;
-            let y = (i / self.width) as f64 + 0.5;
-            let o = i * 4;
-            if let Some((sample, offset)) = &self.clone {
-                // The sample, shifted by the source offset, painted through the
-                // coverage (document coordinates).
-                let doc = CGPoint::new(x, y).applying(&self.pixel_to_document);
-                let sx = (doc.x + offset.width).floor() as i64;
-                let sy = (doc.y + offset.height).floor() as i64;
-                if sx >= 0
-                    && sy >= 0
-                    && (sx as usize) < sample.width
-                    && (sy as usize) < sample.height
-                {
-                    let s = sample.pixel(sx as usize, sy as usize);
-                    if self.replaces_with_clone {
-                        // .copy: the destination is replaced outright —
-                        // src × (cov × opacity), no trace of what was below.
-                        let a = (cov as f32 / 255.0) * opacity;
-                        for c in 0..4 {
-                            out.data[o + c] = (s[c] as f32 * a) as u8;
-                        }
-                    } else {
-                        source_over_scaled(&mut out.data[o..o + 4], s, cov, opacity);
-                    }
+        for ly in y0..y1 {
+            for lx in x0..x1 {
+                let i = ly * self.width + lx;
+                let cov = coverage.data[i] as u32;
+                if cov == 0 {
+                    continue;
                 }
-            } else if erase {
-                // destinationOut: alpha shrinks by coverage × opacity.
-                let a = out.data[o + 3] as f32 * (1.0 - (cov as f32 / 255.0) * opacity);
-                out.data[o + 3] = a.round() as u8;
-            } else if heal {
-                // While painting, the area to heal shows as a dark wash; the
-                // session rebuilds it from its surroundings when the stroke ends.
-                let wash = [31u8, 31, 31, 255];
-                source_over_scaled(&mut out.data[o..o + 4], wash, cov, 0.45);
-            } else if self.is_mask {
-                // Painting a mask lays the foreground gray through the coverage.
-                let v = color[0];
-                let a = (cov as f32 / 255.0) * opacity;
-                let value = (out.data[o] as f32 * (1.0 - a) + v as f32 * a) as u8;
-                out.data[o] = value;
-                out.data[o + 1] = value;
-                out.data[o + 2] = value;
-            } else {
-                source_over_scaled(&mut out.data[o..o + 4], color, cov, opacity);
+                let x = lx as f64 + 0.5;
+                let y = ly as f64 + 0.5;
+                let o = i * 4;
+                if let Some((sample, offset)) = &self.clone {
+                    // The sample, shifted by the source offset, painted through the
+                    // coverage (document coordinates).
+                    let doc = CGPoint::new(x, y).applying(&self.pixel_to_document);
+                    let sx = (doc.x + offset.width).floor() as i64;
+                    let sy = (doc.y + offset.height).floor() as i64;
+                    if sx >= 0
+                        && sy >= 0
+                        && (sx as usize) < sample.width
+                        && (sy as usize) < sample.height
+                    {
+                        let s = sample.pixel(sx as usize, sy as usize);
+                        if self.replaces_with_clone {
+                            // .copy: the destination is replaced outright —
+                            // src × (cov × opacity), no trace of what was below.
+                            let a = (cov as f32 / 255.0) * opacity;
+                            for c in 0..4 {
+                                out.data[o + c] = (s[c] as f32 * a) as u8;
+                            }
+                        } else {
+                            source_over_scaled(&mut out.data[o..o + 4], s, cov, opacity);
+                        }
+                    }
+                } else if erase {
+                    // destinationOut: alpha shrinks by coverage × opacity.
+                    let a = out.data[o + 3] as f32 * (1.0 - (cov as f32 / 255.0) * opacity);
+                    out.data[o + 3] = a.round() as u8;
+                } else if heal {
+                    // While painting, the area to heal shows as a dark wash; the
+                    // session rebuilds it from its surroundings when the stroke ends.
+                    let wash = [31u8, 31, 31, 255];
+                    source_over_scaled(&mut out.data[o..o + 4], wash, cov, 0.45);
+                } else if self.is_mask {
+                    // Painting a mask lays the foreground gray through the coverage.
+                    let v = color[0];
+                    let a = (cov as f32 / 255.0) * opacity;
+                    let value = (out.data[o] as f32 * (1.0 - a) + v as f32 * a) as u8;
+                    out.data[o] = value;
+                    out.data[o + 1] = value;
+                    out.data[o + 2] = value;
+                } else {
+                    source_over_scaled(&mut out.data[o..o + 4], color, cov, opacity);
+                }
             }
         }
         // The selection clips the whole edit: outside it the base shows again.
         if let Some(clip) = &self.selection_clip {
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    let alpha = self.clip_alpha(clip, x, y);
+            for ly in y0..y1 {
+                for lx in x0..x1 {
+                    let alpha = self.clip_alpha(clip, lx, ly);
                     if alpha >= 1.0 {
                         continue;
                     }
-                    let i = y * self.width + x;
+                    let i = ly * self.width + lx;
                     if coverage.data[i] == 0 {
                         continue;
                     }
@@ -822,7 +970,6 @@ impl RasterEdit {
                 }
             }
         }
-        out
     }
 
     /// `paintSnapshot`: the composed pixels, cropped to the tight bounds of
@@ -1542,6 +1689,132 @@ mod tests {
 
     fn blank_layer_transform() -> LayerTransform {
         LayerTransform::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0))
+    }
+
+    /// The full-recompose reference the incremental `result()` (ticket 51)
+    /// must reproduce bit for bit: the whole grid through the same
+    /// `compose_region` the incremental path runs.
+    fn result_reference(edit: &RasterEdit) -> Bitmap {
+        let coverage = edit.effective_coverage();
+        let mut out = edit.base.clone();
+        edit.compose_region(
+            &mut out,
+            &coverage,
+            CGRect::new(0.0, 0.0, edit.width as f64, edit.height as f64),
+        );
+        out
+    }
+
+    /// Asserts the incremental result against the reference at every step
+    /// of a stroke (settled pieces, moving tail, flush) in the given mode.
+    fn assert_incremental_result_tracks_the_reference(mut edit: RasterEdit) {
+        edit.append(CGPoint::new(20.0, 20.0));
+        assert_eq!(edit.result().data, result_reference(&edit).data);
+        for step in 1..=6 {
+            edit.append_smoothed(CGPoint::new(
+                20.0 + step as f64 * 9.0,
+                20.0 + step as f64 * 7.0,
+            ));
+            assert_eq!(
+                edit.result().data,
+                result_reference(&edit).data,
+                "step {step}"
+            );
+        }
+        edit.flush();
+        assert_eq!(edit.result().data, result_reference(&edit).data);
+    }
+
+    /// Ticket 51: the incremental `result()` composes only the dirty
+    /// region, so it must land on the full recompose's bytes at every
+    /// append — paint, erase and mask strokes exercise the compose
+    /// branches, and the moving provisional tail exercises coverage
+    /// shrinking back to zero.
+    #[test]
+    fn incremental_result_matches_the_full_recompose() {
+        let mut paint = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        paint.settings.hardness = 0.5;
+        paint.settings.diameter = 30.0;
+        assert_incremental_result_tracks_the_reference(paint);
+
+        let mut erase = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        erase.settings.hardness = 0.3;
+        erase.settings.erasing = true;
+        assert_incremental_result_tracks_the_reference(erase);
+
+        let mut mask = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            true,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        mask.settings.hardness = 0.5;
+        assert_incremental_result_tracks_the_reference(mask);
+    }
+
+    /// `result_in` is the same pixels cropped: the full rect is `result`
+    /// bit for bit, and a sub-rect matches the same region of `result`.
+    #[test]
+    fn result_in_crops_result_bit_identically() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        edit.settings.hardness = 0.5;
+        edit.append_smoothed(CGPoint::new(20.0, 20.0));
+        edit.append_smoothed(CGPoint::new(70.0, 60.0));
+        let full = edit.result();
+        assert_eq!(edit.result_in(full.bounds()).data, full.data);
+        let crop = edit.result_in(CGRect::new(15.0, 15.0, 30.0, 25.0));
+        for y in 0..crop.height {
+            for x in 0..crop.width {
+                assert_eq!(
+                    crop.pixel(x, y),
+                    full.pixel(15 + x, 15 + y),
+                    "crop at {x},{y}"
+                );
+            }
+        }
+    }
+
+    /// `dirty_document_rect` spans every settled segment plus the tail.
+    #[test]
+    fn dirty_document_rect_spans_the_stroke() {
+        let mut edit = RasterEdit::new(
+            None,
+            blank_layer_transform(),
+            false,
+            BrushSettings::default(),
+            CGSize::new(100.0, 100.0),
+            None,
+        );
+        assert!(edit.dirty_document_rect().is_none());
+        edit.append(CGPoint::new(20.0, 20.0));
+        edit.append(CGPoint::new(80.0, 20.0));
+        let dirty = edit.dirty_document_rect().expect("the stroke's dirty box");
+        assert!(dirty.min_x() <= 20.0 && dirty.max_x() >= 80.0);
+        // The provisional tail to the newest sample is inside too.
+        assert!(dirty.min_y() <= 20.0 && dirty.max_y() >= 20.0);
     }
 
     #[test]
@@ -2508,6 +2781,7 @@ mod heal_trim_tests {
             edit.coverage = GrayMask::new(edit.width, edit.height);
             edit.segments.clear();
             edit.tail_segment = None;
+            edit.note_result_dirty(edit.grid_rect());
             return false;
         }
         for row in 0..rh {
@@ -2518,6 +2792,7 @@ mod heal_trim_tests {
         edit.coverage = GrayMask::new(edit.width, edit.height);
         edit.segments.clear();
         edit.tail_segment = None;
+        edit.note_result_dirty(edit.grid_rect());
         true
     }
 

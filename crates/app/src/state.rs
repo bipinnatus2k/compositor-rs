@@ -259,8 +259,15 @@ pub struct ProjectWorkspaceView {
     /// and pan live on the session's `CanvasViewport` (per tab, ticket 38)
     /// and redraw through the paint transform without touching this.
     pub revision: u64,
+    /// The live-preview epoch (ticket 51, ADR 0004): bumped per move by the
+    /// canvas's drag gestures, whose results stay uncommitted until mouse-up.
+    /// It repaints without invalidating the document-level caches — the
+    /// mirror of Swift's `brushRevision` (EditorCanvas.swift:506-517's
+    /// DisplayState comparison).
+    pub live_epoch: u64,
     frame_image: Option<Arc<RenderImage>>,
     frame_image_rev: u64,
+    frame_image_live: u64,
     /// The tab the cached frame was rendered for — the cache key is
     /// `(tab_id, revision)`, so switching tabs never shows a stale frame.
     frame_image_tab: crate::project::TabId,
@@ -270,6 +277,12 @@ pub struct ProjectWorkspaceView {
     /// window update the current window is absent from `App::windows`, so
     /// the drop must go through the rendering `Window` itself.
     retired_frame_images: Vec<Arc<RenderImage>>,
+    /// The live frames' placement cache (ticket 51, ADR 0004) with its
+    /// `(tab, revision)` key: cleared and rebuilt whenever either moves —
+    /// the live epoch is deliberately absent, since the cache exists to
+    /// survive stroke moves.
+    placements: compositor_core::render::PlacementCache,
+    placements_key: (crate::project::TabId, u64),
     /// The active tab's content (Swift `ContentView`, ADR 0003 step F /
     /// ticket 43): a fresh entity per tab, rebuilt by [`Self::sync_content`]
     /// whenever the workspace's selected tab changed — the `.id(workspace
@@ -439,10 +452,14 @@ impl ProjectWorkspaceView {
             workspace,
             focus: cx.focus_handle(),
             revision: 1,
+            live_epoch: 0,
             frame_image: None,
             frame_image_rev: 0,
+            frame_image_live: 0,
             frame_image_tab: crate::project::TabId::nil(),
             retired_frame_images: Vec::new(),
+            placements: Default::default(),
+            placements_key: (crate::project::TabId::nil(), 0),
             content: None,
             sheet: None,
             panels: crate::ui::floating_panel::FloatingPanels::new(),
@@ -928,6 +945,15 @@ impl ProjectWorkspaceView {
         cx.notify();
     }
 
+    /// The live-preview variant (ticket 51): drag gestures call this per
+    /// move — the frame rebuilds, the document revision (and with it the
+    /// composite caches) stays put until the gesture commits through
+    /// `touch`.
+    pub fn touch_live(&mut self, cx: &mut Context<Self>) {
+        self.live_epoch += 1;
+        cx.notify();
+    }
+
     /// The touch-without-notify variant: writes the repaint epoch when the
     /// caller notifies separately (`apply_filter_preview`'s panel handlers
     /// run `touch` right after, and the defringe sample paths notify
@@ -1095,28 +1121,56 @@ impl ProjectWorkspaceView {
     /// it previews (stroke/warp/shape/gradient) lives on the canvas view
     /// since ticket 39, so the caller snapshots it into `gesture`; the
     /// preview branches and the branch order are unchanged.
-    pub(crate) fn composite(&self, gesture: CanvasGesture, cx: &App) -> Option<Bitmap> {
+    pub(crate) fn composite(&mut self, gesture: CanvasGesture, cx: &App) -> Option<Bitmap> {
         invalidation_counter::composite(cx);
-        let session = self.current_tab(cx).session.read(cx);
-        let document = session.document.as_ref()?;
-        // While the inline text editor is open, its draft's layer is held
-        // out of the composite (`EditorCanvas`'s draw loop skips
-        // `layer.id == session.textDraft?.layerID`): the overlay input paints
-        // the live text, and the layer's stale raster would double it from
-        // underneath. The layer returns as soon as the draft is committed or
-        // cancelled — no draft, no skip — and every other layer, plus the
-        // preview branches below, compose as usual against the rest.
-        let held = session
-            .text_draft
-            .as_ref()
-            .and_then(|draft| draft.layer_id)
-            .map(|id| {
-                let mut doc = document.clone();
-                doc.layers.retain(|layer| layer.id != id);
-                doc
-            });
-        let document = held.as_ref().unwrap_or(document);
-        let active_id = session.active_layer_id;
+        // The effects cache's clearing policy (ticket 51, ADR 0004): the
+        // core composite no longer clears it per pass — entries key on the
+        // pixels' `Arc` identity, so a stroke frame keeps every other
+        // layer's entries (the stroked layer's are dropped after the
+        // composite: its pixels are a fresh grid each move) while every
+        // other frame clears fully, preserving the safety the
+        // unconditional clear used to provide for mask and pixel edits,
+        // whose identity never reaches the effects key.
+        if !matches!(gesture.drag, Some(CanvasDrag::Stroke(..))) {
+            compositor_core::render::clear_effects_cache();
+        }
+        // The live branches rework the active layer's pixels in a transient
+        // copy of the document, so everything the session contributes is
+        // collected up front and the document is owned from here on — the
+        // placement cache then borrows the shell mutably (ticket 51).
+        let (mut document, active_id, pixel_move, transform_live) = {
+            let session = self.current_tab(cx).session.read(cx);
+            let document = session.document.as_ref()?.clone();
+            // While the inline text editor is open, its draft's layer is held
+            // out of the composite (`EditorCanvas`'s draw loop skips
+            // `layer.id == session.textDraft?.layerID`): the overlay input paints
+            // the live text, and the layer's stale raster would double it from
+            // underneath. The layer returns as soon as the draft is committed or
+            // cancelled — no draft, no skip — and every other layer, plus the
+            // preview branches below, compose as usual against the rest.
+            let held = session
+                .text_draft
+                .as_ref()
+                .and_then(|draft| draft.layer_id)
+                .map(|id| {
+                    let mut doc = document.clone();
+                    doc.layers.retain(|layer| layer.id != id);
+                    doc
+                });
+            let document = held.unwrap_or(document);
+            let pixel_move = session
+                .pixel_move
+                .as_ref()
+                .and_then(|move_state| move_state.moved_pixels())
+                .zip(session.active_layer().map(|layer| layer.transform));
+            let transform_live = session.transform_edit.is_some();
+            (
+                document,
+                session.active_layer_id,
+                pixel_move,
+                transform_live,
+            )
+        };
         let override_pixels =
             |doc: &mut CanvasDocument, pixels: &Bitmap, transform: LayerTransform| {
                 if let Some(id) = active_id
@@ -1131,46 +1185,42 @@ impl ProjectWorkspaceView {
         // other preview places by the layer's own.
         let preview_placement = self.preview_grown_transform.or(self.preview_base_transform);
         if let (Some(preview), Some(base_transform)) = (&self.preview, preview_placement) {
-            let mut doc = document.clone();
-            override_pixels(&mut doc, preview, base_transform);
-            return Some(self.composite_bitmap(&doc, cx));
+            override_pixels(&mut document, preview, base_transform);
+            return Some(self.composite_live(document, active_id, transform_live, cx));
         }
         // A pixel move shows the lifted pixels rebuilt at the offset, placed
         // by the layer's own transform (the rebuilt grid is the layer's).
-        if let Some(move_state) = &session.pixel_move
-            && let Some(pixels) = move_state.moved_pixels()
-            && let Some(layer) = session.active_layer()
-        {
-            let mut doc = document.clone();
-            override_pixels(&mut doc, &pixels, layer.transform);
-            return Some(self.composite_bitmap(&doc, cx));
+        if let Some((pixels, transform)) = pixel_move {
+            override_pixels(&mut document, &pixels, transform);
+            return Some(self.composite_live(document, active_id, transform_live, cx));
         }
         // A stroke in progress overrides the active layer too.
         if let Some(CanvasDrag::Stroke(edit, _)) = gesture.drag {
             let result = edit.result();
-            let mut doc = document.clone();
-            override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(self.composite_bitmap(&doc, cx));
+            override_pixels(&mut document, &result, edit.paint_transform);
+            return Some(self.composite_live(document, active_id, transform_live, cx));
         }
         // A Smudge / Liquify stroke shows its document-size working copy in
         // place of the layer, exactly as the Swift canvas does.
         if let Some(CanvasDrag::Warp(stroke)) = gesture.drag {
-            let mut doc = document.clone();
+            let size = document.size();
             override_pixels(
-                &mut doc,
+                &mut document,
                 stroke.image(),
                 compositor_core::transform::LayerTransform::new(
                     compositor_core::geometry::CGPoint::ZERO,
-                    document.size(),
+                    size,
                 ),
             );
-            return Some(self.composite_bitmap(&doc, cx));
+            return Some(self.composite_live(document, active_id, transform_live, cx));
         }
-        // The Shape tool previews its layer live while dragging.
+        // The Shape tool previews its layer live while dragging. Its preview
+        // is an extra top layer, not an override of the active one, so it
+        // stays on the full composite path (the placement cache changes
+        // nothing for it — the synthetic layer renders fresh either way).
         if let Some(CanvasDrag::Shape { .. }) = gesture.drag
             && let (Some(shape), Some(rect)) = (gesture.shape_shape, gesture.shape_rect)
         {
-            let mut doc = document.clone();
             let raster = render::render_shape_image(
                 shape,
                 rect.width().round() as usize,
@@ -1188,17 +1238,63 @@ impl ProjectWorkspaceView {
             );
             layer.transform =
                 compositor_core::transform::LayerTransform::new(rect.origin, rect.size);
-            doc.layers.push(layer);
-            return Some(self.composite_bitmap(&doc, cx));
+            document.layers.push(layer);
+            return Some(self.composite_bitmap(&document, cx));
         }
         // A gradient drag previews the fill.
         if let Some(CanvasDrag::Gradient(edit, start, _)) = gesture.drag {
             let result = self.gradient_result(edit, *start, gesture.gradient_cursor, cx);
-            let mut doc = document.clone();
-            override_pixels(&mut doc, &result, edit.paint_transform);
-            return Some(self.composite_bitmap(&doc, cx));
+            override_pixels(&mut document, &result, edit.paint_transform);
+            return Some(self.composite_live(document, active_id, transform_live, cx));
         }
-        Some(render::draw_live_composite(document))
+        Some(render::draw_live_composite(&document))
+    }
+
+    /// The live-preview composite (ticket 51, ADR 0004): plain layers come
+    /// from the placement cache — keyed by (tab, document revision), which
+    /// the live epoch deliberately stays out of, since the cache exists to
+    /// survive stroke moves — and the active layer renders fresh. During a
+    /// transform edit the placements would bake the interactive mask
+    /// resamples, so the full path takes over.
+    fn composite_live(
+        &mut self,
+        document: CanvasDocument,
+        active_id: Option<uuid::Uuid>,
+        transform_live: bool,
+        cx: &App,
+    ) -> Bitmap {
+        if transform_live {
+            return self.composite_bitmap(&document, cx);
+        }
+        let tab_id = self.workspace.read(cx).selected_id();
+        if self.placements_key != (tab_id, self.revision) {
+            self.placements.clear();
+            self.placements_key = (tab_id, self.revision);
+        }
+        let mut canvas = Bitmap::new(document.width.max(1), document.height.max(1));
+        compositor_core::render::composite_onto_with_placements(
+            &mut canvas,
+            &document,
+            &mut self.placements,
+            active_id,
+            false,
+        );
+        // The active layer's effects re-render every move (its pixels are a
+        // fresh grid); dropping its entries keeps the cache to the stable
+        // layers the next frame hits.
+        if let Some(id) = active_id {
+            compositor_core::render::clear_effects_cache_for(id);
+        }
+        // The placement budget: the original's TiledPieceCache caps its LRU
+        // at 150M pixels (~600MB of RGBA), and the port keeps the same
+        // figure — a placement is a full canvas per cached layer, so the
+        // budget admits roughly three 12MP layers. Beyond it the cache
+        // resets and the next live frame rebuilds: coarse, but bounded.
+        const PLACEMENT_PIXEL_BUDGET: usize = 150_000_000;
+        if self.placements.total_pixels() > PLACEMENT_PIXEL_BUDGET {
+            self.placements.clear();
+        }
+        canvas
     }
 
     pub(crate) fn gradient_result(
@@ -1228,14 +1324,16 @@ impl ProjectWorkspaceView {
         edit.fill_gradient(settings.shape, start, end, colors, settings.opacity)
     }
 
-    /// The cached BGRA texture for the composite, rebuilt when the tab or the
-    /// revision changes (cache key `(tab_id, revision)` — design doc §1). A
-    /// rebuild retires the previous texture into `retired_frame_images` for
-    /// the canvas render to drop from the sprite atlas (ticket 50).
+    /// The cached BGRA texture for the composite, rebuilt when the tab, the
+    /// document revision or the live epoch changes (cache key
+    /// `(tab_id, revision, live_epoch)`, ticket 51's split — design doc §1).
+    /// A rebuild retires the previous texture into `retired_frame_images`
+    /// for the canvas render to drop from the sprite atlas (ticket 50).
     pub fn frame_image(&mut self, composite: &Bitmap, cx: &App) -> Arc<RenderImage> {
         let tab_id = self.workspace.read(cx).selected_id();
         if self.frame_image.is_none()
             || self.frame_image_rev != self.revision
+            || self.frame_image_live != self.live_epoch
             || self.frame_image_tab != tab_id
         {
             invalidation_counter::frame_rebuild(cx);
@@ -1244,6 +1342,7 @@ impl ProjectWorkspaceView {
             }
             self.frame_image = Some(bgra_render_image(composite));
             self.frame_image_rev = self.revision;
+            self.frame_image_live = self.live_epoch;
             self.frame_image_tab = tab_id;
         }
         self.frame_image.clone().unwrap()
@@ -2354,10 +2453,11 @@ mod tests {
         }
 
         /// One brush move through the production move branch
-        /// (editor_canvas.rs:885-897 plus the trailing `touch`): append the
-        /// smoothed point, keep the line anchor current, then invalidate.
-        /// The branch's `brush_last_pixel` write is private and feeds only
-        /// the Shift axis, so the mirror leaves it out.
+        /// (editor_canvas.rs's Stroke arm plus the trailing `touch_live`):
+        /// append the smoothed point, keep the line anchor current, then
+        /// bump the live epoch. The branch's `brush_last_pixel` write is
+        /// private and feeds only the Shift axis, so the mirror leaves it
+        /// out.
         fn stroke_move(
             canvas: &Entity<EditorCanvasView>,
             cx: &mut gpui_kit::VisualTestContext,
@@ -2372,7 +2472,7 @@ mod tests {
                         }
                     });
                 }
-                view.touch(cx);
+                view.touch_live(cx);
             });
         }
 
@@ -2416,6 +2516,57 @@ mod tests {
                     0
                 ],
                 "stroke drag: (root_notify, composite, frame_rebuild, thumbnail_regen, mask)"
+            );
+            // Ticket 51's epoch split: the moves repaint through the live
+            // epoch — the document revision (the composite caches'
+            // invalidation key) does not move until mouse-up commits.
+            let (revision, live) = root.read_with(&cx, |root, _| (root.revision, root.live_epoch));
+            assert_eq!(live, STROKE_MOVES as u64, "each move bumps the live epoch");
+            assert_eq!(revision, 1, "a stroke in progress never bumps the revision");
+        }
+
+        /// The placement cache across a multi-layer stroke (ticket 51): the
+        /// neighbors render once and the stroke frames re-blend them, so
+        /// the cache holds their placements while the revision stays put.
+        #[gpui_kit::test]
+        fn stroke_drag_caches_the_neighbor_layers(cx: &mut TestAppContext) {
+            cx.update(gpui_kit::init);
+            cx.update(invalidation_counter::install);
+            let (root, mut cx) = open_scenario_window(cx);
+            let session = active_session(&root, &cx);
+            seed_layers(&mut cx, &session, 0);
+            session.update(&mut cx, |session, _| {
+                session.tool = NavigationTool::Brush;
+                session.brush_settings.diameter = 20.0;
+            });
+            let canvas = canvas_view(&root, &cx);
+            render_frame(&mut cx); // warm the caches; the tallies start clean
+
+            cx.update(|_, cx| invalidation_counter::reset(cx));
+            canvas.update(&mut cx, |view, cx| {
+                view.begin_stroke(CGPoint::new(12.0, 32.0), false, cx)
+            });
+            for step in 0..STROKE_MOVES {
+                let x = 12.0 + (step + 1) as f64 * 8.0;
+                stroke_move(&canvas, &mut cx, CGPoint::new(x, 32.0));
+            }
+            let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
+            assert_eq!(
+                counts[..3],
+                [
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64,
+                    STROKE_MOVES as u64
+                ],
+                "stroke frames: (root_notify, composite, frame_rebuild)"
+            );
+            let (revision, cached_pixels) = root.read_with(&cx, |root, _| {
+                (root.revision, root.placements.total_pixels())
+            });
+            assert_eq!(revision, 1, "the stroke never bumps the revision");
+            assert!(
+                cached_pixels > 0,
+                "the neighbor layers' placements are cached across the stroke"
             );
         }
 
@@ -2461,7 +2612,7 @@ mod tests {
                         view.shape_shape = Some(shape);
                         view.shape_rect = Some(rect);
                     }
-                    view.touch(cx);
+                    view.touch_live(cx);
                 });
             }
             let counts = cx.update(|_, cx| invalidation_counter::snapshot(cx));
